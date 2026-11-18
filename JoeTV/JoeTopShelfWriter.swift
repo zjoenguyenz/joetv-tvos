@@ -38,8 +38,8 @@ import UIKit
 
 /// The extension's JSON contract (mirror of ShelfDoc in
 /// TopShelfProvider.swift — keep in sync).
-private struct ShelfDoc: Codable {
-    struct Item: Codable {
+private struct ShelfDoc: Codable, Sendable {
+    struct Item: Codable, Sendable {
         var id = ""
         var title = ""
         var backdrop = ""   // file name inside the container
@@ -60,7 +60,7 @@ enum JoeTopShelfWriter {
     private static let minRewriteInterval: TimeInterval = 120
 
     /// One trending title from TMDB (popularity order kept).
-    struct TrendingTitle {
+    struct TrendingTitle: Sendable {
         var tmdbId = ""
         var type = ""          // "movie" | "tv"
         var title = ""

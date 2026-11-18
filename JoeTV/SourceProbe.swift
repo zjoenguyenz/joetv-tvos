@@ -15,7 +15,7 @@ import Foundation
 /// that memo, so the launch gate's phase 2 reuses it instead
 /// of fetching the same endpoints a second time (Idea 17).
 enum SourceProbe {
-    struct Result {
+    struct Result: Sendable {
         var name: String
         var ok: Bool
         var millis: Int
@@ -133,7 +133,10 @@ enum SourceProbe {
 /// findAlternatives pattern): the fetch task and the fuse
 /// timer publish here; the FIRST outcome wins and later
 /// publications are dropped.
-private final class KKProbeBox {
+/// Swift 6: @unchecked Sendable — `result` is written and read
+/// only under `lock`, first-write-wins, exactly like the other
+/// race boxes in this layer.
+private final class KKProbeBox: @unchecked Sendable {
     enum Outcome {
         case count(Int)
         case failed

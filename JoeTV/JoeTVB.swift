@@ -200,7 +200,8 @@ struct TVBTitle: Codable, Sendable, Identifiable {
                 idMatched: record.matchKey != "fallback"))
         }
         return TVBRouteContext(
-            tmdbId: tmdbId, imdbId: imdbId ?? "", holders: holders)
+            tmdbId: tmdbId, imdbId: imdbId ?? "", holders: holders,
+            backdropPath: backdropPath ?? "")
     }
 
     /// The primary holder's dub form, exactly as the provider

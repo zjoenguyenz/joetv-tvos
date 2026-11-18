@@ -56,7 +56,11 @@ enum KkClient {
     /// concurrently and the pre-v1.9 plain static var was
     /// unsynchronised shared mutable state.
     private static let hostLock = NSLock()
-    private static var _activeHost = -1
+    // Swift 6: nonisolated(unsafe) — every access to _activeHost
+    // is serialized by hostLock (see activeHost / setActiveHost);
+    // the value is a plain Int diagnostic and the lock discipline
+    // predates and survives the migration unchanged.
+    private nonisolated(unsafe) static var _activeHost = -1
     static var activeHost: Int {
         hostLock.lock()
         defer { hostLock.unlock() }
@@ -75,8 +79,8 @@ enum KkClient {
     /// answer (the {"status":false} stub class) never wins — it
     /// is recorded as an error and the race runs on. When every
     /// host fails, the last error received is thrown.
-    private static func fetchJSON(path: @escaping (Bool) -> String,
-                                  shape: @escaping ([String: Any]) -> Bool,
+    private static func fetchJSON(path: @escaping @Sendable (Bool) -> String,
+                                  shape: @escaping @Sendable ([String: Any]) -> Bool,
                                   timeout: TimeInterval = 25,
                                   health: (provider: String,
                                            stage: SourceHealth.Stage,
@@ -375,7 +379,11 @@ enum KkClient {
 /// FIRST shape-valid answer the moment it lands — cancelled
 /// losers are never awaited. A failed host also settles, so
 /// an all-fail race ends as soon as the last host reports.
-private final class KkRaceBox {
+/// Swift 6: @unchecked Sendable — every stored property is
+/// touched only under `lock`, and the published root is an
+/// immutable JSON snapshot produced by JSONSerialization and
+/// never mutated after publication.
+private final class KkRaceBox: @unchecked Sendable {
     private let lock = NSLock()
     private var winnerValue: (host: Int, root: [String: Any])?
     private var errorValue: Error?

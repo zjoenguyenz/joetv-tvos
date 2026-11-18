@@ -38,7 +38,12 @@ enum PerfLog {
 
 /// Collects one task's metrics for PerfLog (Phase 0). A fresh
 /// instance per call; URLSession retains it until the task ends.
-private final class JoeMetricsCollector: NSObject, URLSessionTaskDelegate {
+/// Swift 6: @unchecked Sendable because `metrics` is written by
+/// the session's delegate callback and read only after the
+/// awaited data(for:delegate:) call returns — the task's
+/// completion is the happens-before edge, but the compiler
+/// cannot see it through the delegate protocol.
+private final class JoeMetricsCollector: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     var metrics: URLSessionTaskMetrics?
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didFinishCollecting metrics: URLSessionTaskMetrics) {

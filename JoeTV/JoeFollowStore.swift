@@ -17,7 +17,7 @@ import UserNotifications
 final class FollowStore: ObservableObject {
     static let shared = FollowStore()
 
-    struct FollowedTitle: Codable, Identifiable, Equatable {
+    struct FollowedTitle: Codable, Identifiable, Equatable, Sendable {
         var provider: String
         var slug: String
         var title: String
@@ -140,7 +140,7 @@ final class FollowStore: ObservableObject {
 final class MatchReminderStore: ObservableObject {
     static let shared = MatchReminderStore()
 
-    struct Reminder: Codable, Identifiable, Equatable {
+    struct Reminder: Codable, Identifiable, Equatable, Sendable {
         var matchKey: String
         var title: String
         var kickoff: Date

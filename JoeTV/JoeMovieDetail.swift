@@ -256,7 +256,29 @@ struct JoeMovieDetail: View {
             }
             let movie = detail.movie
             var info: TMDBInfo?
-            if !movie.tmdbId.isEmpty {
+            if let tvbCtx = route.tvb {
+                // Swift 6 round (fault c, owner device test
+                // of 2.0.31): a TVB session's enrichment is
+                // pinned to the SNAPSHOT identity — its TMDB
+                // id, as "tv" — never to the provider
+                // payload's own tmdbId/tmdbType stamps. The
+                // pre-fix task trusted those stamps: a
+                // payload whose tmdbType was "" or "movie"
+                // made TMDBClient resolve the id in the
+                // MOVIE namespace (its kind rule maps every
+                // non-"tv" type to "movie"), and TMDB's
+                // numeric ids are per-type namespaces, so a
+                // same-numbered film's overview / backdrop /
+                // cast / rating painted over the correct
+                // TVB detail — the wrong-film INFO the owner
+                // still saw after the L7 draw gate, which
+                // only ever verified the provider payload,
+                // never this layer. tvbPinnedIdentity has
+                // always pinned the identity ladder this
+                // way; the enrichment now takes the same pin.
+                info = await TMDBClient.fetchInfo(
+                    tmdbId: "\(tvbCtx.tmdbId)", type: "tv")
+            } else if !movie.tmdbId.isEmpty {
                 info = await TMDBClient.fetchInfo(
                     tmdbId: movie.tmdbId, type: movie.tmdbType)
             }
@@ -301,10 +323,24 @@ struct JoeMovieDetail: View {
             // chain: no key / no TMDB id / a failed call
             // leaves the logo empty and the text title stands.
             tmdbLogoURL = ""
-            guard let detail, !TMDBClient.apiKey.isEmpty,
-                  !detail.movie.tmdbId.isEmpty else { return }
+            guard let detail, !TMDBClient.apiKey.isEmpty else { return }
+            // Swift 6 round (fault c): the logo takes the
+            // same snapshot pin as the enrichment task above
+            // — a TVB session resolves its logo by the
+            // snapshot's TMDB id as "tv", never by the
+            // provider payload's stamps (see there).
+            let logoId: String
+            let logoType: String
+            if let tvbCtx = route.tvb {
+                logoId = "\(tvbCtx.tmdbId)"
+                logoType = "tv"
+            } else {
+                guard !detail.movie.tmdbId.isEmpty else { return }
+                logoId = detail.movie.tmdbId
+                logoType = detail.movie.tmdbType
+            }
             let logo = await TMDBClient.fetchLogo(
-                tmdbId: detail.movie.tmdbId, type: detail.movie.tmdbType)
+                tmdbId: logoId, type: logoType)
             guard !Task.isCancelled else { return }
             tmdbLogoURL = logo
         }
@@ -2655,8 +2691,21 @@ private struct JoeCastCellLabel: View {
     /// the search runs only when a backdrop is still needed
     /// after fetchInfo; the async-let gate keeps the call
     /// itself inside the concurrent leg.
+    /// Swift 6 round (fault c): a TVB session NEVER runs
+    /// the name search — a search-by-name backdrop is
+    /// unverifiable against the snapshot identity, so the
+    /// hunt's leg is the snapshot's OWN backdrop path for
+    /// this title (carried in the route context), or
+    /// nothing. The provider thumb / poster stages behind
+    /// the band are unaffected.
     private func backdropHunt(needed: Bool, movie: Movie) async -> String? {
         guard needed else { return nil }
+        if let tvbCtx = route.tvb {
+            let path = tvbCtx.backdropPath
+            guard !path.isEmpty else { return nil }
+            return "https://image.tmdb.org/t/p/w1280"
+                + (path.hasPrefix("/") ? path : "/" + path)
+        }
         return await TMDBClient.searchBackdrop(
             name: movie.name, origin: movie.originName,
             year: Providers.yearOf(movie))
@@ -2665,7 +2714,15 @@ private struct JoeCastCellLabel: View {
     /// TMDB cast for the staged TMDB task (Phase 2): cast
     /// exists only when a TMDB id exists — the same rule the
     /// serial chain applied.
+    /// Swift 6 round (fault c): a TVB session's cast is
+    /// fetched by the snapshot pin (its TMDB id, as "tv"),
+    /// like the enrichment above — never by the provider
+    /// payload's stamps.
     private func castIfAvailable(movie: Movie) async -> [TMDBCastMember] {
+        if let tvbCtx = route.tvb {
+            return await TMDBClient.fetchCast(
+                tmdbId: "\(tvbCtx.tmdbId)", type: "tv")
+        }
         guard !movie.tmdbId.isEmpty else { return [] }
         return await TMDBClient.fetchCast(
             tmdbId: movie.tmdbId, type: movie.tmdbType)
@@ -2992,7 +3049,8 @@ private struct JoeCastCellLabel: View {
                     first = await JoeMovieDetail.torrentFallbackCandidates(
                         identity: identity, originDetail: detail,
                         originProvider: provider, highQualityOnly: true,
-                        pinnedImdbId: tvb?.imdbId ?? "")
+                        pinnedImdbId: tvb?.imdbId ?? "",
+                        pinnedTmdbId: tvb.map { "\($0.tmdbId)" } ?? "")
                 }
                 // First call for the ORIGIN identity: the
                 // on-screen detail IS the metadata (see the
@@ -3117,7 +3175,8 @@ private struct JoeCastCellLabel: View {
                 return await JoeMovieDetail.torrentFallbackCandidates(
                     identity: identity, originDetail: detail,
                     originProvider: provider,
-                    pinnedImdbId: tvb?.imdbId ?? "")
+                    pinnedImdbId: tvb?.imdbId ?? "",
+                    pinnedTmdbId: tvb.map { "\($0.tmdbId)" } ?? "")
             })
     }
 
@@ -3151,7 +3210,8 @@ private struct JoeCastCellLabel: View {
         identity: PlayIdentity, originDetail: Detail,
         originProvider: String,
         highQualityOnly: Bool = false,
-        pinnedImdbId: String = "") async -> [PlayCandidate] {
+        pinnedImdbId: String = "",
+        pinnedTmdbId: String = "") async -> [PlayCandidate] {
         guard let base = TorrentSettings.effectiveBase else { return [] }
 
         // After a hop the session lives on another provider:
@@ -3179,7 +3239,19 @@ private struct JoeCastCellLabel: View {
             imdbId = pinnedImdbId
             tmdbType = "tv"
         }
-        if imdbId.isEmpty {
+        if imdbId.isEmpty, !pinnedTmdbId.isEmpty {
+            // Swift 6 round (fault c): a TVB session whose
+            // snapshot carries no IMDb id derives one ONLY
+            // from the snapshot's TMDB id (TMDB external_ids,
+            // as "tv") — the cache / name-search derivation
+            // below never runs for TVB, so the substitution
+            // rung can only ever address the snapshot's own
+            // series, or nothing.
+            imdbId = await TMDBClient.imdbId(
+                tmdbId: pinnedTmdbId, type: "tv") ?? ""
+            tmdbType = "tv"
+        }
+        if imdbId.isEmpty, pinnedTmdbId.isEmpty {
             // v2.0.5 (D3): consume the detail-time ladder's
             // result FIRST. The ladder (Providers
             // .resolveIdentity, run when this film's detail
@@ -3271,7 +3343,13 @@ private struct JoeCastCellLabel: View {
 /// `cachedPaint` records the payload the cache racer
 /// actually painted, for the fingerprint comparison and the
 /// failure path.
-private final class DetailLoadRace {
+/// Swift 6: @unchecked Sendable is justified by that same
+/// construction — the box is created inside load() (a view
+/// task, main actor) and is only ever touched by load()
+/// itself and its child cache Task, which inherits the
+/// main actor; no other task, queue or thread can reach
+/// it, so the flags can never be touched concurrently.
+private final class DetailLoadRace: @unchecked Sendable {
     var cachedPaint: Detail?
     var networkPainted = false
 }
@@ -3281,6 +3359,15 @@ private final class DetailLoadRace {
 /// closure must mutate it across invocations. `consumed`
 /// flips on the first origin-identity invocation; every
 /// later invocation fetches its detail fresh.
-private final class LadderFirstCallBox {
+/// Swift 6: @unchecked Sendable is justified because the
+/// only toucher is the resolveLadder closure of the ONE
+/// PlayDirector built beside the box — PlayDirector is
+/// @MainActor and awaits each ladder invocation to
+/// completion before issuing the next, so invocations
+/// never overlap and each completion happens-before the
+/// next start through the await chain; the flag is only
+/// ever touched by one invocation at a time, whichever
+/// executor the closure body itself runs on.
+private final class LadderFirstCallBox: @unchecked Sendable {
     var consumed = false
 }

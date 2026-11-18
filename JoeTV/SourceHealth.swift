@@ -235,7 +235,7 @@ enum SourceHealth {
     /// URLSession-driven timeout produced.
     static func run<T>(provider: String, stage: Stage, url: String,
                        cap: TimeInterval,
-                       _ op: @escaping (TimeInterval) async throws -> T) async throws -> T {
+                       _ op: @escaping @Sendable (TimeInterval) async throws -> T) async throws -> T {
         let budget = fuse(provider: provider, stage: stage, url: url, cap: cap)
         let start = Date()
         let box = RunRaceBox<T>()
@@ -346,9 +346,16 @@ enum SourceHealth {
     }
 
     private static let lock = NSLock()
-    private static var snap = Snapshot()
-    private static var didLoad = false
-    private static var lastSave: Double = 0
+    // Swift 6: nonisolated(unsafe) on the three statics below —
+    // every read and write happens with `lock` held (all entry
+    // points above lock before calling the *Locked helpers, and
+    // the public consumers lock around their reads). The access
+    // pattern is deliberately synchronous (fuse / isLatched are
+    // read on hot sync paths), so actor isolation would change
+    // public signatures; the lock discipline is unchanged.
+    private nonisolated(unsafe) static var snap = Snapshot()
+    private nonisolated(unsafe) static var didLoad = false
+    private nonisolated(unsafe) static var lastSave: Double = 0
 
     private static func ensureLoadedLocked() {
         guard !didLoad else { return }
@@ -445,7 +452,12 @@ enum SourceHealth {
 /// budget timer publish here; the FIRST outcome wins and later
 /// publications are dropped, so a loser that finishes after
 /// the race was decided records nothing and changes nothing.
-private final class RunRaceBox<T> {
+/// Swift 6: @unchecked Sendable — `result` is written and read
+/// only under `lock`, first-write-wins; the generic payload is
+/// whatever the measured operation produced (in practice an
+/// immutable JSON snapshot or a value type) and is never
+/// mutated after publication.
+private final class RunRaceBox<T>: @unchecked Sendable {
     enum Outcome {
         case value(T)
         case error(Error)

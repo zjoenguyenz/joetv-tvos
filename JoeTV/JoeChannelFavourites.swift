@@ -13,6 +13,7 @@ import Foundation
 /// if the channel comes back. Playlist data itself is never
 /// touched. Loading is fail-soft: a missing or corrupt
 /// payload loads as empty, never crashes.
+@MainActor
 final class ChannelFavouritesStore: ObservableObject {
     static let shared = ChannelFavouritesStore()
 
@@ -30,7 +31,10 @@ final class ChannelFavouritesStore: ObservableObject {
         }
     }
 
-    static func key(for channel: Channel) -> String {
+    /// Swift 6: nonisolated — a pure string builder over the
+    /// channel's group/title, called from nonisolated sorting
+    /// code as well as from views (the FollowStore precedent).
+    nonisolated static func key(for channel: Channel) -> String {
         channel.group + "|" + channel.title
     }
 

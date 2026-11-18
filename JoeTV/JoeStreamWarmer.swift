@@ -49,7 +49,14 @@ import Foundation
 /// it matches the one the dwell ladder — built from this
 /// session's detail payload through the same memoised
 /// resolver — produced moments earlier.
-final class StreamWarmer {
+/// Swift 6: @unchecked Sendable — the single entry (an
+/// AVPlayer, which is not itself Sendable) is touched only
+/// under `lock` for storage/retrieval, and the player it holds
+/// is paused / emptied outside the lock only by the call that
+/// just removed it from the entry, so no two calls ever drive
+/// the same player at once. take() hands the player whole to
+/// its one new owner.
+final class StreamWarmer: @unchecked Sendable {
     static let shared = StreamWarmer()
 
     /// Freshness bound: the resolve memo's TTL (Providers),
@@ -102,7 +109,14 @@ final class StreamWarmer {
         // take() does not promise readiness, only identity;
         // the taken item still passes through the player
         // shell's normal ready/fail machinery).
-        Task { _ = try? await asset.load(.isPlayable) }
+        // Swift 6 form: the key load is kicked off through
+        // AVAsset's completion-handler API (nil handler —
+        // fire-and-forget, exactly the old Task's semantics)
+        // because AVURLAsset is not Sendable and may not be
+        // captured into a Task's @Sendable closure. "playable"
+        // is the asset key the .isPlayable load targeted.
+        asset.loadValuesAsynchronously(forKeys: ["playable"],
+                                       completionHandler: nil)
     }
 
     /// The named entry point of the shared warming system

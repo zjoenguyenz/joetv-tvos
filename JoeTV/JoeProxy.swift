@@ -29,10 +29,17 @@ import CryptoKit
 /// Clean resources pass through untouched (the strip only fires
 /// on a PNG signature). Loopback HTTP is ATS-exempt, and nothing
 /// here ever leaves the device.
-final class JoeProxy {
+/// Swift 6: @unchecked Sendable — this is a process-lifetime
+/// singleton whose mutable state is partitioned by construction:
+/// the route table, listener and port are touched only under
+/// `lock`; streamed-segment state is confined to the stream
+/// session's serial delegate queue (see StreamState); the two
+/// URLSessions are thread-safe. No state is ever touched
+/// unsynchronized, but the compiler cannot see the partition.
+final class JoeProxy: @unchecked Sendable {
     static let shared = JoeProxy()
 
-    private struct Route {
+    private struct Route: Sendable {
         var url: String
         var headers: [String: String]
         var isPlaylist: Bool
@@ -228,8 +235,12 @@ final class JoeProxy {
         }
         let startedAt = Date()
         let sem = DispatchSemaphore(value: 0)
-        var payload = Data()
-        var ok = false
+        // Swift 6: the completion handler is a @Sendable closure
+        // and may not mutate captured vars; the result travels
+        // through this box instead. The semaphore is the
+        // happens-before edge (written before signal(), read
+        // after wait()), exactly as the captured vars behaved.
+        let result = PlaylistResultBox()
         let task = session.dataTask(with: request) { [weak self] data, response, error in
             defer { sem.signal() }
             guard let self, let data,
@@ -246,8 +257,8 @@ final class JoeProxy {
             let base = http.url ?? url
             let rewritten = self.rewritePlaylist(text, base: base,
                                                  headers: route.headers)
-            payload = Data(rewritten.utf8)
-            ok = true
+            result.payload = Data(rewritten.utf8)
+            result.ok = true
             self.recordProxySample(
                 url: route.url, stage: .playlist,
                 seconds: Date().timeIntervalSince(startedAt),
@@ -263,12 +274,21 @@ final class JoeProxy {
         // the real fix for segments is the streaming path;
         // this bound now only guards playlists).
         _ = sem.wait(timeout: .now() + 90)
-        if ok {
+        if result.ok {
             respond(conn, status: 200, type: "application/vnd.apple.mpegurl",
-                    body: payload)
+                    body: result.payload)
         } else {
             respond(conn, status: 502, type: "text/plain", body: Data())
         }
+    }
+
+    /// Result box for servePlaylist's bounded fetch (Swift 6 —
+    /// see the call site): written once by the data task's
+    /// completion handler before it signals the semaphore, read
+    /// only after the wait returns.
+    private final class PlaylistResultBox: @unchecked Sendable {
+        var payload = Data()
+        var ok = false
     }
 
     // MARK: - Segment streaming
@@ -277,7 +297,11 @@ final class JoeProxy {
     /// mutation happens on the stream session's serial
     /// delegate queue (registration included — see
     /// startStream), so no lock is needed.
-    private final class StreamState {
+    /// Swift 6: @unchecked Sendable on that serial-queue
+    /// confinement — the state crosses closure boundaries (the
+    /// registration operation, the delegate callbacks) but is
+    /// only ever touched on that one queue.
+    private final class StreamState: @unchecked Sendable {
         let conn: NWConnection
         let url: URL
         let startedAt = Date()
@@ -294,7 +318,11 @@ final class JoeProxy {
     /// The streaming session's delegate: a pure forwarder —
     /// state lives in StreamState, logic in the proxy's
     /// stream* methods.
-    private final class StreamDelegate: NSObject, URLSessionDataDelegate {
+    /// Swift 6: @unchecked Sendable — `states` and `proxy` are
+    /// touched only on the stream session's serial delegate
+    /// queue (registration is enqueued onto that same queue in
+    /// startStream), so the dictionary never races.
+    private final class StreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         weak var proxy: JoeProxy?
         var states: [Int: StreamState] = [:]
 

@@ -51,20 +51,27 @@ import Foundation
 /// episode of the same series, and the load-time coalesce
 /// applies the same fold to entries an older build left
 /// side by side (the owner's Tập 01 + Tập 02 pair).
+@MainActor
 final class WatchStore: ObservableObject {
-    static let kindKK = "kk"
-    static let kindF4K = "f4k"
-    static let kindVS = "vsmov"
-    static let kindTP = "tp"
-    static let kindTor = "torrent"
+    // Swift 6: the kind constants and every pure static helper
+    // below are `nonisolated` — they are stateless string/key
+    // builders (the FollowStore.episodeCount precedent) called
+    // from nonisolated code such as Providers.progressKey /
+    // kindOf; the store's mutable state itself is MainActor-
+    // isolated like the other UI-bound stores in this layer.
+    nonisolated static let kindKK = "kk"
+    nonisolated static let kindF4K = "f4k"
+    nonisolated static let kindVS = "vsmov"
+    nonisolated static let kindTP = "tp"
+    nonisolated static let kindTor = "torrent"
 
     private static let fileName = "watch-state.json"
     private static let maxProgress = 40
     private static let maxFavorites = 80
     /// Continue Watching rails show at most this many tiles.
-    static let railCap = 20
+    nonisolated static let railCap = 20
 
-    struct Entry: Codable, Identifiable, Hashable {
+    struct Entry: Codable, Identifiable, Hashable, Sendable {
         var key = ""
         var kind = ""
         // progress
@@ -110,13 +117,13 @@ final class WatchStore: ObservableObject {
 
     // MARK: - Keys
 
-    static func kkProgressKey(slug: String, epName: String) -> String { "kk|\(slug)|\(epName)" }
-    static func f4kProgressKey(slug: String, epName: String) -> String { "f4k|\(slug)|\(epName)" }
-    static func vsProgressKey(slug: String, epName: String) -> String { "vs|\(slug)|\(epName)" }
-    static func tpProgressKey(slug: String, epName: String) -> String { "tp|\(slug)|\(epName)" }
-    static func torProgressKey(streamId: String) -> String { "tor|\(streamId)" }
+    nonisolated static func kkProgressKey(slug: String, epName: String) -> String { "kk|\(slug)|\(epName)" }
+    nonisolated static func f4kProgressKey(slug: String, epName: String) -> String { "f4k|\(slug)|\(epName)" }
+    nonisolated static func vsProgressKey(slug: String, epName: String) -> String { "vs|\(slug)|\(epName)" }
+    nonisolated static func tpProgressKey(slug: String, epName: String) -> String { "tp|\(slug)|\(epName)" }
+    nonisolated static func torProgressKey(streamId: String) -> String { "tor|\(streamId)" }
 
-    static func movieFavKey(provider: String, slug: String) -> String {
+    nonisolated static func movieFavKey(provider: String, slug: String) -> String {
         switch provider {
         case Providers.F4K: return "f4k|\(slug)"
         case Providers.VS: return "vs|\(slug)"
@@ -128,7 +135,7 @@ final class WatchStore: ObservableObject {
         }
     }
 
-    static func torFavKey(metaId: String, type: String) -> String { "tor|\(metaId)|\(type)" }
+    nonisolated static func torFavKey(metaId: String, type: String) -> String { "tor|\(metaId)|\(type)" }
 
     // MARK: - Progress
 
@@ -150,7 +157,7 @@ final class WatchStore: ObservableObject {
     /// everything else reads the stored episode name exactly
     /// as the failover hop matches episodes. -1 = no episode
     /// number (a movie / "Full" entry).
-    static func episodeNumber(of e: Entry) -> Int {
+    nonisolated static func episodeNumber(of e: Entry) -> Int {
         if e.kind == kindTor {
             let parts = e.streamId.split(separator: ":")
             if parts.count >= 3, let n = Int(String(parts[parts.count - 1])) {
@@ -166,7 +173,7 @@ final class WatchStore: ObservableObject {
     /// states one: the stream id's middle component on the
     /// torrent side, Providers.seasonNumber on the provider
     /// side (KK episode names are normally season-free — nil).
-    static func seasonNumber(of e: Entry) -> Int? {
+    nonisolated static func seasonNumber(of e: Entry) -> Int? {
         if e.kind == kindTor {
             let parts = e.streamId.split(separator: ":")
             if parts.count >= 3, let s = Int(String(parts[parts.count - 2])) {
@@ -180,7 +187,7 @@ final class WatchStore: ObservableObject {
     /// The IMDb id an entry carries: the stamped field when a
     /// call site knew it, else the torrent meta id itself
     /// (Torrentio/Cinemeta meta ids ARE IMDb ids).
-    static func imdbId(of e: Entry) -> String {
+    nonisolated static func imdbId(of e: Entry) -> String {
         if !e.imdbId.isEmpty { return e.imdbId }
         return e.metaId.hasPrefix("tt") ? e.metaId : ""
     }
@@ -188,7 +195,7 @@ final class WatchStore: ObservableObject {
     /// Live/sports rows are never canonical progress: their
     /// "episodes" are events, and a title coincidence must
     /// never merge one into a film's row (or vice versa).
-    private static func canonicalEligible(_ e: Entry) -> Bool {
+    private nonisolated static func canonicalEligible(_ e: Entry) -> Bool {
         if e.key.hasPrefix("mf-event|") { return false }
         if e.metaType == "events" || e.metaType == "tv" { return false }
         return !e.title.isEmpty
@@ -200,7 +207,7 @@ final class WatchStore: ObservableObject {
     /// must be exactly equal and the years equal, either side
     /// empty, or ±1 (the cross-catalogue year-variant
     /// tolerance, gated on the exact title match).
-    private static func sameFilm(_ a: Entry, _ b: Entry) -> Bool {
+    private nonisolated static func sameFilm(_ a: Entry, _ b: Entry) -> Bool {
         let ia = imdbId(of: a), ib = imdbId(of: b)
         if !ia.isEmpty && ia == ib { return true }
         if !a.tmdbId.isEmpty && a.tmdbId == b.tmdbId { return true }
@@ -216,7 +223,7 @@ final class WatchStore: ObservableObject {
     /// True when two entries are the same title + episode
     /// under the canonical identity, whatever source saved
     /// each of them.
-    static func canonicalMatch(_ a: Entry, _ b: Entry) -> Bool {
+    nonisolated static func canonicalMatch(_ a: Entry, _ b: Entry) -> Bool {
         guard canonicalEligible(a), canonicalEligible(b) else { return false }
         guard sameFilm(a, b) else { return false }
         guard episodeNumber(of: a) == episodeNumber(of: b) else { return false }
@@ -239,7 +246,7 @@ final class WatchStore: ObservableObject {
     /// each other — and the season gate is canonicalMatch's
     /// own, so two seasons of one show keep separate cards
     /// when both sides state their season.
-    static func sameSeries(_ a: Entry, _ b: Entry) -> Bool {
+    nonisolated static func sameSeries(_ a: Entry, _ b: Entry) -> Bool {
         guard canonicalEligible(a), canonicalEligible(b) else { return false }
         guard episodeNumber(of: a) >= 0, episodeNumber(of: b) >= 0
         else { return false }
@@ -263,7 +270,7 @@ final class WatchStore: ObservableObject {
     /// (metaId/streamId/metaBase ride along). Two provider
     /// entries (a failover hop) or two torrent entries keep
     /// the incoming side's identity, exactly as before.
-    private static func mergedEntry(incoming: Entry, old: Entry) -> Entry {
+    private nonisolated static func mergedEntry(incoming: Entry, old: Entry) -> Entry {
         let incomingIsProvider = incoming.kind != kindTor
         let oldIsProvider = old.kind != kindTor
         var base: Entry
@@ -585,7 +592,7 @@ final class WatchStore: ObservableObject {
     // MARK: - Helpers
 
     /// Milliseconds → "12:34" (or "1:02:34" past an hour).
-    static func fmtClock(_ ms: Int64) -> String {
+    nonisolated static func fmtClock(_ ms: Int64) -> String {
         let s = max(0, ms / 1000)
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
         return h > 0
@@ -593,7 +600,7 @@ final class WatchStore: ObservableObject {
             : String(format: "%d:%02d", m, sec)
     }
 
-    static func filterKinds(_ entries: [Entry], _ kinds: [String]) -> [Entry] {
+    nonisolated static func filterKinds(_ entries: [Entry], _ kinds: [String]) -> [Entry] {
         entries.filter { kinds.contains($0.kind) }
     }
 }

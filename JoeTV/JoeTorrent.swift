@@ -35,16 +35,40 @@ struct JoeTorrentHome: View {
     @FocusState private var searchRetryFocused: Bool
 
     /// The search row's focusable elements, in visual order.
+    /// Swift 6 round (fault (e)): the .field case is GONE —
+    /// the row's field is a display, not a TextField (see
+    /// searchRow), and typing lives on the letter strip,
+    /// whose focus is keyFocus below.
     private enum SearchRowFocus: Hashable {
-        case field, search, clear
+        case search, clear
     }
     @FocusState private var searchFocus: SearchRowFocus?
+    /// The letter strip's focus (fault (e)): the same
+    /// JoeSearchKeyFocus the Phim and TVB searches use.
+    @FocusState private var keyFocus: JoeSearchKeyFocus?
+    /// The debounced type-ahead driver (fault (e)): strip
+    /// edits re-arm it, exactly as JoeSearchView's
+    /// scheduleTypeAhead arms its rounds.
+    @State private var searchTask: Task<Void, Never>?
+    /// Search round generation (fault (e)): a new round —
+    /// or a clear — supersedes any in-flight one, so a
+    /// stale round's results can never land over a newer
+    /// term's grid (JoeSearchView's roundID rule).
+    @State private var searchRound = 0
 
     var body: some View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36) {
                     header
                     searchRow
+                    // Fault (e): the in-app letter strip —
+                    // typing lives here now, under the query
+                    // display, exactly as on the Phim and TVB
+                    // search screens (JoeSearchView /
+                    // JoeTVBSearchView). The system TextField
+                    // it replaces summoned Apple's full-screen
+                    // keyboard and hid the home until "done".
+                    JoeLetterStrip(query: $query, focus: $keyFocus)
                     if searching {
                         // C-10: searching is a visible state, not
                         // an empty grid.
@@ -132,18 +156,26 @@ struct JoeTorrentHome: View {
             torAttempted = true
             store.loadIfNeeded()
         }
+        // Fault (e): strip edits drive the search — the
+        // onChange that used to sit on the TextField (the
+        // JoeSearchView placement).
+        .onChange(of: query) { _, _ in scheduleSearch() }
         // 1.9.2 (Team 9 items 4 + 8): Menu in this SECTION
         // returns to the Phim section — the app's main menu —
         // instead of exiting the app (the owner's Android
         // model: Back walks inside the app; exit only from the
         // Phim root, which carries no handler). Unconditional,
-        // on this section's own root. And the search field is
+        // on this section's own root. And the search area is
         // the section's declared initial focus — the same
         // static .defaultFocus construction as JoeSearchView's
         // (the convergence round's geometric assumption left
         // the torrent search row with no declared landing).
+        // Fault (e): the landing is the letter strip's first
+        // key — the TextField this declaration used to name
+        // (.field) no longer exists, exactly as in
+        // JoeSearchView since v2.0.17.
         .onExitCommand { nav.section = .phim }
-        .defaultFocus($searchFocus, .field)
+        .defaultFocus($keyFocus, .key("a"))
     }
 
     private var header: some View {
@@ -159,15 +191,25 @@ struct JoeTorrentHome: View {
 
     private var searchRow: some View {
         HStack(spacing: 18) {
-            TextField("", text: $query,
-                      prompt: Text("Tìm phim torrent…")
-                        .foregroundColor(ThemeTokens.fieldPlaceholder))
-                .textFieldStyle(.plain)
-                .font(.system(size: ThemeTokens.fieldTextSize))
-                .joeFieldChrome(focused: searchFocus == .field)
-                .frame(width: 820)
-                .focused($searchFocus, equals: .field)
-                .onSubmit { runSearch() }
+            // Fault (e): the field is a DISPLAY now (the
+            // JoeSearchView fieldRow construction — the
+            // field's chrome, never focused): the query text
+            // or its placeholder, painted by joeFieldChrome
+            // exactly as the old field painted it, at the
+            // same 820 width. There is no TextField here any
+            // more, so focusing this row can never summon
+            // the system keyboard; typing happens on the
+            // letter strip directly below (see body).
+            HStack(spacing: 14) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 26, weight: .semibold))
+                Text(query.isEmpty ? "Tìm phim torrent…" : query)
+                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .joeFieldChrome(focused: false)
+            .frame(width: 820)
             Button {
                 runSearch()
             } label: {
@@ -178,6 +220,12 @@ struct JoeTorrentHome: View {
             .disabled(searching)
             if !searchResults.isEmpty {
                 Button {
+                    // Fault (e): the clear supersedes any
+                    // in-flight round (searchRound bump), so
+                    // its results cannot repaint over the
+                    // cleared home a moment later.
+                    searchRound += 1
+                    searching = false
                     searchResults = []
                     query = ""
                     searchAttempted = false
@@ -478,9 +526,42 @@ struct JoeTorrentHome: View {
     // UP from a first-row result reaches the search row as
     // the nearest focusable above.
 
+    /// The debounced type-ahead driver (fault (e) — the
+    /// JoeSearchView scheduleTypeAhead pattern): every strip
+    /// edit cancels the pending firing and re-arms it; when
+    /// ~500 ms elapse with the text unchanged, the round for
+    /// that text runs. An emptied query does NOT run a round
+    /// — it resets the section to its un-searched state,
+    /// superseding any in-flight round so a late landing
+    /// cannot repaint a home the owner has already cleared.
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        let text = query
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled { return }
+            guard query == text else { return }
+            if text.trimmingCharacters(in: .whitespaces).isEmpty {
+                searchRound += 1
+                searching = false
+                searchResults = []
+                searchAttempted = false
+                searchError = nil
+            } else {
+                runSearch()
+            }
+        }
+    }
+
     private func runSearch() {
+        // An immediate round (the Tìm button, or the
+        // type-ahead firing itself) supersedes any pending
+        // debounce — its firing must not re-run this round.
+        searchTask?.cancel()
         let kw = query.trimmingCharacters(in: .whitespaces)
         guard !kw.isEmpty else { return }
+        searchRound += 1
+        let round = searchRound
         searching = true
         searchError = nil
         Task {
@@ -494,6 +575,9 @@ struct JoeTorrentHome: View {
                     failures += 1
                 }
             }
+            // Fault (e): a superseded round never publishes —
+            // a newer term's round (or a clear) owns the grid.
+            guard round == searchRound else { return }
             searchResults = out
             searching = false
             searchAttempted = true
@@ -1484,7 +1568,16 @@ private struct JoeTorCastCellLabel: View {
 /// `consumed` flips on the first origin-identity invocation
 /// that serves the already-loaded stream list; every later
 /// invocation fetches its pooled list fresh.
-private final class TorLadderFirstCallBox {
+/// Swift 6: @unchecked Sendable is justified because the
+/// only toucher is the resolveLadder closure of the ONE
+/// PlayDirector built beside the box — PlayDirector is
+/// @MainActor and awaits each ladder invocation to
+/// completion before issuing the next, so invocations
+/// never overlap and each completion happens-before the
+/// next start through the await chain; the flag is only
+/// ever touched by one invocation at a time, whichever
+/// executor the closure body itself runs on.
+private final class TorLadderFirstCallBox: @unchecked Sendable {
     var consumed = false
 }
 

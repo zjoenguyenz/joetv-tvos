@@ -190,7 +190,10 @@ enum TpClient {
     /// Lock-guarded, keyed by slug, in-memory only; it holds
     /// episode NAMES/templates, never stream URLs.
     private static let templateLock = NSLock()
-    private static var templateStash: [String: [Episode]] = [:]
+    // Swift 6: nonisolated(unsafe) — every access is serialized
+    // by templateLock (stashTemplate / stashedTemplate), and the
+    // readers are synchronous; the lock discipline is unchanged.
+    private nonisolated(unsafe) static var templateStash: [String: [Episode]] = [:]
 
     private static func stashTemplate(slug: String, template: [Episode]?) {
         guard let template, !template.isEmpty else { return }
@@ -495,13 +498,19 @@ enum TpClient {
 
     // MARK: - No-redirect fetch (the embed hop must see the 3xx)
 
-    private struct RawResponse {
+    private struct RawResponse: Sendable {
         var status: Int
         var location: String?
         var body: String
     }
 
-    private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    /// Swift 6: checked Sendable — the delegate is stateless
+    /// (its one method only answers the completion handler) and
+    /// the class is final, inherits only NSObject, and has no
+    /// stored properties at all, so it meets the Migration
+    /// Guide's rule for a compiler-verified Sendable class;
+    /// @unchecked would suppress a check that passes.
+    private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
         func urlSession(_ session: URLSession, task: URLSessionTask,
                         willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest,

@@ -21,7 +21,11 @@ enum PlaybackLog {
 /// One playable stream candidate: a freshly resolved URL plus
 /// the headers its CDN demands (never a blanket header — see the
 /// house rule in Channel.swift).
-struct PlayCandidate {
+/// Swift 6: Sendable — candidates are built by the
+/// nonisolated TorrentClient/Providers workers and handed
+/// to the @MainActor director; every member is a value
+/// type, so the conformance is structural.
+struct PlayCandidate: Sendable {
     /// Which engine plays this candidate. Provider ladders stay
     /// on AVPlayer (the house player, untouched). Torrent
     /// candidates (TorrentClient.playCandidates — the torrent
@@ -84,7 +88,10 @@ struct PlayCandidate {
 /// was read from. After a cross-provider hop the detail view
 /// re-issues the session with the NEW provider's identity — the
 /// resume position itself is carried over by the director.
-struct PlayIdentity {
+/// Swift 6: Sendable, like PlayCandidate — identities ride
+/// the director's resolver closures across the same
+/// boundaries (WatchStore.Entry is Sendable).
+struct PlayIdentity: Sendable {
     var entry: WatchStore.Entry
     var progressKey: String { entry.key }
 }
@@ -1518,6 +1525,14 @@ private struct PlayerController: UIViewControllerRepresentable {
     /// transitions the director allows, so stale items from a
     /// previous attempt can never double-drive the machine (the
     /// view recreates the controller per attempt via .id()).
+    /// Swift 6 (v2.0.32): the coordinator is @MainActor — its
+    /// tokens, watchdog and freeze state were previously
+    /// mutated from whichever thread KVO / NotificationCenter
+    /// delivered on; every off-main callback below now reads
+    /// the Sendable value it needs and hops to the main queue
+    /// before touching this state (the same shape the iOS
+    /// player's migrated view controller uses).
+    @MainActor
     final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
         private let director: PlayDirector
         private var statusToken: NSKeyValueObservation?
@@ -1781,14 +1796,21 @@ private struct PlayerController: UIViewControllerRepresentable {
             RunLoop.main.add(ticker, forMode: .common)
             freezeTimer = ticker
             statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-                guard let self else { return }
-                switch item.status {
-                case .readyToPlay:
-                    self.handleReady()
-                case .failed:
-                    fireFail()
-                default:
-                    break
+                // Swift 6: the KVO handler is a non-isolated
+                // context — read the status VALUE here and
+                // hop; the coordinator's state is main-actor
+                // state and is only touched after the hop.
+                let status = item.status
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    switch status {
+                    case .readyToPlay:
+                        self.handleReady()
+                    case .failed:
+                        self.fireFail()
+                    default:
+                        break
+                    }
                 }
             }
             // v2.0.24: a dwell-warmed item (StreamWarmer) may
@@ -1807,27 +1829,43 @@ private struct PlayerController: UIViewControllerRepresentable {
             ) { [weak self] note in
                 // The notification carries the error that
                 // ended playback — hand it to the director
-                // (pre-v2.0.5 it was discarded unread).
-                let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
-                self?.fireFail(cause: err?.localizedDescription)
+                // (pre-v2.0.5 it was discarded unread). Only
+                // the Sendable description crosses the hop
+                // (Swift 6); the funnel itself runs on the
+                // main actor like every other state touch.
+                let cause = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]
+                    as? Error)?.localizedDescription
+                DispatchQueue.main.async { [weak self] in
+                    self?.fireFail(cause: cause)
+                }
             }
             endToken = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
             ) { [weak self] _ in
-                // The freeze watchdog stands down at the end:
-                // a finished item is the end-observer's
-                // transition, never a stall.
-                self?.freezeEnded = true
-                DispatchQueue.main.async { self?.director.itemEnded() }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    // The freeze watchdog stands down at the
+                    // end: a finished item is the end-observer's
+                    // transition, never a stall.
+                    self.freezeEnded = true
+                    self.director.itemEnded()
+                }
             }
             timeToken = player.addPeriodicTimeObserver(
                 forInterval: CMTime(seconds: 5, preferredTimescale: 600),
                 queue: .main
             ) { [weak self] time in
-                guard let self, let item = self.player?.currentItem else { return }
-                let pos = Int64(time.seconds * 1000)
-                let dur = item.duration.seconds.isFinite ? Int64(item.duration.seconds * 1000) : 0
-                self.director.tick(positionMs: pos, durationMs: dur)
+                // Swift 6: the tick's state reads (the current
+                // item, the director) happen after the hop,
+                // on the main actor — the observer block
+                // itself carries only the Sendable time.
+                let seconds = time.seconds
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let item = self.player?.currentItem else { return }
+                    let pos = Int64(seconds * 1000)
+                    let dur = item.duration.seconds.isFinite ? Int64(item.duration.seconds * 1000) : 0
+                    self.director.tick(positionMs: pos, durationMs: dur)
+                }
             }
             // Idea 13: the new item gets its metadata, menu
             // and info-tab labels (see refreshChrome).

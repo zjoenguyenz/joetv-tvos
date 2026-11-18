@@ -269,7 +269,7 @@ enum TorrentSettings {
     }
 }
 
-struct TorCatalog {
+struct TorCatalog: Sendable {
     var type = ""
     var id = ""
     var name = ""
@@ -277,7 +277,7 @@ struct TorCatalog {
     var searchable = false
 }
 
-struct TorMeta: Identifiable, Hashable {
+struct TorMeta: Identifiable, Hashable, Sendable {
     var id = ""
     var type = "movie"
     var name = ""
@@ -296,7 +296,7 @@ struct TorMeta: Identifiable, Hashable {
 }
 
 /// The Thể Thao Torrent fetch outcome (v2.0.21).
-struct MfSportEventsResult {
+struct MfSportEventsResult: Sendable {
     var metas: [TorMeta] = []
     /// Whether the profile's manifest was READ and exposes
     /// at least one live catalog (type "events" or "tv"):
@@ -309,7 +309,7 @@ struct MfSportEventsResult {
     var manifestLiveCatalogs: Bool? = nil
 }
 
-struct TorStream: Identifiable {
+struct TorStream: Identifiable, Sendable {
     var id = UUID()
     var name = ""
     var title = ""
@@ -439,12 +439,12 @@ struct TorStream: Identifiable {
     var label: String { name.isEmpty ? title : name }
 }
 
-struct TorSubtitle {
+struct TorSubtitle: Sendable {
     var url = ""
     var lang = ""
 }
 
-struct TorVideo: Identifiable, Hashable {
+struct TorVideo: Identifiable, Hashable, Sendable {
     var id = ""
     var label = ""
 }
@@ -1193,7 +1193,10 @@ enum TorrentClient {
     /// same title on every ladder rebuild would only add
     /// latency. Guarded by a lock: playCandidates probes
     /// concurrently.
-    private static var finalURLCache: [String: URL] = [:]
+    // Swift 6: nonisolated(unsafe) — every access is serialized
+    // by finalURLCacheLock (preResolved); the lock discipline is
+    // unchanged.
+    private nonisolated(unsafe) static var finalURLCache: [String: URL] = [:]
     private static let finalURLCacheLock = NSLock()
 
     /// The final URL at the end of the redirect chain, or the
@@ -1366,7 +1369,11 @@ private final class RedirectProbe: NSObject {
     /// The shared session's delegate: a registry of in-flight
     /// probes keyed by taskIdentifier. It holds no state of
     /// its own beyond that per-task registry.
-    private final class SessionDelegate: NSObject, URLSessionDataDelegate {
+    /// Swift 6: @unchecked Sendable — the per-task registry is
+    /// touched only under `lock`, and each registered
+    /// continuation is resumed exactly once, when its entry is
+    /// removed in didCompleteWithError.
+    private final class SessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         private struct ProbeState {
             var continuation: CheckedContinuation<URL?, Never>
             var finalURL: URL?

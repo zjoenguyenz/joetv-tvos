@@ -49,7 +49,10 @@ enum CacheVideo {
     /// resolver's URLs are stable CDN addresses (unlike
     /// Film4K's per-call tokens, which are never memoised).
     private static let memoLock = NSLock()
-    private static var memo: [String: (url: String, at: TimeInterval)] = [:]
+    // Swift 6: nonisolated(unsafe) — every access is serialized
+    // by memoLock (memoGet / memoSet); the readers are
+    // synchronous, so the lock discipline is kept unchanged.
+    private nonisolated(unsafe) static var memo: [String: (url: String, at: TimeInterval)] = [:]
     private static let memoTTL: TimeInterval = 600
 
     private static func memoGet(_ key: String) -> String? {

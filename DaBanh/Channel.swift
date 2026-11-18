@@ -2,7 +2,7 @@ import Foundation
 
 /// One playlist entry — mirrors `Channel` in the Android Đá Banh TV app
 /// (com.gathin.dabanh.MainActivity.Channel).
-struct Channel: Identifiable, Equatable {
+struct Channel: Identifiable, Equatable, Sendable {
     let id = UUID()
     let title: String
     let logo: String

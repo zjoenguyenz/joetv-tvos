@@ -29,6 +29,12 @@ import libwebp
 //    for a view's life), and prefetch drains through a
 //    3-worker cap instead of one detached task per URL.
 
+/// Swift 6: @unchecked Sendable — all mutable state (the
+/// in-flight table, the prefetch backlog/counter, the TMDB
+/// poster-path memo) is touched only under `lock`; the decoded
+/// bitmap cache is an NSCache (thread-safe by design) and the
+/// URLSession is thread-safe. Loads run in detached tasks and
+/// publish only through those guarded structures.
 final class JoeImagePipeline: @unchecked Sendable {
     static let shared = JoeImagePipeline()
 

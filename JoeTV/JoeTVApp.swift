@@ -68,6 +68,13 @@ struct JoeTVApp: App {
 /// (the owner's video, 2026-11-14). v1.2 presents details as
 /// full-screen layers of the root view instead, and the root's
 /// exit command closes exactly one layer per Menu press.
+/// Swift 6: @MainActor — every read and write of this
+/// object happens on the main actor by construction (it is
+/// the shell's @StateObject / @EnvironmentObject, mutated
+/// only from view bodies, view actions and @MainActor
+/// tasks), and strict concurrency now states that instead
+/// of assuming it.
+@MainActor
 final class JoeNavigator: ObservableObject {
     /// The shell's five sections. Moved here from JoeRootView
     /// in 1.9.2 (Team 9 item 4): the section views themselves

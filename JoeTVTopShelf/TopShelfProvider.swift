@@ -104,8 +104,8 @@ import TVServices
 
 /// The writer's JSON contract (mirror of ShelfDoc in
 /// JoeTopShelfWriter.swift — keep in sync). Source 1 only.
-private struct ShelfDoc: Codable {
-    struct Item: Codable {
+private struct ShelfDoc: Codable, Sendable {
+    struct Item: Codable, Sendable {
         var id = ""
         var title = ""
         var backdrop = ""   // file name inside the container
@@ -122,7 +122,7 @@ private struct ShelfDoc: Codable {
 /// One entry of the bundled shelf-manifest.json (source 2).
 /// Entry order in the file is TMDB trending/all/week order
 /// at generation time; entry 1 is the recommended hero.
-private struct BundledEntry: Codable {
+private struct BundledEntry: Codable, Sendable {
     var tmdbId = ""
     var type = ""       // "movie" | "tv"
     var title = ""

@@ -74,7 +74,7 @@ enum Providers {
     /// network (the TVStore cache-first pattern). Genre/country
     /// requests exist only on KKPhim; the other providers are
     /// never asked for them.
-    enum ListRequest: Hashable {
+    enum ListRequest: Hashable, Sendable {
         case newest(page: Int)
         case byType(type: String, page: Int)
         case genre(slug: String, page: Int)
@@ -106,7 +106,12 @@ enum Providers {
     }
 
     private static let rawMemoLock = NSLock()
-    private static var rawMemo: [RawMemoKey: RawMemoEntry] = [:]
+    // Swift 6: nonisolated(unsafe) — every access is serialized
+    // by rawMemoLock (rawMemoGet / rawMemoSet); the stored roots
+    // are immutable JSON snapshots. Synchronous lock access is
+    // load-bearing (callers are sync), so the lock discipline
+    // is kept rather than moving the memo behind an actor.
+    private nonisolated(unsafe) static var rawMemo: [RawMemoKey: RawMemoEntry] = [:]
     private static let rawMemoTTL: TimeInterval = 120
 
     private static func rawMemoGet(_ code: String, _ req: ListRequest) -> [String: Any]? {
@@ -393,14 +398,14 @@ enum Providers {
     /// header-gated CDN — see JoeProxy); headers are the extra
     /// headers the CDN demands, applied by the proxy upstream or
     /// by the player for direct candidates.
-    struct LadderEntry {
+    struct LadderEntry: Sendable {
         var url: String
         var title: String
         var proxy: Bool = false
         var headers: [String: String] = [:]
     }
 
-    struct Ladder {
+    struct Ladder: Sendable {
         var entries: [LadderEntry] = []
         var matchedEpName = ""
         var isEmpty: Bool { entries.isEmpty }
@@ -625,7 +630,10 @@ enum Providers {
     }
 
     private static let resolveMemoLock = NSLock()
-    private static var resolveMemo: [String: ResolveMemoEntry] = [:]
+    // Swift 6: nonisolated(unsafe) — every access is serialized
+    // by resolveMemoLock (resolveMemoGet / resolveMemoSet);
+    // synchronous lock access is load-bearing, as above.
+    private nonisolated(unsafe) static var resolveMemo: [String: ResolveMemoEntry] = [:]
     private static let resolveMemoTTL: TimeInterval = 600
 
     private static func resolveMemoKey(code: String, episode e: Episode) -> String? {
@@ -760,7 +768,10 @@ enum Providers {
     /// contexts that can overlap; the pre-v1.9 plain static var
     /// was unsynchronised shared mutable state.
     private static let altCacheLock = NSLock()
-    private static var altCache: [String: [String: String]] = [:]
+    // Swift 6: nonisolated(unsafe) — every access is serialized
+    // by altCacheLock (altCacheGet / altCacheSet); synchronous
+    // lock access is load-bearing, as above.
+    private nonisolated(unsafe) static var altCache: [String: [String: String]] = [:]
 
     private static func altCacheGet(_ key: String) -> [String: String]? {
         altCacheLock.lock()
@@ -778,7 +789,10 @@ enum Providers {
     /// alternative search below: the search runs in an
     /// unstructured task (so the deadline can abandon it
     /// mid-flight) and publishes progress here.
-    private final class AltSearchBox {
+    /// Swift 6: @unchecked Sendable — every stored property is
+    /// touched only under `lock` (the findAlternatives pattern:
+    /// publisher tasks write, the polling caller reads).
+    private final class AltSearchBox: @unchecked Sendable {
         private let lock = NSLock()
         private var found: [String: String] = [:]
         private var finished = false
@@ -955,7 +969,7 @@ enum Providers {
     /// ladder ran to completion and the title carries no
     /// reachable IMDb identity this session — consumers must
     /// not re-derive a weaker answer behind its back.
-    struct FilmIdentity {
+    struct FilmIdentity: Sendable {
         var imdbId = ""
         var tmdbId = ""
         var tmdbType = ""
@@ -969,7 +983,10 @@ enum Providers {
     /// does not violate the fresh-resolution rule.
     /// Lock-guarded like the alt cache above (C-15).
     private static let idCacheLock = NSLock()
-    private static var idCache: [String: FilmIdentity] = [:]
+    // Swift 6: nonisolated(unsafe) — every access is serialized
+    // by idCacheLock (identityCacheGet / identityCacheSet);
+    // synchronous lock access is load-bearing, as above.
+    private nonisolated(unsafe) static var idCache: [String: FilmIdentity] = [:]
 
     static func identityKey(name: String, year: String, fromCode: String) -> String {
         filmKey(name: name, year: year) + "@" + fromCode

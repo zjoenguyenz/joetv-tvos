@@ -95,7 +95,7 @@ final class PhimStore: ObservableObject {
 
     /// One rail job: a stable cache key, the provider it belongs
     /// to (for error attribution), and the request to fetch.
-    private struct Job {
+    private struct Job: Sendable {
         let key: String
         let provider: String
         let request: Providers.ListRequest
@@ -484,6 +484,10 @@ enum LoadSignpost {
 /// task is detached, so the "has any data landed" fact and the
 /// trip decision live here — never on the main actor the
 /// watchdog exists to monitor.
+/// Swift 6: @unchecked Sendable — justified by the lock: both
+/// flags are read and written only under `lock`, and the box
+/// exists precisely to be shared between the main actor and
+/// the watchdog's detached clock task.
 private final class LoadWatchdogBox: @unchecked Sendable {
     let generation: Int
     private let lock = NSLock()
@@ -528,6 +532,10 @@ private final class LoadWatchdogBox: @unchecked Sendable {
 /// drains them on the main actor. The worker is never awaited
 /// by the consumer, so a stuck job cannot hold the load open
 /// past its deadline.
+/// Swift 6: @unchecked Sendable — justified by the lock: the
+/// pending queue and both flags are read and written only
+/// under `lock`; the box is the one channel between the
+/// detached load worker and the store's main-actor consumer.
 private final class PhimLoadBox: @unchecked Sendable {
     typealias Result = (key: String, provider: String, movies: [Movie]?, error: String?)
 
@@ -676,7 +684,7 @@ private enum PhimRailCache {
     }
 }
 
-struct TorGenreRail {
+struct TorGenreRail: Sendable {
     var type: String
     var genre: String
     var title: String

@@ -973,6 +973,10 @@ struct PosterCard: View {
         .padding(.top, theme.artInset)
         .padding(.bottom, 14)
         .frame(width: theme.cardWidth, alignment: .leading)
+        // The card's content is clipped to the card shape:
+        // the poster can never paint outside the frame it
+        // sits in (fault (d) geometry, below).
+        .clipShape(RoundedRectangle(cornerRadius: theme.rCard))
         // v2.0.29 (item 5): the ring used to be an .overlay
         // — the TOP layer — so its 6 pt inset band painted
         // OVER the first and last glyphs of the title/meta
@@ -999,18 +1003,36 @@ struct PosterCard: View {
         // poster + plate — exactly the wrap the owner
         // asked for. It cannot cut the text any more: the
         // text stack above is inset by the ring's width.
+        //
+        // Swift 6 round (fault (d), owner device test of
+        // 2.0.31, 2026-11-18): the RESTING white stroke
+        // still failed on device — kept in the background
+        // under L1, it stayed UNDER the opaque full-bleed
+        // art, so the poster overflowed and covered the
+        // frame on the sides/top ("vòng trắng quanh poster
+        // KHÔNG cover hết poster — hình poster bự hơn,
+        // tràn ra che mất viền"), and where a poster's
+        // fitted bitmap exposed a segment the frame showed
+        // unevenly, reading as the image sitting low with
+        // the frame exposed at the top. The resting stroke
+        // therefore moves INTO the overlay, on the same
+        // shape with the same values it always carried
+        // (theme.stroke, 1.5): the white frame now paints
+        // over the poster's edge on every side, uniformly,
+        // and the clip above keeps the poster inside the
+        // frame — no overflow, no exposed segment. The
+        // FOCUSED band is byte-identical to L1 (theme.focus
+        // at theme.ringWidth in this same overlay shape);
+        // the resting stroke cannot cut the text for the
+        // same reason the focused band cannot — the text
+        // stack is inset by the ring's width, far past 1.5.
         .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: theme.rCard)
-                    .fill(theme.surfaceGradient)
-                RoundedRectangle(cornerRadius: theme.rCard)
-                    .strokeBorder(isFocused ? theme.focus : theme.stroke,
-                                  lineWidth: isFocused ? theme.ringWidth : 1.5)
-            })
+            RoundedRectangle(cornerRadius: theme.rCard)
+                .fill(theme.surfaceGradient))
         .overlay(
             RoundedRectangle(cornerRadius: theme.rCard)
-                .strokeBorder(theme.focus,
-                              lineWidth: isFocused ? theme.ringWidth : 0))
+                .strokeBorder(isFocused ? theme.focus : theme.stroke,
+                              lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }
 

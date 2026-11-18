@@ -15,8 +15,8 @@ import Darwin
 /// never be silently replaced by a same-named different
 /// film anywhere in the chain. Nil on every non-TVB
 /// route; those flows are untouched.
-struct TVBRouteContext: Hashable {
-    struct Holder: Hashable {
+struct TVBRouteContext: Hashable, Sendable {
+    struct Holder: Hashable, Sendable {
         var provider: String
         var slug: String
         /// True when the pipeline matched this record by
@@ -28,6 +28,12 @@ struct TVBRouteContext: Hashable {
     var tmdbId: Int
     var imdbId: String
     var holders: [Holder]
+    /// The snapshot's own TMDB backdrop path for this
+    /// title ("" when the spine carries none). The detail's
+    /// TVB enrichment paints THIS backdrop when the
+    /// ID-verified TMDB record has none — never a
+    /// name-search hit (see JoeMovieDetail.backdropHunt).
+    var backdropPath: String = ""
 
     /// Does a loaded payload CONTRADICT this identity?
     /// Only a stated id can contradict: a payload whose
@@ -54,11 +60,25 @@ struct TVBRouteContext: Hashable {
     /// record — the pipeline's guess, 548 of the shipped
     /// snapshot's 790 primaries — must AFFIRM: the
     /// payload's own TMDB or IMDb id must equal the
-    /// snapshot's. A payload carrying no ids at all can
-    /// neither affirm nor contradict; it stands (nothing
-    /// better exists to check against — every client in
-    /// the chain stamps a TMDB id when its backend knows
-    /// one, so this is the rare tail, not the rule).
+    /// snapshot's.
+    ///
+    /// Swift 6 round (fault c, owner device test of
+    /// 2.0.31, 2026-11-18): a fallback record whose
+    /// payload carries NO ids at all used to STAND here
+    /// ("can neither affirm nor contradict") — and on
+    /// device that tail was not rare: an id-less payload
+    /// is exactly what a wrong slug guessed by name
+    /// returns, so the page painted a different film's
+    /// detail under the TVB title while every stated-id
+    /// check passed. A fallback record now fails CLOSED
+    /// on an id-less payload: the holder is struck, the
+    /// page walks the remaining holders, and at
+    /// exhaustion it lands on the no-exact-source state
+    /// — the snapshot's own data or an honest refusal,
+    /// never another film. ID-matched records are
+    /// unchanged: their slug was derived from a verified
+    /// id, so an id-less payload contradicts nothing and
+    /// still stands exactly as before.
     func accepts(_ m: Movie, provider: String) -> Bool {
         if contradicts(m) { return false }
         guard let holder = holders.first(where: { $0.provider == provider })
@@ -68,12 +88,12 @@ struct TVBRouteContext: Hashable {
             return (!m.tmdbId.isEmpty && Int(m.tmdbId) == tmdbId)
                 || (!imdbId.isEmpty && !m.imdbId.isEmpty && m.imdbId == imdbId)
         }
-        return true
+        return false
     }
 }
 
 /// Route into a movie detail, from any rail or search result.
-struct MovieRoute: Hashable {
+struct MovieRoute: Hashable, Sendable {
     var provider: String
     var slug: String
     var name: String

@@ -115,6 +115,22 @@ private struct PlayerController: UIViewControllerRepresentable {
     /// Watches the item: ready → tell the view to drop its "loading"
     /// label; failed (status or end-of-playback error) → advance to
     /// the fixture's next source, at most once per item.
+    ///
+    /// MainActor-isolated (Swift 6): the observation callbacks arrive
+    /// from non-isolated contexts — the KVO handler runs on whatever
+    /// thread changed the item's status, and the NotificationCenter
+    /// block carries no isolation of its own — while everything the
+    /// coordinator touches (its tokens, its `fired` flag, the view's
+    /// callbacks) is main-actor state. Isolating the class makes the
+    /// once-only flag race-free by construction (the old code set it
+    /// directly on the KVO thread). The KVO path reads the status
+    /// VALUE inside the handler and hops to the main actor carrying
+    /// only that Sendable value, never the item; the notification is
+    /// delivered on the main queue (queue: .main), so touching the
+    /// isolated state synchronously via assumeIsolated is sound
+    /// there. Both callbacks still reach the view on the main actor,
+    /// exactly as the old DispatchQueue.main hops delivered them.
+    @MainActor
     final class Coordinator {
         private var statusToken: NSKeyValueObservation?
         private var failToken: NSObjectProtocol?
@@ -129,27 +145,42 @@ private struct PlayerController: UIViewControllerRepresentable {
 
         func observe(_ item: AVPlayerItem) {
             statusToken = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+                // Read the status VALUE here and hop: the KVO handler
+                // is a non-isolated context, the coordinator's state
+                // is main-actor state (Swift 6).
+                let status = item.status
                 guard let self else { return }
-                switch item.status {
-                case .readyToPlay:
-                    DispatchQueue.main.async { self.onReady() }
-                case .failed:
-                    fireOnce()
-                default:
-                    break
+                Task { @MainActor in
+                    self.handleStatus(status)
                 }
             }
             failToken = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
             ) { [weak self] _ in
-                self?.fireOnce()
+                // Delivered on the main queue (queue: .main), so the
+                // coordinator's main-actor state may be touched
+                // synchronously via assumeIsolated.
+                MainActor.assumeIsolated {
+                    self?.fireOnce()
+                }
+            }
+        }
+
+        private func handleStatus(_ status: AVPlayerItem.Status) {
+            switch status {
+            case .readyToPlay:
+                onReady()
+            case .failed:
+                fireOnce()
+            default:
+                break
             }
         }
 
         private func fireOnce() {
             guard !fired else { return }
             fired = true
-            DispatchQueue.main.async { self.onFail() }
+            onFail()
         }
 
         func invalidate() {

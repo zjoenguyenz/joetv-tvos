@@ -1,7 +1,7 @@
 import Foundation
 
 /// One TMDB cast entry for the detail screen's "Diễn viên" row.
-struct TMDBCastMember: Identifiable {
+struct TMDBCastMember: Identifiable, Sendable {
     var id: Int
     var name: String
     var character: String
@@ -12,7 +12,7 @@ struct TMDBCastMember: Identifiable {
 /// one part of a movie collection / franchise (idea 21). The
 /// identity is the (type, tmdbId) pair, matching the string-id
 /// conventions used across this client.
-struct TMDBCreditTitle: Identifiable {
+struct TMDBCreditTitle: Identifiable, Sendable {
     var tmdbId: String      // string form, matching TMDBInfo-era conventions in this file
     var type: String        // "movie" | "tv"
     var title: String
@@ -26,7 +26,7 @@ struct TMDBCreditTitle: Identifiable {
 /// (Vietnamese) overview and the top-billed cast. Every field is
 /// optional in effect — an empty value simply means the detail
 /// screen keeps using the provider's own art and text.
-struct TMDBInfo {
+struct TMDBInfo: Sendable {
     var backdropURL: String = ""
     var overview: String = ""
     var cast: [TMDBCastMember] = []
@@ -122,11 +122,16 @@ enum TMDBClient {
 
     // MARK: - Ultra enrichment (v2.0.19): logo + rating caches
 
-    private static var infoCache: [String: TMDBInfo] = [:]
-    private static var logoCache: [String: String] = [:]
-    private static var ratingCache: [String: Double] = [:]
-    private static var personCreditsCache: [Int: [TMDBCreditTitle]] = [:]
-    private static var collectionCache: [Int: [TMDBCreditTitle]] = [:]
+    // Swift 6: nonisolated(unsafe) on the five caches below —
+    // every access is serialized by cacheLock, and cachedRating
+    // is a synchronous read used by poster cells, so actor
+    // isolation would change public signatures. The lock
+    // discipline is unchanged from the pre-migration code.
+    private nonisolated(unsafe) static var infoCache: [String: TMDBInfo] = [:]
+    private nonisolated(unsafe) static var logoCache: [String: String] = [:]
+    private nonisolated(unsafe) static var ratingCache: [String: Double] = [:]
+    private nonisolated(unsafe) static var personCreditsCache: [Int: [TMDBCreditTitle]] = [:]
+    private nonisolated(unsafe) static var collectionCache: [Int: [TMDBCreditTitle]] = [:]
     private static let cacheLock = NSLock()
 
     /// The title's logo art (TMDB /images): Vietnamese first,
