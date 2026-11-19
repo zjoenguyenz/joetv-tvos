@@ -133,19 +133,22 @@ enum JoeHTTP {
         // Swift 6: the task-group children below are
         // `sending` closures and may not capture a `var`
         // the enclosing task still touches (the PerfLog
-        // lines after the group read request.url). The
+        // lines after the group read the url). The
         // mutation is finished, so freeze the completed
         // request into an immutable snapshot for the
         // children to capture — same request, same
-        // timeout, same headers as before.
-        let request = request
+        // timeout, same headers as before. The snapshot
+        // carries its own name: `let request = request`
+        // would be an invalid redeclaration of the
+        // `var request` in this same scope.
+        let frozenRequest = request
         let collector = JoeMetricsCollector()
         do {
             let (data, response) = try await withThrowingTaskGroup(
                 of: (Data, URLResponse).self
             ) { group in
                 group.addTask {
-                    try await sharedSession.data(for: request, delegate: collector)
+                    try await sharedSession.data(for: frozenRequest, delegate: collector)
                 }
                 group.addTask {
                     try await Task.sleep(
@@ -178,11 +181,11 @@ enum JoeHTTP {
                 }
             }
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            PerfLog.http(host: request.url?.host ?? "?", status: status,
+            PerfLog.http(host: frozenRequest.url?.host ?? "?", status: status,
                          bytes: data.count, metrics: collector.metrics)
             return (data, response)
         } catch {
-            PerfLog.http(host: request.url?.host ?? "?", status: -1,
+            PerfLog.http(host: frozenRequest.url?.host ?? "?", status: -1,
                          bytes: 0, metrics: collector.metrics)
             throw error
         }
