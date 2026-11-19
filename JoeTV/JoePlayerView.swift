@@ -1621,21 +1621,11 @@ final class PlayDirector: ObservableObject {
         // FIX4 (fix 6): the Up Next trigger moves from the
         // END of the item to its last 10 seconds (owner
         // finding on 2.0.27: the card appeared only once the
-        // episode had already ended). tick() runs ≈ every
-        // 5 s on both engines, so the first tick inside the
-        // window opens the card with the countdown started
-        // at the seconds ACTUALLY remaining (rounded up, so
-        // the factory fires at — never before — the item's
-        // end). Runs before the save rule below on purpose:
-        // the last-30 s branch returns early.
-        if nextEpisodeFactory != nil, !upNextArmed, durationMs > 0 {
-            let remainingMs = durationMs - positionMs
-            if remainingMs > 0, remainingMs <= 10_000 {
-                upNextArmed = true
-                startUpNextCountdown(
-                    initialSeconds: Int((remainingMs + 999) / 1000))
-            }
-        }
+        // episode had already ended). The check itself lives
+        // in armUpNextIfInWindow below; tick() runs it before
+        // the save rule on purpose: the last-30 s branch
+        // returns early.
+        armUpNextIfInWindow(positionMs: positionMs, durationMs: durationMs)
         guard durationMs > 0, positionMs > 10_000 else { return }
         if positionMs >= durationMs - 30_000 {
             store.removeProgress(matching: identity.entry)
@@ -1646,6 +1636,42 @@ final class PlayDirector: ObservableObject {
         e.dur = durationMs
         e.ts = Int64(Date().timeIntervalSince1970 * 1000)
         store.saveProgress(e)
+    }
+
+    /// The Up Next arming check (FIX4 fix 6, factored out
+    /// in v2.0.37): inside the item's last 10 seconds, arm
+    /// the countdown ONCE, started at the seconds ACTUALLY
+    /// remaining (rounded up, so the factory fires at —
+    /// never before — the item's end).
+    private func armUpNextIfInWindow(positionMs: Int64, durationMs: Int64) {
+        guard nextEpisodeFactory != nil, !upNextArmed, durationMs > 0 else { return }
+        let remainingMs = durationMs - positionMs
+        if remainingMs > 0, remainingMs <= 10_000 {
+            upNextArmed = true
+            startUpNextCountdown(
+                initialSeconds: Int((remainingMs + 999) / 1000))
+        }
+    }
+
+    /// v2.0.37 (item 4): the fine-grained Up Next probe.
+    /// tick() arrives only every ≈5 s on BOTH engines (the
+    /// AVPlayer periodic observer's interval; the KS
+    /// delegate's throttle), so a 10-second arming window
+    /// checked only there is quantised by that cadence: the
+    /// first tick inside the window lands anywhere between
+    /// 10 s and ≈5 s remaining — the owner's 2.0.28
+    /// measurement was ≈5 s, under his standing "appear
+    /// before the final 10 seconds" rule. The hosts now
+    /// ALSO feed this probe on a 1-second cadence (a second
+    /// AVPlayer periodic observer; the KS delegate's own
+    /// callback throttled to 1 s), so the card opens as the
+    /// episode crosses into its last 10 seconds. The probe
+    /// does NOTHING but the arming check: position
+    /// bookkeeping (lastPosMs / furthestPosMs / the CW save
+    /// rule) stays owned by tick() alone, and upNextArmed
+    /// makes a tick/probe double-arm impossible.
+    func upNextProbe(positionMs: Int64, durationMs: Int64) {
+        armUpNextIfInWindow(positionMs: positionMs, durationMs: durationMs)
     }
 
     /// Playback reached the end cleanly: the title is finished —
@@ -2549,6 +2575,7 @@ private struct PlayerController: UIViewControllerRepresentable {
         private var failToken: NSObjectProtocol?
         private var endToken: NSObjectProtocol?
         private var timeToken: Any?
+        private var upNextToken: Any?
         private weak var player: AVPlayer?
         /// Idea 13 chrome (v2.0.27): the hosting controller
         /// (the transport menu + info tab are set on it), the
@@ -3004,6 +3031,26 @@ private struct PlayerController: UIViewControllerRepresentable {
                     self.director.tick(positionMs: pos, durationMs: dur)
                 }
             }
+            // v2.0.37 (item 4): a second, 1-second periodic
+            // observer feeding ONLY the director's Up Next
+            // probe — the 5-second tick above quantised the
+            // last-10 s arming window down to as little as
+            // ≈5 s of warning (see PlayDirector.upNextProbe).
+            // Same Sendable-time hop pattern as the tick
+            // observer; the probe touches no save state.
+            upNextToken = player.addPeriodicTimeObserver(
+                forInterval: CMTime(seconds: 1, preferredTimescale: 600),
+                queue: .main
+            ) { [weak self] time in
+                let seconds = time.seconds
+                guard let self else { return }
+                Task { @MainActor in
+                    guard let item = self.player?.currentItem else { return }
+                    let pos = Int64(seconds * 1000)
+                    let dur = item.duration.seconds.isFinite ? Int64(item.duration.seconds * 1000) : 0
+                    self.director.upNextProbe(positionMs: pos, durationMs: dur)
+                }
+            }
             // Idea 13: the new item gets its metadata, menu
             // and info-tab labels (see refreshChrome).
             refreshChrome(for: item)
@@ -3180,6 +3227,10 @@ private struct PlayerController: UIViewControllerRepresentable {
                 player.removeTimeObserver(timeToken)
             }
             timeToken = nil
+            if let upNextToken, let player {
+                player.removeTimeObserver(upNextToken)
+            }
+            upNextToken = nil
         }
     }
 }

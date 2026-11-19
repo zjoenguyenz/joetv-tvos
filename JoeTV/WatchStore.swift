@@ -119,6 +119,66 @@ final class WatchStore: ObservableObject {
             guard dur > 0 else { return 0 }
             return min(1, max(0, Double(pos) / Double(dur)))
         }
+
+        /// v2.0.37 (cluster E, item 9): the TVB snapshot
+        /// context this entry must reopen under, rebuilt
+        /// from the identity stamped on the entry itself —
+        /// or nil when the entry carries no usable TVB
+        /// identity, in which case the reopen is EXACTLY
+        /// as it has always been (fail OPEN: a legacy
+        /// entry is never blocked by this gate).
+        ///
+        /// Why this exists: a TVB title's Continue
+        /// Watching / Favourites row stores only provider
+        /// + slug + episode (the ADDENDUM RULE above), and
+        /// the rails mint their MovieRoute from those
+        /// fields alone — the TVB snapshot context the
+        /// original tap carried (TVBTitle.routeContext)
+        /// is dropped, so the reopened detail runs with
+        /// route.tvb == nil and the L7 identity gate
+        /// (JoeMovieDetail.tvbGate) passes every payload
+        /// straight through: the stored slug is trusted
+        /// blindly, and a slug that now resolves to a
+        /// different film plays that film. Rebuilding the
+        /// context here — at the stored-data layer, from
+        /// the entry's own stamps — puts the reopen back
+        /// under the same gate, holder walk and Film4K
+        /// leg as a fresh TVB tap, with no schema change:
+        /// the stamps are the canonical-identity fields
+        /// v2.0.29 already added (progress saves stamp
+        /// them from the gated detail payload in
+        /// JoeMovieDetail.makeDirector; the tolerant
+        /// reader below decodes their absence on older
+        /// entries as "", which is the fail-open case).
+        ///
+        /// Identity strength, strongest first: the TMDB
+        /// id (the TVB flow's own spine key), then the
+        /// IMDb id (the entry's stamped field, or the
+        /// torrent meta id via imdbId(of:) — a TVB entry
+        /// is a provider entry, so in practice the
+        /// stamped field). An id that matches NO displayed
+        /// snapshot title also returns nil: the film is
+        /// not a TVB title (the ordinary catalogue stamps
+        /// TMDB ids too), and its reopen is untouched.
+        /// When the entry's stored (source, slug) is not
+        /// one of the snapshot's holders for the matched
+        /// title, the context still returns — the gate
+        /// judges that slug as a non-holder under the
+        /// affirm rule (TVBRouteContext.accepts), strikes
+        /// it on mismatch and walks the real holders
+        /// instead of playing the wrong film.
+        var tvbRouteContext: TVBRouteContext? {
+            if let stamped = Int(tmdbId), stamped > 0,
+               let title = TVBSnapshotLookup.title(tmdbId: stamped) {
+                return title.routeContext
+            }
+            let storedImdbId = WatchStore.imdbId(of: self)
+            if !storedImdbId.isEmpty,
+               let title = TVBSnapshotLookup.title(imdbId: storedImdbId) {
+                return title.routeContext
+            }
+            return nil
+        }
     }
 
     @Published private(set) var progressEntries: [Entry] = []

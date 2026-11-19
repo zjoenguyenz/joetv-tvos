@@ -1012,7 +1012,8 @@ struct JoeWallHomeView: View {
                     Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
-                        year: entry.year, preselectEp: entry.ep) } label: {
+                        year: entry.year, preselectEp: entry.ep,
+                        tvb: entry.tvbRouteContext) } label: {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
@@ -1044,7 +1045,8 @@ struct JoeWallHomeView: View {
                     Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
-                        year: entry.year) } label: {
+                        year: entry.year,
+                        tvb: entry.tvbRouteContext) } label: {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,

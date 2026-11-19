@@ -187,6 +187,12 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// Director ticks ride the AV path's ~5 s cadence even
     /// though the engine reports time every 0.1 s.
     private var lastTickAt = Date.distantPast
+    /// v2.0.37 (item 4): the Up Next probe's own 1 s
+    /// throttle — the engine reports every 0.1 s, the probe
+    /// needs only enough resolution to arm the card as the
+    /// episode crosses into its last 10 seconds (see
+    /// PlayDirector.upNextProbe).
+    private var lastProbeAt = Date.distantPast
 
     // MARK: - Transport bar (v2.0.12)
 
@@ -2032,10 +2038,22 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
 
     func player(layer: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
         let now = Date()
+        let durationMs = totalTime.isFinite ? Int64(totalTime * 1000) : 0
+        // v2.0.37 (item 4): the Up Next probe rides this
+        // same callback on a 1 s throttle, ahead of the 5 s
+        // tick gate below — checked only there, the last-10 s
+        // arming window was quantised by the tick cadence
+        // and the card could appear with as little as ≈5 s
+        // left (see PlayDirector.upNextProbe).
+        if now.timeIntervalSince(lastProbeAt) >= 1 {
+            lastProbeAt = now
+            director?.upNextProbe(positionMs: Int64(currentTime * 1000),
+                                  durationMs: durationMs)
+        }
         guard now.timeIntervalSince(lastTickAt) >= 5 else { return }
         lastTickAt = now
         director?.tick(positionMs: Int64(currentTime * 1000),
-                       durationMs: totalTime.isFinite ? Int64(totalTime * 1000) : 0)
+                       durationMs: durationMs)
     }
 
     func player(layer: KSPlayerLayer, finish error: Error?) {

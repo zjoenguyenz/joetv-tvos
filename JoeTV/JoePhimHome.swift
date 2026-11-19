@@ -353,6 +353,7 @@ struct JoePhimHome: View {
                 }
                 cwRail
                 favRail
+                followRail
                 ForEach(railSpecs) { spec in
                     if !spec.movies.isEmpty {
                         if let band = spec.bandName {
@@ -442,6 +443,7 @@ struct JoePhimHome: View {
                 }
                 cwRail
                 favRail
+                followRail
                 ForEach(railSpecs) { spec in
                     if !spec.movies.isEmpty {
                         if let band = spec.bandName {
@@ -761,13 +763,20 @@ struct JoePhimHome: View {
                                      movies: trendingMovies, badges: true),
                          at: insertAt)
         }
-        // IDEA 7a: the Following rail, appended last, only
-        // when the owner follows at least one title.
-        if !followStore.followed.isEmpty {
-            specs.append(JoeRailSpec(scope: "following",
-                                     title: "📌 Đang theo dõi",
-                                     movies: followedMovies, badges: true))
-        }
+        // IDEA 7a: the Following rail is NOT a spec here.
+        // v2.0.37 (cluster D): it used to be appended LAST,
+        // after every catalogue / genre / country / provider
+        // rail (~26 rails), so an owner who followed a title
+        // on a detail page could not find the "Đang theo dõi"
+        // section on the home screen (his 2.0.27 finding —
+        // the same complaint the 2.0.28 fix 7 answered for
+        // theme D by placing followWallRail beside Continue
+        // Watching / Favourites). It now renders as the
+        // dedicated owner shelf `followRail` directly under
+        // favRail in railHome / ultraHome, in the same
+        // position pattern as theme D. Side benefit: the
+        // hero's candidate pool (railSpecs.flatMap) is
+        // catalogue-only again, as it was before 7a.
         return specs
     }
 
@@ -1483,7 +1492,8 @@ struct JoePhimHome: View {
                     Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
-                        year: entry.year, preselectEp: entry.ep) } label: {
+                        year: entry.year, preselectEp: entry.ep,
+                        tvb: entry.tvbRouteContext) } label: {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
@@ -1520,7 +1530,8 @@ struct JoePhimHome: View {
                     Button { nav.movie = MovieRoute(
                         provider: entry.source, slug: entry.slug,
                         name: entry.title, poster: entry.poster,
-                        year: entry.year) } label: {
+                        year: entry.year,
+                        tvb: entry.tvbRouteContext) } label: {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
@@ -1544,6 +1555,29 @@ struct JoePhimHome: View {
                     // above).
                 }
             }
+        }
+    }
+
+    /// IDEA 7a (v2.0.37, cluster D): the Following owner
+    /// shelf for the rail homes (A / F) and the Ultra home —
+    /// the third owner shelf, directly under Continue
+    /// Watching / Favourites, exactly where theme D's
+    /// followWallRail sits (JoeBrowse.swift). It renders
+    /// through the SAME movieRail construction the rail
+    /// previously used when it rode railSpecs (same Rail,
+    /// same PosterCard, same "following|<id>" focus binding,
+    /// and movieRail's existing scope == "following" tap
+    /// rule clears the new-episode badge via markSeen) —
+    /// only its POSITION changed, from last to the owner
+    /// group. Visibility rule unchanged: only when the
+    /// owner follows at least one title (followStore is the
+    /// @ObservedObject FollowStore.shared, so it appears /
+    /// disappears the moment a follow toggles).
+    @ViewBuilder
+    private var followRail: some View {
+        if !followStore.followed.isEmpty {
+            movieRail("📌 Đang theo dõi", followedMovies,
+                      badges: true, scope: "following")
         }
     }
 

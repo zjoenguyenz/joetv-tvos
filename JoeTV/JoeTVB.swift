@@ -261,6 +261,73 @@ struct TVBTitle: Codable, Sendable, Identifiable {
     }
 }
 
+// MARK: - Snapshot identity lookup (v2.0.37, cluster E item 9)
+//
+// The reopen gate's snapshot side: WatchStore.Entry
+// .tvbRouteContext (WatchStore.swift) names a stored
+// Continue Watching / Favourites entry by its stamped
+// TMDB or IMDb id, and this lookup answers "which
+// DISPLAYED snapshot title — if any — carries that id?"
+// Only displayed titles are indexed (an unresolved title
+// has no holders to reopen through, so it can never be
+// the answer). The maps are built once from the bundled
+// snapshot and cached for the session, lock-guarded in
+// the Providers raw-memo idiom; the snapshot file is
+// immutable for the process's life, so the cache never
+// needs invalidation. A miss is meaningful: the entry's
+// film is not a TVB snapshot title (the ordinary Phim
+// catalogue carries TMDB ids too), and its reopen stays
+// exactly as it has always been.
+enum TVBSnapshotLookup {
+    private static let lock = NSLock()
+    // Swift 6: nonisolated(unsafe) — every access is
+    // serialized by lock (maps()); the published maps are
+    // immutable snapshots of immutable bundled data.
+    private nonisolated(unsafe) static var byTmdbId: [Int: TVBTitle]?
+    private nonisolated(unsafe) static var byImdbId: [String: TVBTitle]?
+
+    private static func maps() -> (tmdb: [Int: TVBTitle],
+                                   imdb: [String: TVBTitle]) {
+        lock.lock()
+        if let byTmdbId, let byImdbId {
+            lock.unlock()
+            return (byTmdbId, byImdbId)
+        }
+        lock.unlock()
+        // Built outside the lock; racing builders build
+        // identical maps from the same immutable file,
+        // and the first publisher wins.
+        var tmdb: [Int: TVBTitle] = [:]
+        var imdb: [String: TVBTitle] = [:]
+        if let catalog = TVBCatalog.loadBundled() {
+            for title in catalog.titles where title.isDisplayed {
+                tmdb[title.tmdbId] = title
+                if let imdbId = title.imdbId, !imdbId.isEmpty {
+                    imdb[imdbId] = title
+                }
+            }
+        }
+        lock.lock()
+        if byTmdbId == nil {
+            byTmdbId = tmdb
+            byImdbId = imdb
+        }
+        let published = (tmdb: byTmdbId ?? tmdb,
+                         imdb: byImdbId ?? imdb)
+        lock.unlock()
+        return published
+    }
+
+    static func title(tmdbId: Int) -> TVBTitle? {
+        maps().tmdb[tmdbId]
+    }
+
+    static func title(imdbId: String) -> TVBTitle? {
+        guard !imdbId.isEmpty else { return nil }
+        return maps().imdb[imdbId]
+    }
+}
+
 // MARK: - TVB section root
 //
 // One new section beside the existing ones, on the shell's
