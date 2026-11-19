@@ -2762,9 +2762,15 @@ private struct JoeCastCellLabel: View {
     /// state, neither of which applies to another
     /// holder's payload). Static so the probe's
     /// task-group children can call it without capturing
-    /// the view. Nil when the holder's detail carries no
-    /// playable episode at all.
-    private static func tvbOwnTarget(
+    /// the view. `nonisolated` is load-bearing: a member
+    /// of a View type is MainActor-isolated by default in
+    /// Swift 6, so without it the children cannot call
+    /// this synchronous helper at all (joetv-tvos CI
+    /// run #7's only error). The body is pure — parameters
+    /// plus Providers' nonisolated statics only — so the
+    /// opt-out is exact, not a workaround. Nil when the
+    /// holder's detail carries no playable episode at all.
+    private nonisolated static func tvbOwnTarget(
         code: String, detail d: Detail
     ) -> (name: String, num: Int)? {
         for server in d.servers {
