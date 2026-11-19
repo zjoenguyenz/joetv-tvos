@@ -1204,19 +1204,19 @@ enum TorrentClient {
     /// timeout ≤ 8 s, or no redirect at all).
     private static func preResolved(_ url: URL) async -> URL {
         let key = url.absoluteString
-        finalURLCacheLock.lock()
-        let cached = finalURLCache[key]
-        finalURLCacheLock.unlock()
-        if let cached { return cached }
+        // Swift 6: scoped withLock — lock()/unlock() are
+        // unavailable from asynchronous contexts. The probe
+        // await stays outside the lock, exactly as before.
+        if let cached = finalURLCacheLock.withLock({ finalURLCache[key] }) {
+            return cached
+        }
         let probe = RedirectProbe()
         guard let final = await probe.run(url: url, timeout: 8) else {
             PlaybackLog.logger.error(
                 "pre-resolve failed host=\(url.host ?? "?", privacy: .public) — falling back to the original URL")
             return url
         }
-        finalURLCacheLock.lock()
-        finalURLCache[key] = final
-        finalURLCacheLock.unlock()
+        finalURLCacheLock.withLock { finalURLCache[key] = final }
         return final
     }
 

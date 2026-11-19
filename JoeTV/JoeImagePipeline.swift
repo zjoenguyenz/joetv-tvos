@@ -137,17 +137,17 @@ final class JoeImagePipeline: @unchecked Sendable {
     func tmdbPosterURL(tmdbId: String, type: String) async -> URL? {
         guard !tmdbId.isEmpty else { return nil }
         let k = "\(tmdbId)|\(type)"
-        lock.lock()
-        let hit = tmdbPosterPaths[k]
-        lock.unlock()
+        // Swift 6: scoped withLock — lock()/unlock() are
+        // unavailable from asynchronous contexts.
+        let hit = lock.withLock { tmdbPosterPaths[k] }
         if let hit {
             return hit.isEmpty ? nil
                 : URL(string: "https://image.tmdb.org/t/p/w500" + hit)
         }
         let path = await TMDBClient.posterPath(tmdbId: tmdbId, type: type)
-        lock.lock()
-        if tmdbPosterPaths[k] == nil { tmdbPosterPaths[k] = path ?? "" }
-        lock.unlock()
+        lock.withLock {
+            if tmdbPosterPaths[k] == nil { tmdbPosterPaths[k] = path ?? "" }
+        }
         guard let path, !path.isEmpty else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/w500" + path)
     }
@@ -157,11 +157,15 @@ final class JoeImagePipeline: @unchecked Sendable {
         let bucket = Self.bucket(forPixels: targetPixels)
         let k = key(url, bucket)
         if let hit = decoded.object(forKey: k as NSString) { return hit }
-        lock.lock()
-        let task: Task<UIImage?, Never>
-        if let existing = inFlight[k] {
-            task = existing
-        } else {
+        // Swift 6: the in-flight table read/write is one
+        // scoped withLock critical section. No await happens
+        // inside it — the detached task is only CREATED here;
+        // the await on its value happens after the lock has
+        // been released, exactly as before.
+        let task: Task<UIImage?, Never> = lock.withLock {
+            if let existing = inFlight[k] {
+                return existing
+            }
             let created = Task.detached(priority: .userInitiated) {
                 let img = await Self.load(url: url, bucket: bucket,
                                           session: self.session, decoded: self.decoded)
@@ -169,9 +173,8 @@ final class JoeImagePipeline: @unchecked Sendable {
                 return img
             }
             inFlight[k] = created
-            task = created
+            return created
         }
-        lock.unlock()
         return await task.value
     }
 
@@ -191,20 +194,21 @@ final class JoeImagePipeline: @unchecked Sendable {
     /// for it is dropped when its turn comes.
     func prefetch(_ urls: [URL], targetPixels: Int) {
         let bucket = Self.bucket(forPixels: targetPixels)
-        lock.lock()
-        for url in urls {
-            let k = key(url, bucket)
-            if decoded.object(forKey: k as NSString) != nil { continue }
-            if inFlight[k] != nil { continue }
-            if prefetchBacklog.contains(where: { $0.key == k }) { continue }
-            prefetchBacklog.append((url, bucket, k))
+        lock.withLock {
+            for url in urls {
+                let k = key(url, bucket)
+                if decoded.object(forKey: k as NSString) != nil { continue }
+                if inFlight[k] != nil { continue }
+                if prefetchBacklog.contains(where: { $0.key == k }) { continue }
+                prefetchBacklog.append((url, bucket, k))
+            }
+            pumpPrefetchLocked()
         }
-        pumpPrefetchLocked()
-        lock.unlock()
     }
 
     /// Start backlog loads up to the worker cap. MUST be
-    /// called with `lock` held. Entries already decoded or
+    /// called from inside a `lock.withLock` section (i.e.
+    /// with `lock` held). Entries already decoded or
     /// already in flight (a visible load got there first)
     /// are dropped without consuming a worker slot.
     private func pumpPrefetchLocked() {
@@ -225,17 +229,15 @@ final class JoeImagePipeline: @unchecked Sendable {
     }
 
     private func prefetchTaskFinished(_ key: String) {
-        lock.lock()
-        inFlight.removeValue(forKey: key)
-        prefetchActive -= 1
-        pumpPrefetchLocked()
-        lock.unlock()
+        lock.withLock {
+            inFlight.removeValue(forKey: key)
+            prefetchActive -= 1
+            pumpPrefetchLocked()
+        }
     }
 
     private func removeInFlight(_ key: String) {
-        lock.lock()
-        inFlight.removeValue(forKey: key)
-        lock.unlock()
+        _ = lock.withLock { inFlight.removeValue(forKey: key) }
     }
 
     /// One load attempt's outcome, classified for the retry

@@ -1533,7 +1533,7 @@ private struct PlayerController: UIViewControllerRepresentable {
     /// before touching this state (the same shape the iOS
     /// player's migrated view controller uses).
     @MainActor
-    final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
+    final class Coordinator: NSObject {
         private let director: PlayDirector
         private var statusToken: NSKeyValueObservation?
         private var failToken: NSObjectProtocol?
@@ -1987,6 +1987,25 @@ private struct PlayerController: UIViewControllerRepresentable {
         }
     }
 }
+
+/// Swift 6 (SE-0470, global-actor isolated conformances):
+/// the AVPlayerViewControllerDelegate conformance is
+/// isolated to the main actor instead of declared on the
+/// class line. The class-line conformance was nonisolated
+/// while every witness is main-actor code (Coordinator is a
+/// @MainActor class), which Swift 6 rejects as a conformance
+/// "crossing into main actor-isolated code". AVKit only ever
+/// invokes this delegate on the main queue, and the sole use
+/// site — `controller.delegate = self` in
+/// Coordinator.attach — is itself main-actor code, so the
+/// isolated conformance states the real contract rather than
+/// suppressing the check (@preconcurrency was considered
+/// and rejected for exactly that reason). The delegate
+/// witness itself (playerViewController(_:
+/// willTransitionToVisibilityOfTransportBar:with:)) stays in
+/// the class body above, where its @MainActor isolation
+/// satisfies this conformance.
+extension PlayerController.Coordinator: @MainActor AVPlayerViewControllerDelegate {}
 
 extension CMTime {
     init(milliseconds: Int64) {

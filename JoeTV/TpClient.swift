@@ -286,6 +286,22 @@ enum TpClient {
         sources.first { JSON.str($0, "nickname").hasPrefix(prefix) }
     }
 
+    /// Swift 6: one fetched Gold page crossing the
+    /// throwing-task-group boundary in goldEpisodes. A task
+    /// group's child result must be Sendable and
+    /// [String: Any] cannot be — `Any` erases the proof — so
+    /// the page travels in this wrapper instead of the bare
+    /// tuple. @unchecked is honest here: `root` is a fresh
+    /// JSONSerialization tree produced by JoeHTTP.getJSON
+    /// inside the child task (JSON values only — String,
+    /// NSNumber, Bool, arrays, dictionaries, NSNull), it is
+    /// never mutated after creation, and the parent only
+    /// reads it through the JSON helpers.
+    private struct GoldPageResult: @unchecked Sendable {
+        let page: Int
+        let root: [String: Any]
+    }
+
     /// Gold episodes: detail page 1 + /episodes pages until the
     /// pagination total is collected (cap 20 pages).
     ///
@@ -314,7 +330,7 @@ enum TpClient {
         guard lastPage >= 2 else { return out }
         let pages = Array(2...lastPage)
         var byPage: [Int: [String: Any]] = [:]
-        try await withThrowingTaskGroup(of: (Int, [String: Any]).self) { group in
+        try await withThrowingTaskGroup(of: GoldPageResult.self) { group in
             for p in pages {
                 group.addTask {
                     // Gold episode paging is part of the detail's API
@@ -326,11 +342,11 @@ enum TpClient {
                     ) { budget in
                         try await JoeHTTP.getJSON(pageURL, timeout: budget)
                     }
-                    return (p, r)
+                    return GoldPageResult(page: p, root: r)
                 }
             }
-            for try await (p, r) in group {
-                byPage[p] = r
+            for try await result in group {
+                byPage[result.page] = result.root
             }
         }
         for p in pages {

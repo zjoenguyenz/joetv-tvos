@@ -85,9 +85,11 @@ enum TMDBClient {
         guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
         let kind = (type == "tv") ? "tv" : "movie"
         let cacheKey = kind + "|" + tmdbId
-        cacheLock.lock()
-        if let hit = infoCache[cacheKey] { cacheLock.unlock(); return hit }
-        cacheLock.unlock()
+        // Swift 6: scoped withLock — lock()/unlock() are
+        // unavailable from asynchronous contexts. No critical
+        // section in this client spans an await; the network
+        // calls stay outside the lock, exactly as before.
+        if let hit = cacheLock.withLock({ infoCache[cacheKey] }) { return hit }
 
         guard let root = try? await JoeHTTP.getJSON(
             "https://api.themoviedb.org/3/\(kind)/\(tmdbId)?api_key=\(key)&language=vi-VN",
@@ -116,7 +118,7 @@ enum TMDBClient {
         // in the cached payload); consumers that need the
         // logo fetch it in parallel via fetchLogo, which has
         // its own cache.
-        cacheLock.lock(); infoCache[cacheKey] = info; cacheLock.unlock()
+        cacheLock.withLock { infoCache[cacheKey] = info }
         return info
     }
 
@@ -143,9 +145,7 @@ enum TMDBClient {
         guard !key.isEmpty, !tmdbId.isEmpty else { return "" }
         let kind = (type == "tv") ? "tv" : "movie"
         let cacheKey = kind + "|" + tmdbId
-        cacheLock.lock()
-        if let hit = logoCache[cacheKey] { cacheLock.unlock(); return hit }
-        cacheLock.unlock()
+        if let hit = cacheLock.withLock({ logoCache[cacheKey] }) { return hit }
         var result = ""
         if let root = try? await JoeHTTP.getJSON(
             "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/images?api_key=\(key)&include_image_language=vi,en,null",
@@ -173,7 +173,7 @@ enum TMDBClient {
                 result = "https://image.tmdb.org/t/p/w500" + result
             }
         }
-        cacheLock.lock(); logoCache[cacheKey] = result; cacheLock.unlock()
+        cacheLock.withLock { logoCache[cacheKey] = result }
         return result
     }
 
@@ -187,15 +187,15 @@ enum TMDBClient {
         guard !tmdbId.isEmpty else { return nil }
         let kind = (type == "tv") ? "tv" : "movie"
         let cacheKey = kind + "|" + tmdbId
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        if let hit = ratingCache[cacheKey] {
-            return hit > 0 ? hit : nil
+        return cacheLock.withLock {
+            if let hit = ratingCache[cacheKey] {
+                return hit > 0 ? hit : nil
+            }
+            if let info = infoCache[cacheKey], info.voteAverage > 0 {
+                return info.voteAverage
+            }
+            return nil
         }
-        if let info = infoCache[cacheKey], info.voteAverage > 0 {
-            return info.voteAverage
-        }
-        return nil
     }
 
     /// The record's vote average for card badges (nil when
@@ -205,16 +205,11 @@ enum TMDBClient {
         guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
         let kind = (type == "tv") ? "tv" : "movie"
         let cacheKey = kind + "|" + tmdbId
-        cacheLock.lock()
-        if let hit = ratingCache[cacheKey] {
-            cacheLock.unlock()
+        if let hit = cacheLock.withLock({ ratingCache[cacheKey] }) {
             return hit > 0 ? hit : nil
         }
-        cacheLock.unlock()
         if let info = await fetchInfo(tmdbId: tmdbId, type: type) {
-            cacheLock.lock()
-            ratingCache[cacheKey] = info.voteAverage
-            cacheLock.unlock()
+            cacheLock.withLock { ratingCache[cacheKey] = info.voteAverage }
             return info.voteAverage > 0 ? info.voteAverage : nil
         }
         return nil
@@ -447,11 +442,9 @@ enum TMDBClient {
     static func fetchPersonCredits(personId: Int) async -> [TMDBCreditTitle] {
         let key = apiKey
         guard !key.isEmpty, personId > 0 else { return [] }
-        cacheLock.lock()
-        if let hit = personCreditsCache[personId] {
-            cacheLock.unlock(); return hit
+        if let hit = cacheLock.withLock({ personCreditsCache[personId] }) {
+            return hit
         }
-        cacheLock.unlock()
 
         guard let root = try? await JoeHTTP.getJSON(
             "https://api.themoviedb.org/3/person/\(personId)/combined_credits?api_key=\(key)&language=vi-VN",
@@ -471,7 +464,7 @@ enum TMDBClient {
         let result = scored
             .sorted { $0.popularity > $1.popularity }
             .map { $0.title }
-        cacheLock.lock(); personCreditsCache[personId] = result; cacheLock.unlock()
+        cacheLock.withLock { personCreditsCache[personId] = result }
         return result
     }
 
@@ -482,11 +475,7 @@ enum TMDBClient {
     static func fetchCollection(id: Int) async -> [TMDBCreditTitle] {
         let key = apiKey
         guard !key.isEmpty, id > 0 else { return [] }
-        cacheLock.lock()
-        if let hit = collectionCache[id] {
-            cacheLock.unlock(); return hit
-        }
-        cacheLock.unlock()
+        if let hit = cacheLock.withLock({ collectionCache[id] }) { return hit }
 
         guard let root = try? await JoeHTTP.getJSON(
             "https://api.themoviedb.org/3/collection/\(id)?api_key=\(key)&language=vi-VN",
@@ -500,7 +489,7 @@ enum TMDBClient {
                 if b.year.isEmpty { return true }
                 return a.year < b.year
             }
-        cacheLock.lock(); collectionCache[id] = result; cacheLock.unlock()
+        cacheLock.withLock { collectionCache[id] = result }
         return result
     }
 }
