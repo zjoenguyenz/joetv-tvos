@@ -910,6 +910,14 @@ struct JoeTVSection: View {
         entry.desc = event.desc
         let eventId = event.id
         let eventType = event.type == "tv" ? "tv" : "events"
+        // v2.0.33 (item 4b): sports session start in the
+        // persistent DiagLog file (category "sports") —
+        // the serving source's display name, the serving
+        // base's HOST only (never the full base or any
+        // token it may carry) and the stream type, so a
+        // device run's sports evidence opens with which
+        // source served this event.
+        DiagLog.write("sports", "session start source=\(Self.sportsSourceName(servingBase)) host=\(URL(string: servingBase)?.host ?? "?") type=\(eventType)")
         let director = PlayDirector(
             store: watch,
             identity: PlayIdentity(entry: entry),
@@ -923,8 +931,57 @@ struct JoeTVSection: View {
                 // with the film path's ordering discipline.
                 let streams = (try? await TorrentClient.fetchStreamsLive(
                     base: servingBase, type: eventType, id: eventId)) ?? []
-                return await TorrentClient.playCandidates(
+                // v2.0.33 (item 4b): the live fetch's yield
+                // in the DiagLog "sports" category — the
+                // count alone, so the exported file shows
+                // whether the stall began before any
+                // candidate existed or inside the player.
+                DiagLog.write("sports", "streams fetched count=\(streams.count)")
+                let ladder = await TorrentClient.playCandidates(
                     streams: TorrentClient.rankPool(streams), preferred: nil)
+                // v2.0.33 (item 4b): bounded AVPlayer twins
+                // for HLS live candidates. Rationale: the
+                // KSPlayer 5.6.2 FFmpeg engine stalls on
+                // these LIVE streams (VOD films through the
+                // same engine play fine), while AVPlayer is
+                // the system's native live-HLS engine. For
+                // each of the FIRST TWO candidates whose
+                // engine is .ffmpeg AND whose URL is HLS
+                // (an .m3u8 path extension, or ".m3u8"
+                // anywhere in the absolute string), a twin
+                // carrying the SAME url and headers on the
+                // .avPlayer engine is inserted immediately
+                // after it, labelled " · AVPlayer". The
+                // twin is only reached if the FFmpeg
+                // candidate ahead of it fails first — the
+                // ladder order is unchanged otherwise — and
+                // the item-8 attempt/failure lines will show
+                // on device whether the twin readies. The
+                // final ladder is capped at 8 entries (the
+                // tail is truncated). playCandidates itself
+                // is NOT changed (it is shared with films)
+                // and the film torrent path is untouched;
+                // the source chooser lists the ladder as
+                // built, so twins appear as their own rows.
+                var withTwins: [PlayCandidate] = []
+                withTwins.reserveCapacity(min(ladder.count + 2, 8))
+                var twinsAdded = 0
+                for (index, candidate) in ladder.enumerated() {
+                    withTwins.append(candidate)
+                    let isHLS = candidate.url.pathExtension.lowercased() == "m3u8"
+                        || candidate.url.absoluteString.contains(".m3u8")
+                    if twinsAdded < 2, candidate.engine == .ffmpeg, isHLS {
+                        var twin = candidate
+                        twin.engine = .avPlayer
+                        twin.label = candidate.label + " · AVPlayer"
+                        withTwins.append(twin)
+                        twinsAdded += 1
+                        DiagLog.write("sports", "avplayer twin added after ffmpeg candidate idx=\(index) host=\(candidate.url.host ?? "?")")
+                    }
+                }
+                let result = Array(withTwins.prefix(8))
+                DiagLog.write("sports", "ladder built count=\(result.count)")
+                return result
             },
             hopIdentity: nil)
         sportsHolder = JoeMovieDetail.DirectorHolder(

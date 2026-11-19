@@ -84,6 +84,28 @@ struct JoeMovieDetail: View {
     /// holder, later loads (the switch that follows
     /// included) never re-evaluate into a second move.
     @State private var tvbAutoPickDone = false
+    /// v2.0.33 (item 3): Details the I1 probe already
+    /// fetched and identity-gated for OTHER playable
+    /// holders, keyed by provider code — kept so the
+    /// auto-pick switch (and any later manual switch to a
+    /// probed holder) can paint the winning source's
+    /// episodes from the probe's own payload instead of
+    /// refetching it. Consumed (removed) by load()'s
+    /// switch path when it is used; a holder that was not
+    /// probed, or whose entry was already consumed, takes
+    /// the ordinary fetch path unchanged. Empty on every
+    /// non-TVB page.
+    @State private var tvbKeptDetails: [String: TVBKeptDetail] = [:]
+    /// v2.0.33 (item 2a): the I1 probe found NO playable
+    /// TVB source for this title at all — the episode
+    /// section then shows the honest no-source notice
+    /// (see serverGroups) instead of an empty silence.
+    /// Set from the probe outcome in
+    /// launchAlternativesAndIdentity and cleared by
+    /// load() whenever a painted detail actually has a
+    /// playable start episode. False on every non-TVB
+    /// page.
+    @State private var tvbNoPlayableSource = false
     /// Owner source-priority policy (2026-11-15, IN v2.0.0 per
     /// the owner's 16:08 ruling): the Nguồn phát mode for THIS
     /// film's play sessions — Tự động (true, the default) or a
@@ -2057,6 +2079,38 @@ private struct JoeCastCellLabel: View {
     /// shipped design) — no stretched grid cells.
     private func serverGroups(_ d: Detail, centered: Bool = false) -> some View {
         VStack(alignment: centered ? .center : .leading, spacing: 34) {
+            // v2.0.33 (item 2a): the no-source notice — when
+            // the TVB probe found no playable source for
+            // this title, say so at the TOP of the episode
+            // block (every theme feeds its episode block
+            // through here: A/Ultra/D via servers(), F
+            // directly), in the themes' existing type
+            // styles. TVB-gated: non-TVB pages and TVB
+            // pages with a playable source render nothing
+            // here, exactly as before.
+            // v2.0.33 (item 2b): the notice container is
+            // FOCUSABLE — with no playable source the
+            // servers list is empty, so this .focusSection()
+            // otherwise has zero focusable children and
+            // focus-following scroll dies below the source
+            // row; a focusable landing inside the section
+            // lets Down from the source row reach it and
+            // the ScrollView scroll the section into view.
+            // A plain focusable text shows no chrome, so
+            // this changes no pixels.
+            if route.tvb != nil && tvbNoPlayableSource {
+                VStack(alignment: centered ? .center : .leading, spacing: 8) {
+                    Text("Không có nguồn phát cho phim này.")
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .multilineTextAlignment(centered ? .center : .leading)
+                    Text("Không nguồn TVB nào phát được phim này — anh thử lại sau, hoặc chọn phim khác.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                        .multilineTextAlignment(centered ? .center : .leading)
+                }
+                .focusable(true)
+            }
             ForEach(Array(d.servers.enumerated()), id: \.offset) { serverIndex, server in
                 VStack(alignment: centered ? .center : .leading, spacing: 14) {
                     if d.servers.count > 1 || !server.name.isEmpty {
@@ -2207,7 +2261,37 @@ private struct JoeCastCellLabel: View {
             // and the PerfLog paint marks — diagnostics, not
             // behaviour.)
             do {
-                let d = try await Providers.detail(provider, slug: slug)
+                // v2.0.33 (item 3): consume a kept probe
+                // detail instead of refetching — when the
+                // I1 probe already fetched and
+                // identity-gated this exact holder (same
+                // provider AND same slug), its payload IS
+                // the detail to paint, so the switch lands
+                // instantly with the winning source's
+                // episodes already expanded. The kept
+                // detail was identity-gated by the probe
+                // and load()'s own tvbGate still runs on it
+                // below; consuming (removing) it means a
+                // later manual switch back refetches fresh,
+                // and the play path re-resolves stream URLs
+                // at tap time regardless (the standing
+                // rule on this file). When no kept detail
+                // exists — every non-TVB switch, and any
+                // TVB holder the probe did not keep — the
+                // fetch below is exactly the pre-v2.0.33
+                // behaviour, and everything downstream
+                // (cache write, tvbGate, paint,
+                // alternatives, identity) runs identically
+                // for both sources of `d`.
+                let d: Detail
+                if route.tvb != nil,
+                   let kept = tvbKeptDetails[attemptedProvider],
+                   kept.slug == attemptedSlug {
+                    tvbKeptDetails[attemptedProvider] = nil
+                    d = kept.detail
+                } else {
+                    d = try await Providers.detail(provider, slug: slug)
+                }
                 JoeDetailCache.write(d, provider: attemptedProvider,
                                      slug: attemptedSlug)
                 // v2.0.31 (L7): the TVB identity gate — a
@@ -2219,6 +2303,12 @@ private struct JoeCastCellLabel: View {
                     return
                 }
                 detail = d
+                // v2.0.33 (item 2a): a painted detail with
+                // a playable start episode clears the
+                // no-source notice (see tvbNoPlayableSource).
+                if route.tvb != nil, startEpisode(d) != nil {
+                    tvbNoPlayableSource = false
+                }
                 PerfLog.mark("detail.networkPaint")
                 switching = false
                 lastGoodProvider = provider
@@ -2295,6 +2385,12 @@ private struct JoeCastCellLabel: View {
                 guard tvbGate(cached, attemptedProvider: attemptedProvider)
                 else { return }
                 detail = cached
+                // v2.0.33 (item 2a): a painted detail with
+                // a playable start episode clears the
+                // no-source notice (see tvbNoPlayableSource).
+                if route.tvb != nil, startEpisode(cached) != nil {
+                    tvbNoPlayableSource = false
+                }
                 landInitialFocus(on: cached)
                 race.cachedPaint = cached
                 PerfLog.mark("detail.cachePaint")
@@ -2320,6 +2416,13 @@ private struct JoeCastCellLabel: View {
                 if JoeDetailCache.fingerprint(d)
                     != JoeDetailCache.fingerprint(cachedPaint) {
                     detail = d
+                    // v2.0.33 (item 2a): a painted detail
+                    // with a playable start episode clears
+                    // the no-source notice (see
+                    // tvbNoPlayableSource).
+                    if route.tvb != nil, startEpisode(d) != nil {
+                        tvbNoPlayableSource = false
+                    }
                     landInitialFocus(on: d)
                     PerfLog.mark("detail.networkPaint")
                     launchTPProbe(painted: d,
@@ -2335,6 +2438,12 @@ private struct JoeCastCellLabel: View {
                 // either copy.
             } else {
                 detail = d
+                // v2.0.33 (item 2a): a painted detail with
+                // a playable start episode clears the
+                // no-source notice (see tvbNoPlayableSource).
+                if route.tvb != nil, startEpisode(d) != nil {
+                    tvbNoPlayableSource = false
+                }
                 landInitialFocus(on: d)
                 PerfLog.mark("detail.networkPaint")
                 launchTPProbe(painted: d,
@@ -2446,14 +2555,28 @@ private struct JoeCastCellLabel: View {
             // never overridden), never once playback has
             // started, and at most once per page.
             if route.tvb != nil {
-                let playable = await tvbPlayableHolders()
+                // v2.0.33 (item 3): the probe now returns an
+                // outcome — the playable set (used exactly
+                // as before) PLUS the kept Details of the
+                // playable holders it fetched, stored in
+                // tvbKeptDetails so the auto-pick switch
+                // below (and a later manual switch to a
+                // probed holder) paints from the probe's
+                // payload instead of refetching.
+                // v2.0.33 (item 2a): an empty playable set
+                // is the no-source verdict — the episode
+                // section's notice keys off it (see
+                // serverGroups); a non-empty set clears it.
+                let outcome = await tvbPlayableHolders()
                 guard provider == fromCode, slug == forSlug else { return }
-                alternatives = await tvbOrderedAlternatives(playable: playable)
+                tvbKeptDetails = outcome.kept
+                tvbNoPlayableSource = outcome.playable.isEmpty
+                alternatives = await tvbOrderedAlternatives(playable: outcome.playable)
                 PerfLog.mark("detail.alternativesPaint")
-                if !playable.contains(provider), autoSource,
+                if !outcome.playable.contains(provider), autoSource,
                    playerHolder == nil, !tvbAutoPickDone,
                    let pick = alternatives.first(where: {
-                       playable.contains($0.code)
+                       outcome.playable.contains($0.code)
                    }) {
                     tvbAutoPickDone = true
                     switchNotice = "Nguồn \(Providers.displayName(provider)) không phát được tập này — đã tự chọn nguồn \(Providers.displayName(pick.code))"
@@ -2632,6 +2755,27 @@ private struct JoeCastCellLabel: View {
         return result
     }
 
+    /// v2.0.33 (item 3): a holder's OWN first playable
+    /// episode, in server order — dwellTarget's fallback
+    /// loop, parameterised by provider code (dwellTarget
+    /// itself reads the CURRENT provider and the focus
+    /// state, neither of which applies to another
+    /// holder's payload). Static so the probe's
+    /// task-group children can call it without capturing
+    /// the view. Nil when the holder's detail carries no
+    /// playable episode at all.
+    private static func tvbOwnTarget(
+        code: String, detail d: Detail
+    ) -> (name: String, num: Int)? {
+        for server in d.servers {
+            for ep in server.episodes
+            where Providers.isPlayable(code: code, episode: ep) {
+                return (ep.name, Providers.episodeNumber(ep.name))
+            }
+        }
+        return nil
+    }
+
     /// I1's playability verdict: which of the snapshot's
     /// holders can actually play this title's start
     /// episode, judged by the app's own resolution
@@ -2647,16 +2791,40 @@ private struct JoeCastCellLabel: View {
     /// simply reads unplayable (fail-soft). The
     /// resolutions land in the resolver memo, so the
     /// Play tap that follows starts warm.
-    private func tvbPlayableHolders() async -> Set<String> {
-        guard let ctx = route.tvb, let current = detail else { return [] }
+    /// v2.0.33 (item 3): the probe now returns a
+    /// TVBProbeOutcome, not just the playable set — the
+    /// Details it fetched for playable OTHER holders are
+    /// KEPT (tvbKeptDetails, via the caller) so the
+    /// winning source's detail paints and expands in
+    /// load()'s switch path without a refetch. Three
+    /// judging changes ride along: (1) when the shared
+    /// target is NIL (the current detail has no playable
+    /// episode, so there is no episode to match across
+    /// holders — the pre-fix probe passed epName=nil /
+    /// epNum=0, Providers.ladderTarget could match
+    /// nothing in a multi-episode holder, and EVERY
+    /// series holder read unplayable), a holder is
+    /// judged against its OWN first playable episode
+    /// (tvbOwnTarget) instead; with a shared target the
+    /// judging is exactly as before. (2) Film4K is now
+    /// probed too — it was never a holder, so it never
+    /// entered the probe at all and only reached the
+    /// alternatives through tvbOrderedAlternatives'
+    /// findSlug leg; the leg below resolves and judges
+    /// it the same way, so a playable Film4K can be the
+    /// auto-pick (and be kept) like any other source.
+    /// (3) The current holder needs no kept entry — its
+    /// detail is already on screen.
+    private func tvbPlayableHolders() async -> TVBProbeOutcome {
+        guard let ctx = route.tvb, let current = detail else { return TVBProbeOutcome() }
         let target = dwellTarget(detail: current)
-        var playable: Set<String> = []
+        var outcome = TVBProbeOutcome()
         if let target {
             let ladder = await Providers.ladderFor(
                 code: provider, detail: current,
                 filmTitle: current.movie.name,
                 epName: target.name, epNum: target.num)
-            if !ladder.entries.isEmpty { playable.insert(provider) }
+            if !ladder.entries.isEmpty { outcome.playable.insert(provider) }
         }
         let others = ctx.holders.filter {
             $0.provider != provider && !tvbStruck.contains($0.provider)
@@ -2664,7 +2832,9 @@ private struct JoeCastCellLabel: View {
         if !others.isEmpty {
             let epName = target?.name
             let epNum = target?.num ?? 0
-            let found = await withTaskGroup(of: String?.self) { group in
+            let found = await withTaskGroup(
+                of: (String, TVBKeptDetail)?.self
+            ) { group in
                 for holder in others {
                     group.addTask {
                         guard let d = try? await Providers.detail(
@@ -2672,20 +2842,79 @@ private struct JoeCastCellLabel: View {
                         else { return nil }
                         guard ctx.accepts(d.movie, provider: holder.provider)
                         else { return nil }
+                        // v2.0.33 (item 3): the shared
+                        // target when one exists (the
+                        // pre-existing behaviour); when it
+                        // is nil, this holder's OWN first
+                        // playable episode — no own target
+                        // means no playable episode, so the
+                        // holder reads unplayable.
+                        let judgeName: String
+                        let judgeNum: Int
+                        if let epName {
+                            judgeName = epName
+                            judgeNum = epNum
+                        } else if let own = JoeMovieDetail.tvbOwnTarget(
+                            code: holder.provider, detail: d) {
+                            judgeName = own.name
+                            judgeNum = own.num
+                        } else {
+                            return nil
+                        }
                         let ladder = await Providers.ladderFor(
                             code: holder.provider, detail: d,
                             filmTitle: d.movie.name,
-                            epName: epName, epNum: epNum)
-                        return ladder.entries.isEmpty ? nil : holder.provider
+                            epName: judgeName, epNum: judgeNum)
+                        return ladder.entries.isEmpty ? nil
+                            : (holder.provider,
+                               TVBKeptDetail(slug: holder.slug,
+                                             detail: d))
                     }
                 }
-                var collected: [String] = []
+                var collected: [(String, TVBKeptDetail)] = []
                 for await r in group { if let r { collected.append(r) } }
                 return collected
             }
-            playable.formUnion(found)
+            for entry in found {
+                outcome.playable.insert(entry.0)
+                outcome.kept[entry.0] = entry.1
+            }
         }
-        return playable
+        // v2.0.33 (item 3): the Film4K leg — sequential,
+        // after the holder group. Only when Film4K is not
+        // itself a snapshot holder and has not been
+        // struck on this page. Its slug is resolved with
+        // the SAME findSlug call tvbOrderedAlternatives
+        // uses (ID-verified), its detail is gated with
+        // ctx.accepts (which already handles non-holder
+        // providers via the affirm rule), and it is judged
+        // with the shared target if present, else its own
+        // — exactly like a holder above. Fail-soft
+        // throughout: no slug, a failed fetch, a rejected
+        // payload or an empty ladder simply leaves
+        // Film4K out of both collections.
+        if !ctx.holders.contains(where: { $0.provider == Providers.F4K }),
+           !tvbStruck.contains(Providers.F4K),
+           let f4kSlug = await Providers.findSlug(
+               code: Providers.F4K, name: route.name, origin: "",
+               year: route.year, tmdbId: "\(ctx.tmdbId)",
+               requireIdVerified: true),
+           let f4kDetail = try? await Providers.detail(
+               Providers.F4K, slug: f4kSlug),
+           ctx.accepts(f4kDetail.movie, provider: Providers.F4K),
+           let judgeTarget = target ?? Self.tvbOwnTarget(
+               code: Providers.F4K, detail: f4kDetail) {
+            let ladder = await Providers.ladderFor(
+                code: Providers.F4K, detail: f4kDetail,
+                filmTitle: f4kDetail.movie.name,
+                epName: judgeTarget.name, epNum: judgeTarget.num)
+            if !ladder.entries.isEmpty {
+                outcome.playable.insert(Providers.F4K)
+                outcome.kept[Providers.F4K] = TVBKeptDetail(
+                    slug: f4kSlug, detail: f4kDetail)
+            }
+        }
+        return outcome
     }
 
     /// TMDB backdrop hunt for the staged TMDB task (Phase 2):
@@ -3365,6 +3594,32 @@ private struct JoeCastCellLabel: View {
 private final class DetailLoadRace: @unchecked Sendable {
     var cachedPaint: Detail?
     var networkPainted = false
+}
+
+/// v2.0.33 (item 3): one Detail the TVB probe fetched
+/// and identity-gated for a playable holder, kept under
+/// that holder's slug so load()'s switch path can paint
+/// it without refetching (see tvbPlayableHolders and
+/// tvbKeptDetails). A plain Sendable value — Detail,
+/// Movie, Server and Episode are all Sendable value
+/// types, so a kept Detail can be returned from the
+/// probe's task-group children with no unchecked
+/// conformance.
+private struct TVBKeptDetail: Sendable {
+    var slug: String
+    var detail: Detail
+}
+
+/// v2.0.33 (item 3): the TVB probe's whole result —
+/// `playable` is the I1 verdict exactly as the probe
+/// has always produced it (the set the alternatives
+/// ordering and the auto-pick condition consume), and
+/// `kept` carries the fetched Detail of every playable
+/// holder OTHER than the current one (whose detail is
+/// already on screen), keyed by provider code.
+private struct TVBProbeOutcome: Sendable {
+    var playable: Set<String> = []
+    var kept: [String: TVBKeptDetail] = [:]
 }
 
 /// First-call flag for makeDirector's resolveLadder closure

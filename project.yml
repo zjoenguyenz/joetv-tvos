@@ -63,6 +63,7 @@ targets:
       - TVApp/TVStore.swift
       - JoeTV/JoeModels.swift
       - JoeTV/JoeHTTP.swift
+      - JoeTV/JoeDiagLog.swift
       - JoeTV/SourceHealth.swift
       - JoeTV/KkClient.swift
       - JoeTV/VsClient.swift
@@ -109,15 +110,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "2.0.32"
-        CURRENT_PROJECT_VERSION: "45"
+        MARKETING_VERSION: "2.0.33"
+        CURRENT_PROJECT_VERSION: "46"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.0.32"
-        CFBundleVersion: "45"
+        CFBundleShortVersionString: "2.0.33"
+        CFBundleVersion: "46"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
@@ -125,6 +126,12 @@ targets:
         UILaunchScreen: {}
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # v2.0.33: the diagnostic-log export serves the log
+        # file over the home LAN from Settings (tvOS has no
+        # share sheet), so the app declares its local-network
+        # use: the iPhone downloads the log at the address the
+        # Settings screen shows.
+        NSLocalNetworkUsageDescription: "Joe TV mở một kênh trong mạng nhà để anh tải file log chẩn đoán từ Apple TV về iPhone."
         CFBundleURLTypes:
           - CFBundleURLName: com.luun.nguyen.joetv
             CFBundleURLSchemes:

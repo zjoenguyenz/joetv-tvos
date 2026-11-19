@@ -410,6 +410,25 @@ struct JoeActorPage: View {
     /// when the cover is gone and the tree is stable.
     /// A plain Menu / Quay lại dismissal carries no
     /// pending route and stays a plain dismissal.
+    ///
+    /// v2.0.33 (item 7): the L8 enumeration above named
+    /// only TWO presenters — it missed the third. This
+    /// page is also presented by JoeTorrentDetail (a film
+    /// opened as a torrent detail, its cast row inside
+    /// the "Chọn Server" panel), and that presenter lives
+    /// in the OTHER navigator slot: the parent film is in
+    /// nav.tor, not nav.movie. The rule is therefore:
+    /// opening a film from this page replaces the WHOLE
+    /// detail stack — performPendingOpen() must clear any
+    /// lingering nav.tor layer as part of the swap. Left
+    /// standing, that layer would otherwise stay on top
+    /// of the new detail (JoeRootView renders the torrent
+    /// detail at zIndex 3 ABOVE the movie detail at
+    /// zIndex 2) and hide it — exactly the owner's
+    /// Odyssey symptom: the tapped film's detail existed
+    /// invisibly underneath, and one Menu press (the
+    /// torrent layer's own exit handler clearing nav.tor)
+    /// was needed to reveal it.
     private func open(_ movieRoute: MovieRoute) {
         pendingRoute = movieRoute
         dismiss()
@@ -422,14 +441,31 @@ struct JoeActorPage: View {
     /// ITS route, so the route is cleared and re-minted on
     /// the next turn — the fresh detail then builds from
     /// the new route exactly as a home/rail tap does.
+    ///
+    /// v2.0.33 (item 7): both branches also clear nav.tor
+    /// as part of the swap (see open() for the three-
+    /// presenter rule). The ordering avoids flashing the
+    /// home shell between layers: the new movie detail is
+    /// assigned FIRST and the torrent layer lifted SECOND,
+    /// in the same task / same turn, so by the time the
+    /// zIndex 3 layer goes the zIndex 2 detail is already
+    /// there underneath it. This clearing runs ONLY on
+    /// the pending-route path — a plain Menu / Quay lại
+    /// dismissal never reaches here, leaves nav.tor alone,
+    /// and stays owned by the torrent detail's own exit
+    /// handling, exactly as before.
     private func performPendingOpen() {
         guard let movieRoute = pendingRoute else { return }
         pendingRoute = nil
         if nav.movie != nil {
             nav.movie = nil
-            Task { @MainActor in nav.movie = movieRoute }
+            Task { @MainActor in
+                nav.movie = movieRoute
+                nav.tor = nil
+            }
         } else {
             nav.movie = movieRoute
+            nav.tor = nil
         }
     }
 

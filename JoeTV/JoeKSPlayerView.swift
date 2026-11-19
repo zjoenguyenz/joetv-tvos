@@ -191,6 +191,15 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     private let currentTimeLabel = UILabel()
     private let durationLabel = UILabel()
     private let seekBar = KSSeekBarView()
+    /// v2.0.33 (item 5): the focus guide that gives the
+    /// play/pause button a DOWN path to the seek bar (see
+    /// buildControls / layoutControls). Invisible by
+    /// construction — a UIFocusGuide renders nothing; it
+    /// only redirects focus that lands on its strip.
+    private let seekFocusGuide = UIFocusGuide()
+    /// The guide's strip is pinned with constraints exactly
+    /// once (layoutControls) — its constants never change.
+    private var seekFocusGuidePinned = false
     private let bufferingSpinner = UIActivityIndicatorView(style: .medium)
     private var controlsBuilt = false
     private var controlsVisible = false
@@ -322,11 +331,44 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // landing left to the engine's leisure is the one
         // the owner's dead play press followed.
         updateFocusIfNeeded()
+        // v2.0.33 (item 1b, the audit's A2): re-assert the
+        // landing once more AFTER the current event cycle —
+        // this host's single forced landing above can be
+        // overtaken by the REPLACED host's late dismantle
+        // (its teardown still runs after this viewDidAppear
+        // on a source switch), and a landing undone that way
+        // is never retried by anyone. The deferred perform
+        // below runs on the runloop after this cycle
+        // completes, by which point the old host's dismantle
+        // has landed too, so the re-assert is the last word.
+        // Any pending re-assert is cancelled first, so
+        // repeated appearances never stack them.
+        NSObject.cancelPreviousPerformRequests(
+            withTarget: self,
+            selector: #selector(reassertFocusLanding),
+            object: nil)
+        perform(#selector(reassertFocusLanding), with: nil, afterDelay: 0)
         // The host has a window by now: hand the window's
         // display manager the criteria start() prepared
         // (applyDisplayCriteria no-ops without a window).
         applyDisplayCriteria()
         beginPlaybackIfPossible()
+    }
+
+    /// v2.0.33 (item 1b): the deferred focus-landing
+    /// re-assert scheduled by viewDidAppear (see there).
+    /// It only ever re-asks for the landing this host's
+    /// preferredFocusEnvironments already names, and only
+    /// while this host is genuinely the live surface: a
+    /// window must exist, the bar must be up (the landing
+    /// is the play button), and no picker may be open (the
+    /// picker owns its own landing). Anything else and the
+    /// re-assert no-ops — it must never fight a state the
+    /// host has moved into since it was scheduled.
+    @objc private func reassertFocusLanding() {
+        guard view.window != nil, controlsVisible, !pickerIsOpen else { return }
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
     }
 
     override func viewDidLayoutSubviews() {
@@ -556,6 +598,13 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         firstFrameWatchdog = nil
         freezeTimer?.invalidate()
         freezeTimer = nil
+        // v2.0.33 (item 1b): cancel every pending deferred
+        // perform aimed at this host (the deferred picker
+        // close, the focus-landing re-assert) BEFORE the
+        // close below — a dying host must never fire a
+        // deferred close or landing into whatever surface
+        // replaces it.
+        NSObject.cancelPreviousPerformRequests(withTarget: self)
         // Close the picker BEFORE killing the timers:
         // closePicker re-arms the hide timer via showControls,
         // and teardown must be the last word on timers.
@@ -626,8 +675,71 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         }
     }
 
+    /// v2.0.33 (item 1a): re-read the host's intent flag
+    /// from the engine's own live playing state. The
+    /// delegate syncs intentPlaying only on the named
+    /// lifecycle events (.bufferFinished / .paused /
+    /// .playedToTheEnd / .error), so any engine transition
+    /// that arrives through the unnamed states — or a track
+    /// selection, which churns the engine without a named
+    /// event the host maps — can leave the shadow flag one
+    /// step behind the engine, and the next toggle then
+    /// commands the verb the engine is already in (the
+    /// v2.0.32 dead-press shape, through the states the
+    /// named sync does not cover). Callers re-sync at the
+    /// exact points where that drift is produced: the
+    /// unnamed delegate states, the head of .readyToPlay,
+    /// and after a picker selection is performed.
+    private func syncIntentFromEngine() {
+        guard let layer else { return }
+        intentPlaying = layer.player.isPlaying
+    }
+
+    /// v2.0.33 (item 1c): the name of the currently focused
+    /// view, for the transport log line in togglePlayPause —
+    /// the next device run must show WHERE focus actually
+    /// sat when a press landed, not where it was supposed
+    /// to sit. Walks the host's whole subtree for the one
+    /// view reporting isFocused and names the known
+    /// controls; anything else falls back to its class
+    /// name, and "none" when nothing in the subtree holds
+    /// focus (the dead-press signature itself).
+    private func focusedViewName() -> String {
+        func search(_ candidate: UIView) -> String? {
+            if candidate.isFocused {
+                if candidate === playPauseButton { return "playPauseButton" }
+                if candidate === seekBar { return "seekBar" }
+                if candidate === subtitleButton { return "subtitleButton" }
+                if candidate === audioButton { return "audioButton" }
+                if candidate === switchSourceButton { return "switchSourceButton" }
+                if pickerButtons.contains(where: { $0 === candidate }) {
+                    return "pickerButton"
+                }
+                if candidate === view { return "root" }
+                return String(describing: type(of: candidate))
+            }
+            for subview in candidate.subviews {
+                if let found = search(subview) { return found }
+            }
+            return nil
+        }
+        return search(view) ?? "none"
+    }
+
     private func togglePlayPause() {
         guard let layer else { return }
+        // v2.0.33 (item 1c): the entry evidence, written
+        // BEFORE any command is sent — which view held
+        // focus, what the intent flag read, what the engine
+        // itself reported, and the layer's lifecycle state.
+        // A dead press on the next device run separates
+        // into its cause from this one line: focus nowhere
+        // ("none"), intent drifted from the engine (intent
+        // ≠ enginePlaying), or the command was right and
+        // the engine ignored it (see the outcome line).
+        // Hosts and names only — never a URL.
+        DiagLog.write("transport",
+                      "toggle entry focused=\(focusedViewName()) intentBefore=\(intentPlaying) enginePlaying=\(layer.player.isPlaying) state=\(String(describing: layer.state))")
         // v2.0.32: command from the host's intent flag, not
         // from the layer's lifecycle state (see intentPlaying).
         if intentPlaying {
@@ -637,6 +749,10 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             layer.play()
             intentPlaying = true
         }
+        // v2.0.33 (item 1c): the outcome — the verb actually
+        // commanded, and the intent flag as it now stands.
+        DiagLog.write("transport",
+                      "toggle outcome command=\(intentPlaying ? "play" : "pause") intentAfter=\(intentPlaying)")
         refreshTransport()
     }
 
@@ -720,6 +836,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             self?.togglePlayPause()
         }
         transportBar.addSubview(seekBar)
+
+        // v2.0.33 (item 5): the seek bar's focus guide,
+        // owned by the bar itself. Its strip is pinned in
+        // layoutControls (below the play button); any focus
+        // movement that lands on the strip is redirected to
+        // the seek bar through the guide's preferred focus
+        // environment — the kit's own machinery for a focus
+        // gap, instead of any hand-drawn geometry.
+        transportBar.addLayoutGuide(seekFocusGuide)
+        seekFocusGuide.preferredFocusEnvironments = [seekBar]
 
         pickerView.backgroundColor = UIColor.black.withAlphaComponent(0.88)
         pickerView.layer.cornerRadius = 20
@@ -886,6 +1012,52 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         let seekX: CGFloat = 24 + 150 + 20
         seekBar.frame = CGRect(x: seekX, y: 94,
                                width: barWidth - seekX - 150 - 24 - 20, height: 48)
+        // v2.0.33 (item 5): pin the seek focus guide to the
+        // strip directly below the play button — the rect
+        // (x 24, y 76, width 104, height barHeight − 76) in
+        // transportBar coordinates. WHY: the play button
+        // spans x 24…128, y 12…76, while the seek bar starts
+        // at x 194 — the two share no vertical strip, and
+        // the only view below the play button (the
+        // current-time label) is not focusable, so the focus
+        // engine found NO Down target from play/pause at
+        // all. The guide sits in that Down path and
+        // redirects the landing to the seek bar. Its strip
+        // is confined to the play button's own x-range on
+        // purpose: it must NOT extend under the other bar
+        // buttons (their strips already overlap the seek
+        // bar, so Down from them reaches it unaided, and a
+        // wider guide could only compete with that), and it
+        // must NOT cover the seek bar's own x-range (from
+        // x 194 on), so an Up press from the seek bar is
+        // never trapped back into the guide that just sent
+        // focus down. The guide is inert whenever the bar
+        // is not on screen: it is owned by transportBar,
+        // which showPickerPanel hides while a picker
+        // replaces it (closePicker unhides it), and its
+        // container controlsView is hidden whenever the bar
+        // itself hides (hideControlsIfIdle) — a guide in a
+        // hidden subtree takes no part in focus movement.
+        // NOTE on form: UILayoutGuide.layoutFrame is
+        // read-only (it is the layout engine's OUTPUT), so
+        // the strip cannot be assigned as a frame the way
+        // the bar's views are; it is pinned with four
+        // constraints whose constants ARE that rect, which
+        // makes the guide's resulting layoutFrame exactly
+        // the prescribed strip. The constants never change,
+        // so the pin is installed once.
+        if !seekFocusGuidePinned {
+            seekFocusGuidePinned = true
+            NSLayoutConstraint.activate([
+                seekFocusGuide.leadingAnchor.constraint(
+                    equalTo: transportBar.leadingAnchor, constant: 24),
+                seekFocusGuide.topAnchor.constraint(
+                    equalTo: transportBar.topAnchor, constant: 76),
+                seekFocusGuide.widthAnchor.constraint(equalToConstant: 104),
+                seekFocusGuide.heightAnchor.constraint(
+                    equalToConstant: barHeight - 76),
+            ])
+        }
         if pickerIsOpen {
             layoutPicker()
         }
@@ -1449,6 +1621,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             closePicker()
             return
         }
+        // v2.0.33 (item 1c): the pick itself, logged before
+        // it is performed — the picker kind and the row's
+        // tag only (for subtitles the tag IS the choice:
+        // −1 = off, otherwise the track's index; for
+        // sources it is the candidate's ladder index).
+        // Track NAMES are never logged: an index is all the
+        // evidence a selection dispute needs, and a name
+        // could carry anything a file chose to embed.
+        DiagLog.write("transport",
+                      "picker pick kind=\(pickerKind) tag=\(sender.tag)")
         switch pickerKind {
         case .subtitles:
             // KSPlayer 5.6.2: selection is PERFORMED through
@@ -1497,6 +1679,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             director?.userSwitchSource(to: index)
             return
         }
+        // v2.0.33 (item 1a): only the two TRACK kinds reach
+        // here (the source kind returned inside its case,
+        // and its switch recreates this host, so no flag of
+        // this host's survives to resync). A subtitle or
+        // audio selection churns the engine — it may pause
+        // or resume underneath the pick without a named
+        // lifecycle event the delegate maps — so the intent
+        // flag is re-read from the engine itself BEFORE the
+        // refresh below paints the glyph from it.
+        syncIntentFromEngine()
         refreshTrackButtons()
         // v2.0.31 (L4): the track pickers close DEFERRED —
         // never inside the tapped row's own press dispatch
@@ -1526,13 +1718,37 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// path has always made. Idempotent: a second queued
     /// close reads pickerIsOpen false and no-ops.
     private func closePickerDeferred() {
-        // Swift 6 specialist-review fix (B-2): a Task hop,
-        // not DispatchQueue.main.async — the closure
-        // touches @MainActor state (see the B-2 note at
-        // the first-frame watchdog).
-        Task { @MainActor in
-            self.closePicker()
-        }
+        // v2.0.33 (item 1b): the deferral mechanism changed
+        // from an unstructured Task hop to the runloop's own
+        // deferred perform. A Task { @MainActor in … } hop
+        // is ACTOR-scheduled: it can be picked up the moment
+        // the current actor job yields, which can still be
+        // inside the tail of the tapped row's own press /
+        // focus cycle — the exact window the deferral exists
+        // to escape. perform(afterDelay: 0) is
+        // RUNLOOP-scheduled: by construction it fires only
+        // after the current event cycle has completed and
+        // the runloop comes back around, so the press cycle
+        // always finishes with the hierarchy intact first.
+        // It also carries no closure, so there is nothing to
+        // capture — the Swift 6 closure-capture problem the
+        // B-2 note guarded against cannot arise here at all.
+        // Cancel-then-perform keeps at most one close
+        // pending; closePicker itself already guards on
+        // pickerIsOpen, so the fired close stays idempotent.
+        NSObject.cancelPreviousPerformRequests(
+            withTarget: self,
+            selector: #selector(closePickerDeferredFired),
+            object: nil)
+        perform(#selector(closePickerDeferredFired), with: nil, afterDelay: 0)
+    }
+
+    /// v2.0.33 (item 1b): the runloop-fired half of
+    /// closePickerDeferred (see there). A separate @objc
+    /// entry point is what the perform machinery addresses;
+    /// the body is only ever the ordinary close.
+    @objc private func closePickerDeferredFired() {
+        closePicker()
     }
 
     private func closePicker() {
@@ -1567,8 +1783,35 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     // MARK: - KSPlayerLayerDelegate
 
     func player(layer: KSPlayerLayer, state: KSPlayerState) {
+        // v2.0.33 (engine logging, audit item 4b): EVERY
+        // state transition leaves one line — the sports live
+        // streams stall INSIDE the engine, and until now the
+        // only record of which lifecycle states a dying
+        // stream actually passed through was the unified
+        // log the owner cannot retrieve. The line carries
+        // the state, the host's intent flag and the engine's
+        // own playing read (their disagreement is itself
+        // diagnostic), plus the candidate's HOST ONLY, read
+        // from the director's current candidate (the host's
+        // own pendingCandidate was consumed at layer
+        // creation; it is kept as the fallback for any
+        // transition reported before the director's
+        // candidate is visible). Never a full URL: torrent
+        // candidate URLs embed the debrid token in the path.
+        DiagLog.write("engine",
+                      "state=\(String(describing: state)) intent=\(intentPlaying) enginePlaying=\(layer.player.isPlaying) host=\(director?.candidate?.url.host ?? pendingCandidate?.url.host ?? "?")")
         switch state {
         case .readyToPlay:
+            // v2.0.33 (item 1a): re-sync the intent flag from
+            // the engine at the head of this branch, before
+            // any of the branch's own logic runs — the engine
+            // has just announced its real state, and every
+            // later read of the flag in this attempt (the
+            // resume seek's own assignment included, which is
+            // untouched below) starts from the engine's truth
+            // rather than whatever the preparing churn left
+            // in the shadow flag.
+            syncIntentFromEngine()
             // FIX4 (fix 1): re-assert the display criteria at
             // the moment playback actually starts. Apple's
             // choreography (Tech Talk 503) is: state the
@@ -1639,7 +1882,17 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             intentPlaying = false
             fireFail(cause: "Engine báo lỗi (KSPlayer state .error)")
         default:
-            break
+            // v2.0.33 (item 1a): the states that land here —
+            // .initialized / .preparing / .buffering — carry
+            // no named intent assignment above, but the
+            // engine's playing read can still change across
+            // them (a buffering dip that ends paused, a
+            // prepare that auto-starts). Sync the shadow flag
+            // from the engine instead of leaving it at
+            // whatever the previous named state set, so the
+            // toggle never inherits a stale intent from the
+            // unnamed half of the lifecycle.
+            syncIntentFromEngine()
         }
     }
 
@@ -1654,6 +1907,14 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     func player(layer: KSPlayerLayer, finish error: Error?) {
         intentPlaying = false
         if let error {
+            // v2.0.33 (engine logging, audit item 4b): the
+            // finish cause reaches the persistent file too,
+            // beside the state-transition lines above — the
+            // error's description is an engine-generated
+            // string (no URL is written by this host; the
+            // DiagLog layer also scrubs any URL-shaped text
+            // to scheme://host as a backstop).
+            DiagLog.write("engine", "finish error=\(error.localizedDescription)")
             // v2.0.5 (error 8a): the Error is READ before the
             // failure is reported — pre-fix this delegate
             // checked only `error != nil` and discarded the
@@ -1715,12 +1976,30 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// mistaken for an engine error.
     private func stallFail(reason: String) {
         guard !failed else { return }
+        // v2.0.33 (engine logging, audit item 4b): a watchdog
+        // kill is logged as a watchdog kill in the file too
+        // (the reason is an app-generated label, never a
+        // URL) — fireFail below logs the same string as the
+        // failure cause, so the stall and the failover it
+        // caused read as one event in the export.
+        DiagLog.write("engine", "stall \(reason)")
         director?.notice = "Nguồn này không phát được — đang chuyển nguồn khác…"
         fireFail(cause: reason)
     }
 
     private func fireFail(cause: String? = nil) {
         guard !failed else { return }
+        // v2.0.33 (engine logging, audit item 4b): every
+        // failure that advances the ladder — engine error,
+        // finish error, watchdog stall (stallFail forwards
+        // its reason as the cause) — leaves its cause string
+        // in the persistent file at the moment it fires, so
+        // an exhausted slate can be diagnosed from the
+        // export instead of from impressions. Causes are
+        // app-generated labels or engine error descriptions;
+        // no URL is passed (DiagLog also scrubs URL-shaped
+        // text to scheme://host as a backstop).
+        DiagLog.write("engine", "fail cause=\(cause ?? "none")")
         failed = true
         firstFrameWatchdog?.cancel()
         freezeTimer?.invalidate()

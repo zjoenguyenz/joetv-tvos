@@ -362,6 +362,11 @@ struct JoeRootView: View {
             }
         }
         .onAppear {
+            // v2.0.33: the diagnostic log's launch-presence
+            // line (presence + length only, never a value —
+            // see JoeDiagLog.logLaunchPresence). Once per
+            // process; the function guards itself.
+            DiagLog.logLaunchPresence()
             if !ultraMigrated {
                 themeIDRaw = JoeThemeID.ultra.rawValue
                 ultraMigrated = true
@@ -610,6 +615,15 @@ struct JoeRootView: View {
                             provider: m.provider, slug: m.slug,
                             name: m.name, poster: m.poster,
                             year: m.year, preselectEp: "")
+                        // v2.0.33 (item 7, coordinator merge):
+                        // a deep link replaces the whole detail
+                        // stack — a torrent detail left open
+                        // underneath (nav.tor, zIndex 3) would
+                        // otherwise stay on top of this route
+                        // and hide it, the actor-page fault's
+                        // twin. Movie first, then the tor layer
+                        // lifts, so no shell flash sits between.
+                        nav.tor = nil
                         return
                     }
                     try? await Task.sleep(nanoseconds: 500_000_000)
@@ -624,6 +638,10 @@ struct JoeRootView: View {
                                    poster: q["poster"] ?? "",
                                    year: q["year"] ?? "",
                                    preselectEp: q["ep"] ?? "")
+            // v2.0.33 (item 7, coordinator merge): see the
+            // tmdb case above — the tor layer must not outlive
+            // a movie route minted over it.
+            nav.tor = nil
         case "torrent":
             guard let metaId = q["id"], !metaId.isEmpty else { return }
             var meta = TorMeta()

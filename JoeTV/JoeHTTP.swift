@@ -16,6 +16,14 @@ enum PerfLog {
     /// (detail.*, play.* — see PHASE0-BASELINE.md).
     static func mark(_ label: String, _ detail: String = "") {
         logger.log("JOEPERF \(label, privacy: .public) \(detail, privacy: .public)")
+        // v2.0.33: mirror the same mark into the persistent
+        // DiagLog file (category "perf"). OSLog alone was not
+        // retrievable by the owner from the device, so the
+        // press-to-play timing evidence vanished with the
+        // unified log; the file copy carries exactly the same
+        // content (label + detail, hosts only — never a full
+        // URL or token) and can be exported from Settings.
+        DiagLog.write("perf", "JOEPERF \(label) \(detail)")
     }
 
     /// One HTTP call's URLSessionTaskMetrics phases, in ms
@@ -25,6 +33,13 @@ enum PerfLog {
                      metrics: URLSessionTaskMetrics?) {
         guard let tx = metrics?.transactionMetrics.last else {
             logger.log("JOEPERF http host=\(host, privacy: .public) status=\(status) bytes=\(bytes) metrics=none")
+            // v2.0.33: file mirror of the no-metrics line
+            // above, in the DiagLog "perf" category — same
+            // host / status / bytes content, with the
+            // explicit "metrics=none" marker so a reader of
+            // the exported file can tell an unmeasured call
+            // from a measured one (see mark() above).
+            DiagLog.write("perf", "JOEPERF http host=\(host) status=\(status) bytes=\(bytes) metrics=none")
             return
         }
         func ms(_ a: Date?, _ b: Date?) -> Int {
@@ -32,7 +47,17 @@ enum PerfLog {
             return Int(b.timeIntervalSince(a) * 1000)
         }
         let reused = tx.domainLookupStartDate == nil && tx.connectStartDate == nil
-        logger.log("JOEPERF http host=\(host, privacy: .public) status=\(status) bytes=\(bytes) dns=\(ms(tx.domainLookupStartDate, tx.domainLookupEndDate)) connect=\(ms(tx.connectStartDate, tx.connectEndDate)) tls=\(ms(tx.secureConnectionStartDate, tx.secureConnectionEndDate)) ttfb=\(ms(tx.requestStartDate, tx.responseStartDate)) download=\(ms(tx.responseStartDate, tx.responseEndDate)) reused=\(reused)")
+        // v2.0.33: the phase values are computed once into
+        // locals so the OSLog line below and its DiagLog
+        // file mirror are built from the SAME numbers —
+        // the two records can never disagree about a call.
+        let dnsMs = ms(tx.domainLookupStartDate, tx.domainLookupEndDate)
+        let connectMs = ms(tx.connectStartDate, tx.connectEndDate)
+        let tlsMs = ms(tx.secureConnectionStartDate, tx.secureConnectionEndDate)
+        let ttfbMs = ms(tx.requestStartDate, tx.responseStartDate)
+        let downloadMs = ms(tx.responseStartDate, tx.responseEndDate)
+        logger.log("JOEPERF http host=\(host, privacy: .public) status=\(status) bytes=\(bytes) dns=\(dnsMs) connect=\(connectMs) tls=\(tlsMs) ttfb=\(ttfbMs) download=\(downloadMs) reused=\(reused)")
+        DiagLog.write("perf", "JOEPERF http host=\(host) status=\(status) bytes=\(bytes) dns=\(dnsMs) connect=\(connectMs) tls=\(tlsMs) ttfb=\(ttfbMs) download=\(downloadMs) reused=\(reused)")
     }
 }
 

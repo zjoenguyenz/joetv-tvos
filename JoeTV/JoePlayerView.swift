@@ -249,6 +249,21 @@ final class PlayDirector: ObservableObject {
     /// by the caller against the stored entry).
     private let resumeMs: Int64
 
+    // v2.0.33 (item 8): per-press timing bookkeeping for
+    // the persistent DiagLog file — logging only, no
+    // behaviour change. `ladderStartedAt` is stamped at
+    // the head of loadLadder() so the ladder-resolution
+    // line can report how long resolveLadder took;
+    // `attemptStartedAt` is re-stamped by beginCandidate()
+    // for every candidate the ladder tries, so
+    // itemFailed() can report how long that one attempt
+    // lived before it failed. Together with the PerfLog
+    // file mirror (JoeHTTP.swift) these are the timing
+    // marks the press-to-play regression hunt reads from
+    // ONE device run.
+    private var attemptStartedAt = Date()
+    private var ladderStartedAt = Date()
+
     private var candidates: [PlayCandidate] = []
     private var candidateIndex = 0
     private var refreshed = false
@@ -360,7 +375,23 @@ final class PlayDirector: ObservableObject {
 
     private func loadLadder() async {
         phase = .resolving
+        // v2.0.33 (item 8): stamp the ladder-resolution
+        // start, then — once resolveLadder returns — write
+        // the resolution time and one line per candidate
+        // (index / engine / host only / label truncated to
+        // 60 chars) to the DiagLog "play" category. Hosts
+        // only, never a full URL: Torrentio URLs carry the
+        // owner's debrid token in the path.
+        ladderStartedAt = Date()
         let ladder = await resolveLadder(identity)
+        let ladderMs = Int(Date().timeIntervalSince(ladderStartedAt) * 1000)
+        DiagLog.write("play", "ladder resolved count=\(ladder.count) in \(ladderMs)ms")
+        for (index, candidate) in ladder.enumerated() {
+            let engineName = candidate.engine == .ffmpeg ? "ffmpeg" : "avplayer"
+            let host = candidate.url.host ?? "?"
+            let label = String(candidate.label.prefix(60))
+            DiagLog.write("play", "candidate \(index) engine=\(engineName) host=\(host) label=\(label)")
+        }
         // A deadline-cancelled chain must not resurrect the
         // session over the exhausted slate the watchdog set.
         if Task.isCancelled { return }
@@ -383,6 +414,15 @@ final class PlayDirector: ObservableObject {
         candidate = c
         currentLabel = c.label
         attemptID += 1
+        // v2.0.33 (item 8): a new attempt starts here —
+        // stamp its clock (itemFailed reads it back for
+        // the elapsed time) and log the attempt line
+        // (position in the ladder / engine / host only)
+        // to the DiagLog "play" category.
+        attemptStartedAt = Date()
+        let attemptEngine = c.engine == .ffmpeg ? "ffmpeg" : "avplayer"
+        let attemptHost = c.url.host ?? "?"
+        DiagLog.write("play", "attempt \(candidateIndex + 1)/\(candidates.count) engine=\(attemptEngine) host=\(attemptHost)")
         // v2.0.15: every NEW candidate re-arms the resume seek
         // — itemReady applies it once per candidate, against
         // the session's furthest position (see itemReady).
@@ -405,6 +445,14 @@ final class PlayDirector: ObservableObject {
         let host = candidate?.url.host ?? "?"
         PlaybackLog.logger.error(
             "candidate failed engine=\(engineName, privacy: .public) host=\(host, privacy: .public) cause=\(cause ?? "—", privacy: .public)")
+        // v2.0.33 (item 8): the same failure in the
+        // persistent DiagLog file (category "play"), with
+        // the attempt's elapsed time measured from the
+        // beginCandidate() stamp — the OSLog line above is
+        // untouched and stays the in-log record; this line
+        // is the one the owner can export after the run.
+        let attemptElapsedMs = Int(Date().timeIntervalSince(attemptStartedAt) * 1000)
+        DiagLog.write("play", "attempt failed engine=\(engineName) host=\(host) after=\(attemptElapsedMs)ms cause=\(cause ?? "—")")
         candidateIndex += 1
         if candidateIndex < candidates.count {
             beginCandidate()
@@ -562,6 +610,15 @@ final class PlayDirector: ObservableObject {
                 return
             }
         }
+        // v2.0.33 (item 8): the session's terminal line in
+        // the DiagLog "play" category. This assignment is
+        // the failover machinery's central exhausted site —
+        // the hedged path and the no-hop path both end
+        // here, and an empty initial ladder reaches it via
+        // failoverStep — so the one line here closes every
+        // failover-driven session in the exported file,
+        // carrying the last recorded failure cause.
+        DiagLog.write("play", "session exhausted lastFailure=\(lastFailure ?? "—")")
         phase = .exhausted
     }
 
@@ -1792,6 +1849,12 @@ private struct PlayerController: UIViewControllerRepresentable {
             watchdog = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(20))
                 guard let self, !Task.isCancelled else { return }
+                // v2.0.33 (item 8): logging only — the U-1
+                // firing is recorded in the persistent
+                // DiagLog file just before the failover, so
+                // a device run shows this watchdog (rather
+                // than an engine error) ended the attempt.
+                DiagLog.write("play", "avplayer watchdog U-1 fired — item never readied in 20s")
                 self.fireFail(cause: "Quá 20 giây vẫn chưa sẵn sàng phát")
             }
             // Mid-play freeze watchdog: armed now, but it only

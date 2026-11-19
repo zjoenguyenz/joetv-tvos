@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import CoreImage
 
 /// Settings: ONLY the torrent/debrid credentials, exactly like
 /// the Android app — the owner's own Torrentio URL and/or his
@@ -51,6 +52,10 @@ struct JoeSettingsView: View {
     @FocusState private var themeChipFocused: String?
     @FocusState private var cwResetFocused: Bool
     @FocusState private var mfToggleFocused: Bool
+    /// v2.0.33: focus for the "Gửi log chẩn đoán" button
+    /// (logExportBlock) and the cover it presents.
+    @FocusState private var logExportFocused: Bool
+    @State private var showLogExport = false
     /// Confirmation for the history reset (historyBlock) —
     /// the app's standard destructive shape, the exit
     /// dialog's: destructive confirm + cancel.
@@ -185,6 +190,12 @@ struct JoeSettingsView: View {
                 }
                 .focusSection()
 
+                // v2.0.33: the log-export block — its own
+                // focus section, below the diagnostics group,
+                // above the version footer (see logExportBlock).
+                logExportBlock
+                    .focusSection()
+
                 // Hero forensics fix (2026-11-15): the real
                 // bundle version, like the corner label — this
                 // footer carried the same frozen "v2.0.0".
@@ -226,6 +237,11 @@ struct JoeSettingsView: View {
         .defaultFocus($themeChipFocused, JoeThemeID.billboard.rawValue)
         // Item 5: the KK route probe runs when Settings opens.
         .task { await runKKProbe() }
+        // v2.0.33: the log-export cover (see logExportBlock /
+        // LogExportView at the end of this file).
+        .fullScreenCover(isPresented: $showLogExport) {
+            LogExportView()
+        }
         .onDisappear { save(silent: true) }
         .onChange(of: addonURL) { save() }
         .onChange(of: rdToken) { save() }
@@ -567,6 +583,37 @@ struct JoeSettingsView: View {
         }
     }
 
+    /// Log export (v2.0.33): the entry point for getting the
+    /// diagnostic log OFF the Apple TV. The owner tests on a
+    /// real box with no way to pull files from it, so faults
+    /// arrived as photos and guesswork; DiagLog (JoeDiagLog.swift)
+    /// now keeps a rolling, token-scrubbed log in the sandbox
+    /// and this block opens the screen that serves it over the
+    /// home LAN (tvOS has no share sheet / activity view /
+    /// file exporter — Apple's HIG states activity views are
+    /// not supported on tvOS — so LAN + QR is the route, not a
+    /// preference). The block itself is deliberately plain:
+    /// one heading, one honest explanation, one button.
+    @ViewBuilder
+    private var logExportBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Log chẩn đoán")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+            Text("App ghi lại một bản log chẩn đoán để truy vết lỗi — không bao giờ ghi mật khẩu, token hay link vào log. Khi có lỗi cần bằng chứng, anh bấm nút dưới đây và gửi file log cho em.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1200, alignment: .leading)
+            Button {
+                showLogExport = true
+            } label: {
+                JoeSecondaryLabel(title: "Gửi log chẩn đoán")
+            }
+            .joeCardButton()
+            .focused($logExportFocused)
+        }
+    }
+
     private func save(silent: Bool = false) {
         TorrentSettings.addonURL = addonURL.trimmingCharacters(in: .whitespaces)
         TorrentSettings.rdToken = rdToken.trimmingCharacters(in: .whitespaces)
@@ -592,3 +639,122 @@ struct JoeSettingsView: View {
 // file's copy of the conditional move-trap pattern — is
 // DELETED; see the record at the end of JoeTVApp.swift. The
 // first-field routing it powered is geometric on this layout.
+
+// MARK: - Log export screen (v2.0.33)
+//
+// The full-screen cover behind "Gửi log chẩn đoán" (see
+// logExportBlock above). It owns ONE DiagLogServer for its
+// own lifetime only: started when the screen appears,
+// stopped when it disappears, so the log is reachable on
+// the LAN only while the owner is standing on this screen.
+//
+// tvOS constraint that shapes the whole screen: there is NO
+// share sheet on tvOS (Apple's HIG: activity views are not
+// supported; UIActivityViewController, ShareLink and
+// fileExporter are unavailable and do not compile), so the
+// file cannot be "shared" anywhere from the TV itself. The
+// working route is the one the server provides: the Apple
+// TV serves joetv-diag.txt over the home LAN and this
+// screen shows the address two ways — in large type for
+// typing into Safari on the iPhone, and as a QR code for
+// the iPhone Camera — and the OWNER's iPhone does the
+// downloading and the sending. The QR is rendered on a
+// white rounded rect on purpose: a QR code needs its light
+// background and quiet zone to scan, on every theme — that
+// white card is a functional element, not a theme surface.
+private struct LogExportView: View {
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    @State private var server = DiagLogServer()
+    @State private var serverState: DiagLogServer.State = .starting
+    @FocusState private var closeFocused: Bool
+
+    var body: some View {
+        ZStack {
+            theme.bg.ignoresSafeArea()
+            VStack(alignment: .center, spacing: 36) {
+                Text("Gửi log chẩn đoán")
+                    .font(.system(size: 44, weight: .bold))
+                    .foregroundStyle(theme.text)
+
+                switch serverState {
+                case .starting:
+                    ProgressView()
+                        .tint(.white)
+                    Text("Đang mở kênh gửi log…")
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.text)
+                case .serving(let url):
+                    Text(url)
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    if let qr = Self.qrImage(for: url) {
+                        // White card = the QR's quiet zone
+                        // (see the header note): constant
+                        // white on every theme, by necessity.
+                        Image(uiImage: qr)
+                            .interpolation(.none)
+                            .resizable()
+                            .frame(width: 360, height: 360)
+                            .padding(28)
+                            .background(RoundedRectangle(cornerRadius: 28)
+                                .fill(Color.white))
+                    }
+                    Text("Trên iPhone, mở Safari và nhập đúng địa chỉ trên — file log sẽ tải về máy. Hoặc dùng Camera của iPhone quét mã QR. Lấy xong, gửi file vào cuộc trò chuyện với em.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 1250, alignment: .center)
+                case .failed(let message):
+                    Text(message)
+                        .font(.system(size: 29))
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 1250, alignment: .center)
+                }
+
+                Button {
+                    dismiss()
+                } label: {
+                    JoePrimaryLabel(title: "Đóng")
+                }
+                .joeCardButton()
+                .focused($closeFocused)
+            }
+            .padding(60)
+        }
+        .defaultFocus($closeFocused, true)
+        .onAppear {
+            server.onStateChange = { state in
+                serverState = state
+            }
+            server.start()
+        }
+        .onDisappear {
+            server.stop()
+        }
+    }
+
+    /// QR code for the serving URL (CoreImage's
+    /// CIQRCodeGenerator): the filter's output is a tiny
+    /// bitmap (one pixel per module), so it is scaled up
+    /// with a plain transform and rendered through a
+    /// CIContext into a UIImage; the SwiftUI Image above
+    /// then draws it with interpolation OFF, so the modules
+    /// stay hard-edged and scannable at 360 pt.
+    private static func qrImage(for string: String) -> UIImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator")
+        else { return nil }
+        filter.setValue(Data(string.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(
+            by: CGAffineTransform(scaleX: 12, y: 12))
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(scaled,
+                                                  from: scaled.extent)
+        else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+}
