@@ -109,8 +109,7 @@ struct JoeSettingsView: View {
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
                       hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
                       text: $addonURL, id: "addon", secure: false, allowsPaste: true,
-                      status: fieldStatus(stored: TorrentSettings.addonURL,
-                                          secret: false))
+                      status: addonFieldStatus)
                 field(title: "Token Real-Debrid",
                       hint: "Mã tài khoản Real-Debrid của anh — dùng để giải link torrent và dựng Torrentio khi chưa có link ở trên.",
                       text: $rdToken, id: "rd", secure: true, allowsPaste: true,
@@ -158,12 +157,17 @@ struct JoeSettingsView: View {
                 // a self-hosted instance's base instead. This
                 // slot never touches the MediaFusion link
                 // above — that one also feeds the movie path.
+                // v2.0.38 (Sony 2.3.41 parity, item 1): the
+                // empty status now shows the EFFECTIVE base
+                // in full ("đang dùng: https://…"), like
+                // Sony's "Đang dùng" line — a plain public
+                // URL, not a credential, so it may render.
                 field(title: "Thể Thao Torrent — nguồn chính (Nuvio)",
                       hint: "Để trống thì dùng Nuvio công cộng. Dán link khác khi anh tự dựng Nuvio (ví dụ trên PC của anh). Mục Thể Thao Torrent lấy nguồn này trước, MediaFusion dự phòng sau.",
                       text: $sportsURL, id: "sports", secure: false, allowsPaste: true,
                       status: fieldStatus(stored: TorrentSettings.sportsURL,
                                           secret: false,
-                                          emptyText: "Chưa điền — đang dùng Nuvio công cộng mặc định"))
+                                          emptyText: "Chưa điền — đang dùng: \(TorrentSettings.sportsBase ?? TorrentSettings.sportsDefault)"))
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false,
@@ -376,6 +380,49 @@ struct JoeSettingsView: View {
             return (bundledText, false)
         }
         return (emptyText, false)
+    }
+
+    /// v2.0.38 (Sony 2.3.41 parity, item 1): the Addon URL
+    /// field's truth line. Sony's Settings fault, present
+    /// here in per-field form: the field renders only its
+    /// stored value, and when that is empty the app's
+    /// effective base is DERIVED — TorrentSettings
+    /// .effectiveBase composes the Torrentio config URL
+    /// from the debrid tokens (stored or bundled) — so a
+    /// bare "Chưa điền" read as "nothing configured" over
+    /// a working torrent setup, the owner's exact 2.0.33
+    /// complaint one level down. The line now names that
+    /// state and the segments composing it. Segment NAMES
+    /// only, never the composed base itself: the base
+    /// embeds the token values, and no credential is ever
+    /// rendered (the fieldStatus rule above). Display
+    /// only — nothing is written back to storage, and
+    /// editing/saving the field is unchanged.
+    private var addonFieldStatus: (text: String, filled: Bool) {
+        let stored = TorrentSettings.addonURL
+            .trimmingCharacters(in: .whitespaces)
+        if !stored.isEmpty { return ("Đã điền ✓", true) }
+        guard TorrentSettings.effectiveBase != nil else {
+            return ("Chưa điền", false)
+        }
+        // effectiveBase non-nil with the stored URL empty
+        // means the token composition produced it (a valid
+        // pasted URL would have made the stored value
+        // non-empty), so at least one segment exists here
+        // by construction — the same segments, in the same
+        // order, that effectiveBase composes from.
+        var segments: [String] = []
+        if !TorrentSettings.effectiveRDToken.isEmpty {
+            segments.append("Real-Debrid ✓")
+        }
+        if !TorrentSettings.effectiveTorBoxToken.isEmpty {
+            segments.append("TorBox ✓")
+        }
+        if !TorrentSettings.effectivePremiumizeToken.isEmpty {
+            segments.append("Premiumize ✓")
+        }
+        return ("Chưa điền — đang dùng Torrentio tự ghép từ token (\(segments.joined(separator: " · ")))",
+                false)
     }
 
     private func field(title: String, hint: String,

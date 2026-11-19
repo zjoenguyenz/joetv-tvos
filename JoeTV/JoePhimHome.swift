@@ -1261,6 +1261,15 @@ struct JoePhimHome: View {
         e.year = m.year
         e.slug = m.slug
         e.source = m.provider
+        // v2.0.38 (Sony 2.3.41 parity, item 3): the hero
+        // favourite stamps the catalogue item's stable ids
+        // when it carries them, like the detail saves —
+        // Sony stamps its hero favourite too; an unstamped
+        // favourite reopens fail-open under the wrong-film
+        // gate (and canonical matching loses its id
+        // shortcut for the row).
+        e.imdbId = m.imdbId
+        e.tmdbId = m.tmdbId
         e.ts = Int64(Date().timeIntervalSince1970 * 1000)
         watch.toggleFavorite(e)
     }

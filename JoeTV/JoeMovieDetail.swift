@@ -709,6 +709,30 @@ struct JoeMovieDetail: View {
             e.year = d.movie.year
             e.slug = slug
             e.source = provider
+            // v2.0.38 (Sony 2.3.41 parity, item 3): stamp
+            // the stable ids, exactly as the progress
+            // saves do (makeDirector) — a favourite saved
+            // without them reopens fail-open under the
+            // wrong-film gate, because its tvbRouteContext
+            // rebuilds from these stamps (the gap the
+            // 2.0.37 round named and left).
+            e.imdbId = d.movie.imdbId
+            e.tmdbId = d.movie.tmdbId
+            // The payload → launch fallback (Sony's
+            // knownTmdbId order): a TVB payload can stand
+            // by an id-matched holder with no ids of its
+            // own — the route's snapshot context still
+            // knows the title's identity (the torrent
+            // rung's pinned construction reads it the
+            // same way), and the stamp must not come out
+            // empty for exactly the titles the gate
+            // exists for.
+            if e.tmdbId.isEmpty, let ctx = route.tvb {
+                e.tmdbId = "\(ctx.tmdbId)"
+            }
+            if e.imdbId.isEmpty, let ctx = route.tvb {
+                e.imdbId = ctx.imdbId
+            }
             e.ts = Int64(Date().timeIntervalSince1970 * 1000)
             watch.toggleFavorite(e)
         } label: {
@@ -1928,6 +1952,16 @@ private struct JoeCastCellLabel: View {
             e.year = d.movie.year
             e.slug = slug
             e.source = provider
+            // v2.0.38 (Sony 2.3.41 parity, item 3): the
+            // stable-id stamps — see ultraFavCircle.
+            e.imdbId = d.movie.imdbId
+            e.tmdbId = d.movie.tmdbId
+            if e.tmdbId.isEmpty, let ctx = route.tvb {
+                e.tmdbId = "\(ctx.tmdbId)"
+            }
+            if e.imdbId.isEmpty, let ctx = route.tvb {
+                e.imdbId = ctx.imdbId
+            }
             e.ts = Int64(Date().timeIntervalSince1970 * 1000)
             watch.toggleFavorite(e)
         } label: {
@@ -3250,6 +3284,20 @@ private struct JoeCastCellLabel: View {
         // when the two catalogues title it differently.
         entry.imdbId = m.imdbId
         entry.tmdbId = m.tmdbId
+        // v2.0.38 (Sony 2.3.41 parity, item 3): the
+        // payload → launch fallback, Sony's knownTmdbId
+        // order — a TVB payload can stand by an
+        // id-matched holder with no ids of its own, and
+        // an unstamped progress entry would reopen
+        // fail-open under the gate; the session's TVB
+        // context (this function's own parameter) still
+        // knows the title's identity.
+        if entry.tmdbId.isEmpty, let tvb {
+            entry.tmdbId = "\(tvb.tmdbId)"
+        }
+        if entry.imdbId.isEmpty, let tvb {
+            entry.imdbId = tvb.imdbId
+        }
         let resume = watch.progressFor(matching: entry)?.pos ?? 0
         // v2.0.8 (Phase 3): the resolveLadder closure's FIRST
         // invocation for the origin identity builds its ladder
@@ -3417,6 +3465,20 @@ private struct JoeCastCellLabel: View {
                     // identity carries the same stable ids.
                     e2.imdbId = d.movie.imdbId
                     e2.tmdbId = d.movie.tmdbId
+                    // v2.0.38: the identity fallback — a
+                    // hop payload with no ids of its own
+                    // (accepted above on the snapshot's
+                    // affirm rule or an id-matched stand)
+                    // must not strip the identity the
+                    // session already carries: the hop row
+                    // reopens under the same gate as the
+                    // origin row.
+                    if e2.imdbId.isEmpty {
+                        e2.imdbId = identity.entry.imdbId
+                    }
+                    if e2.tmdbId.isEmpty {
+                        e2.tmdbId = identity.entry.tmdbId
+                    }
                     return PlayIdentity(entry: e2)
                 }
                 return nil
