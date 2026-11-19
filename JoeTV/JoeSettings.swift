@@ -109,25 +109,31 @@ struct JoeSettingsView: View {
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
                       hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
                       text: $addonURL, id: "addon", secure: false, allowsPaste: true,
-                      status: addonFieldStatus)
+                      status: addonFieldStatus,
+                      inForce: !TorrentSettings.addonURL
+                                   .trimmingCharacters(in: .whitespaces).isEmpty
+                               || TorrentSettings.effectiveBase != nil)
                 field(title: "Token Real-Debrid",
                       hint: "Mã tài khoản Real-Debrid của anh — dùng để giải link torrent và dựng Torrentio khi chưa có link ở trên.",
                       text: $rdToken, id: "rd", secure: true, allowsPaste: true,
                       status: fieldStatus(stored: TorrentSettings.rdToken,
                                           secret: true,
-                                          bundledFallback: BundledTokens.rdToken))
+                                          bundledFallback: BundledTokens.rdToken),
+                      inForce: !TorrentSettings.effectiveRDToken.isEmpty)
                 field(title: "Token TorBox",
                       hint: "Mã tài khoản TorBox của anh (nếu dùng TorBox thay Real-Debrid).",
                       text: $torboxToken, id: "tb", secure: true, allowsPaste: true,
                       status: fieldStatus(stored: TorrentSettings.torboxToken,
                                           secret: true,
-                                          bundledFallback: BundledTokens.torboxToken))
+                                          bundledFallback: BundledTokens.torboxToken),
+                      inForce: !TorrentSettings.effectiveTorBoxToken.isEmpty)
                 field(title: "Token Premiumize",
                       hint: "Mã tài khoản Premiumize của anh (nếu dùng Premiumize cạnh Real-Debrid/TorBox).",
                       text: $premiumizeToken, id: "pm", secure: true, allowsPaste: true,
                       status: fieldStatus(stored: TorrentSettings.premiumizeToken,
                                           secret: true,
-                                          bundledFallback: BundledTokens.premiumizeToken))
+                                          bundledFallback: BundledTokens.premiumizeToken),
+                      inForce: !TorrentSettings.effectivePremiumizeToken.isEmpty)
                 // v2.0.16: MediaFusion — the second torrent
                 // gateway. With its link pasted, the torrent
                 // detail pools both gateways' streams (ranked
@@ -141,7 +147,11 @@ struct JoeSettingsView: View {
                                           secret: false,
                                           bundledFallback: BundledTokens.mfURL,
                                           bundledText: "Chưa điền — đang dùng link MediaFusion tích hợp sẵn ✓",
-                                          emptyText: "Chưa điền — chưa có link này thì MediaFusion không hoạt động"))
+                                          emptyText: "Chưa điền — chưa có link này thì MediaFusion không hoạt động"),
+                      inForce: !TorrentSettings.mfURL
+                                   .trimmingCharacters(in: .whitespaces).isEmpty
+                               || !BundledTokens.mfURL
+                                   .trimmingCharacters(in: .whitespaces).isEmpty)
                 Button {
                     mfEnabled.toggle()
                 } label: {
@@ -167,18 +177,32 @@ struct JoeSettingsView: View {
                       text: $sportsURL, id: "sports", secure: false, allowsPaste: true,
                       status: fieldStatus(stored: TorrentSettings.sportsURL,
                                           secret: false,
-                                          emptyText: "Chưa điền — đang dùng: \(TorrentSettings.sportsBase ?? TorrentSettings.sportsDefault)"))
+                                          emptyText: "Chưa điền — đang dùng: \(TorrentSettings.sportsBase ?? TorrentSettings.sportsDefault)"),
+                      // The built-in public base is always in
+                      // force here (the status line prints it),
+                      // so the check is always earned.
+                      inForce: true)
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
                       text: $subAddonURL, id: "sub", secure: false,
                       status: fieldStatus(stored: TorrentSettings.subAddonURL,
-                                          secret: false))
+                                          secret: false),
+                      // The editor itself opens on the built-in
+                      // OpenSubtitles v3 default when nothing is
+                      // stored (see the @State initialiser), so
+                      // the displayed value is the in-force one.
+                      inForce: !subAddonURL
+                                   .trimmingCharacters(in: .whitespaces).isEmpty)
                 field(title: "TMDB API Key",
                       hint: "Chỉ nhập khi anh muốn dùng key TMDB riêng thay cho key tích hợp sẵn trong app.",
                       text: $tmdbKey, id: "tmdb", secure: true,
                       status: fieldStatus(stored: UserDefaults.standard.string(forKey: "tmdb_api_key") ?? "",
                                           secret: true,
-                                          emptyText: "Chưa điền — đang dùng key tích hợp sẵn"))
+                                          emptyText: "Chưa điền — đang dùng key tích hợp sẵn"),
+                      // Same condition as the green-dot row
+                      // under this field: a key (his own or the
+                      // bundled one) is live.
+                      inForce: !TMDBClient.apiKey.isEmpty)
                 // C-13 / §7.8: the field starts empty on a fresh
                 // install even though TMDB is already active via
                 // the bundled key — v1.8's "Tuỳ chọn" hint made it
@@ -428,7 +452,8 @@ struct JoeSettingsView: View {
     private func field(title: String, hint: String,
                        text: Binding<String>, id: String, secure: Bool,
                        allowsPaste: Bool = false,
-                       status: (text: String, filled: Bool)? = nil) -> some View {
+                       status: (text: String, filled: Bool)? = nil,
+                       inForce: Bool? = nil) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 29, weight: .bold))
@@ -464,7 +489,20 @@ struct JoeSettingsView: View {
                 // UI-6 defect D-22: field text is 31 pt at
                 // every field site (the shared token).
                 .font(.system(size: ThemeTokens.fieldTextSize))
-                .joeFieldChrome(focused: focusedField == id)
+                // v2.0.39 (owner order 2026-11-19): Settings
+                // fields wear the Settings-only chrome — no
+                // light outer plate, one per-theme bar, and a
+                // green check inside the bar when a value is
+                // in force (inForce, computed by each call
+                // site from the same effective-value sources
+                // its status line reads; the default below is
+                // the status's own filled flag, then the
+                // field's current text).
+                .joeSettingsFieldChrome(
+                    focused: focusedField == id,
+                    filled: inForce ?? status?.filled
+                        ?? !text.wrappedValue
+                            .trimmingCharacters(in: .whitespaces).isEmpty)
                 .focused($focusedField, equals: id)
                 .onSubmit { save() }
                 if allowsPaste {

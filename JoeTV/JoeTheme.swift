@@ -41,6 +41,14 @@ struct ThemeTokens {
     let surfaceBottom: Color       // card face gradient, bottom stop
     let surface2: Color            // rest fill: pills, chips, secondary buttons
     let stroke: Color              // rest stroke
+    /// Settings input-field bar fill (v2.0.39 redesign — owner
+    /// order 2026-11-19: the light #F5F5F7 outer plate is gone
+    /// from Settings fields; the single remaining bar is painted
+    /// in this per-theme colour, Ultra's #2F3644 chosen by the
+    /// owner himself). Settings fields only — the shared field
+    /// chrome (Search / TVB / Torrent) keeps the UI-1 light
+    /// tokens below, untouched.
+    let fieldBar: Color
     // Accents
     let accent: Color              // selected fill
     let accent2: Color             // primary action fill
@@ -101,6 +109,7 @@ struct ThemeTokens {
         surfaceBottom: Color(red: 0.090, green: 0.090, blue: 0.090),       // #171717
         surface2: Color(red: 0.110, green: 0.110, blue: 0.110),            // #1C1C1C
         stroke: Color.white.opacity(0.14),
+        fieldBar: Color(red: 0.149, green: 0.149, blue: 0.169),            // #26262B
         accent: Color(red: 0.702, green: 0.071, blue: 0.180),              // #B3122E
         accent2: Color(red: 0.851, green: 0.137, blue: 0.180),             // #D9232E
         onAccent: .white,
@@ -122,6 +131,7 @@ struct ThemeTokens {
         surfaceBottom: Color(red: 0.102, green: 0.102, blue: 0.102),
         surface2: Color(red: 0.102, green: 0.102, blue: 0.102),
         stroke: Color.white.opacity(0.38),
+        fieldBar: Color(red: 0.165, green: 0.165, blue: 0.165),            // #2A2A2A
         accent: Color(red: 1.0, green: 0.839, blue: 0.039),                // #FFD60A
         accent2: Color(red: 1.0, green: 0.839, blue: 0.039),
         onAccent: .black,
@@ -143,6 +153,7 @@ struct ThemeTokens {
         surfaceBottom: Color.white.opacity(0.05),
         surface2: Color.white.opacity(0.07),
         stroke: Color.white.opacity(0.16),
+        fieldBar: Color(red: 0.078, green: 0.200, blue: 0.169),            // #14332B
         accent: Color(red: 0.051, green: 0.361, blue: 0.302),              // #0D5C4D
         accent2: Color(red: 0.055, green: 0.478, blue: 0.392),             // #0E7A64
         onAccent: .white,
@@ -167,6 +178,7 @@ struct ThemeTokens {
         surfaceBottom: Color(red: 0.090, green: 0.090, blue: 0.090),       // #171717
         surface2: Color(red: 0.110, green: 0.110, blue: 0.110),            // #1C1C1C
         stroke: Color.white.opacity(0.14),
+        fieldBar: Color(red: 0.184, green: 0.212, blue: 0.267),            // #2F3644 (owner-chosen, option C)
         accent: Color(red: 0.878, green: 0.169, blue: 0.227),              // #E02B3A
         accent2: Color(red: 0.784, green: 0.118, blue: 0.188),             // #C81E30
         onAccent: .white,
@@ -414,6 +426,88 @@ struct JoeFieldChrome: ViewModifier {
 extension View {
     func joeFieldChrome(focused: Bool) -> some View {
         modifier(JoeFieldChrome(focused: focused))
+    }
+}
+
+/// Settings-only field chrome (v2.0.39 — owner order
+/// 2026-11-19, from his photo of the Ultra Settings screen).
+/// His ruling, in his framing: the white OUTER FRAME around
+/// the Settings input fields goes away entirely — only the
+/// inner long bar stays — and a field that is filled, or is
+/// running on a bundled / built-in value, carries a GREEN
+/// CHECK inside the bar so the state reads at a glance
+/// without reading the status line under it.
+///
+/// Mechanically the hated outer frame is JoeFieldChrome's
+/// light plate (ThemeTokens.fieldBg #F5F5F7, the UI-1
+/// light-by-design fill). This modifier paints ONE bar
+/// instead: a RoundedRectangle filled with the theme's
+/// fieldBar colour (Ultra #2F3644 — the owner's own pick,
+/// option C of the in-frame proposal), white text on it, the
+/// same 28×20 insets and rField radius as the old plate, and
+/// the same outset focus ring (the field ring is one of the
+/// design system's legitimate outset rings; the system focus
+/// effect stays disabled, so no OS platter returns). The
+/// green check — a white ✓ on a JoeTheme.okGreen disc, the
+/// proposal's rendering — sits INSIDE the bar at its trailing
+/// end, and the content gains matching trailing room so text
+/// and secure bullets never run under it.
+///
+/// Scope is deliberately Settings-only: this modifier is
+/// applied by JoeSettings' one field(...) helper and nowhere
+/// else. The Search / TVB / Torrent fields keep the shared
+/// JoeFieldChrome above, byte-untouched — the owner's order
+/// named the Settings fields, and the themes' designs are
+/// otherwise frozen.
+struct JoeSettingsFieldChrome: ViewModifier {
+    let focused: Bool
+    /// A value is in force for this field: typed by the
+    /// owner, or a bundled / built-in value is live in its
+    /// place (JoeSettings computes it per field from the
+    /// same effective-value accessors its status lines use).
+    let filled: Bool
+    @Environment(\.joeTheme) private var theme
+
+    func body(content: Content) -> some View {
+        content
+            .focusEffectDisabled()
+            .foregroundStyle(.white)
+            .tint(theme.accent2)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            // Room for the check disc at the bar's trailing
+            // end, inside the bar: when the mark is earned the
+            // content insets by an extra 48 pt (the 32 pt disc
+            // plus clearance) so text and
+            // secure bullets never run under it (the field is
+            // full-width in its row, so the bar itself keeps
+            // its bounds — the room comes out of the text
+            // area, not the bar's frame).
+            .padding(.trailing, filled ? 48 : 0)
+            .background(RoundedRectangle(cornerRadius: theme.rField)
+                .fill(theme.fieldBar))
+            .overlay(RoundedRectangle(cornerRadius: theme.rField)
+                .joeOutsetStrokeBorder(focused ? theme.focus : .clear,
+                                       lineWidth: focused ? theme.ringWidth : 0))
+            .overlay(alignment: .trailing) {
+                if filled {
+                    ZStack {
+                        Circle().fill(JoeTheme.okGreen)
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .frame(width: 32, height: 32)
+                    .padding(.trailing, 20)
+                    .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+extension View {
+    func joeSettingsFieldChrome(focused: Bool, filled: Bool) -> some View {
+        modifier(JoeSettingsFieldChrome(focused: focused, filled: filled))
     }
 }
 

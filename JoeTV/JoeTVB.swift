@@ -7,16 +7,22 @@ import SwiftUI
 // tvos-training/TVB-TAB-BUILD-PLAN.md; audit: TVB-PHASE1-AUDIT.md).
 // The snapshot carries the full TMDB network-48 spine (1,561
 // titles) with per-provider resolution records; only titles that
-// resolved on at least one provider (790) are displayed — an
+// resolved on at least one provider (803) are displayed — an
 // unresolved title has an empty `providers` map and never renders
 // (plan §1.4). Playback priority inside the snapshot is
-// TP → KK → VS, already encoded per title as `primaryProvider`.
+// TP → KK → VS → F4K, already encoded per title as
+// `primaryProvider`.
 //
 // The Codable shapes below mirror the real file field by field
 // (validated against the shipped snapshot): the nulls the file
-// actually carries are `imdbId`, `posterPath`, `backdropPath`,
-// `year`, `primaryProvider`, `providerUpdatedAt` (all null on the
-// 771 unresolved titles) and the TP records' `claimedTotal`.
+// actually carries are `imdbId` (null on 557 displayed and 691
+// unresolved titles), `posterPath`, `backdropPath` and `year`
+// (null only on unresolved titles — 15, 44 and 4 of them),
+// `primaryProvider` and `providerUpdatedAt` (null on all 758
+// unresolved titles and on no displayed title), and
+// `claimedTotal` (carried by the TP records and by the 13 F4K
+// records, explicitly null on all 13 F4K records; its non-null
+// values are TP-only).
 // `voteAverage` arrives as a JSON int on some titles and a float
 // on others — a Swift Double decodes both. Unknown future keys
 // are ignored by the decoder; every key the file carries today
@@ -60,14 +66,19 @@ struct TVBSeason: Codable, Sendable {
 
 struct TVBProviderRecord: Codable, Sendable {
     let slugs: [String]
-    /// "tmdb" | "imdb" | "fallback" — how the pipeline matched.
+    /// "tmdb" | "imdb" | "fallback" | "tmdb-detail" — how the
+    /// pipeline matched ("tmdb-detail" on 40 records: all 13
+    /// F4K records and 27 TP records).
     let matchKey: String
     let matchConfidence: String
     let episodesListed: Int
     let episodesExpected: Int
     let completeness: Double
     let countSource: String
-    /// TP only in practice; null on 16 TP records in the file.
+    /// Non-null values are TP-only; the key is also carried,
+    /// explicitly null, by the 13 F4K records, and is null on
+    /// 16 TP records in the file. KK/VS records omit the key
+    /// entirely (decodes to nil).
     let claimedTotal: Int?
     /// The provider's own dub form ("Lồng Tiếng", "Vietsub", …),
     /// read from `lang` per plan §1.3 — never relabelled.
@@ -98,12 +109,13 @@ struct TVBTitle: Codable, Sendable, Identifiable {
     let voteCount: Int
     let posterPath: String?
     let backdropPath: String?
-    /// Catalogue provider keys: "tp" | "kk" | "vs". NOTE: the
-    /// catalogue's "vs" is the app's Providers.VS code ("vsmov")
-    /// — see appProviderCode below. Empty on unresolved titles.
+    /// Catalogue provider keys: "tp" | "kk" | "vs" | "f4k".
+    /// NOTE: the catalogue's "vs" is the app's Providers.VS
+    /// code ("vsmov") — see appProviderCode below. Empty on
+    /// unresolved titles.
     let providers: [String: TVBProviderRecord]
-    /// First of TP → KK → VS holding the title; null exactly
-    /// when `providers` is empty.
+    /// First of TP → KK → VS → F4K holding the title; null
+    /// exactly when `providers` is empty.
     let primaryProvider: String?
     let categories: [String]
     let providerUpdatedAt: String?
@@ -142,17 +154,25 @@ struct TVBTitle: Codable, Sendable, Identifiable {
     /// differs: Providers.VS is "vsmov", and Providers.detail /
     /// search dispatch on that code — handing the detail the
     /// raw catalogue key "vs" would fall through to the KKPhim
-    /// default with a VSMOV slug.
+    /// default with a VSMOV slug. "f4k" (v2.0.39, the rebuilt
+    /// snapshot's fourth holder) must map explicitly for the
+    /// same reason: left to the default it would fall through
+    /// to KK with a Film4K slug — the wrong-film class.
     static func appProviderCode(_ catalogueKey: String) -> String {
         switch catalogueKey {
         case "vs": return Providers.VS
         case "tp": return Providers.TP
+        case "f4k": return Providers.F4K
         default: return Providers.KK
         }
     }
 
-    /// Playback priority inside the snapshot (plan §1.2/§1.4).
-    static let priorityKeys = ["tp", "kk", "vs"]
+    /// Playback priority inside the snapshot (plan §1.2/§1.4):
+    /// TP → KK → VS → F4K, the settled chain order (F4K last —
+    /// it can only be a title's primary when it is the sole
+    /// holder, which is exactly the titles the v2.0.39 rebuilt
+    /// snapshot adds).
+    static let priorityKeys = ["tp", "kk", "vs", "f4k"]
 
     var primaryRecord: TVBProviderRecord? {
         guard let primaryProvider else { return nil }
@@ -161,7 +181,7 @@ struct TVBTitle: Codable, Sendable, Identifiable {
 
     /// The route target for a tap: the primary provider's FIRST
     /// slug (plan §3 / build spec), with a defensive fallback to
-    /// the first holder in TP → KK → VS order carrying a slug —
+    /// the first holder in TP → KK → VS → F4K order carrying a slug —
     /// unreachable on the shipped snapshot (every displayed
     /// title's primary record has ≥1 slug, verified in the
     /// audit pass), kept so a future snapshot can never render
@@ -185,7 +205,7 @@ struct TVBTitle: Codable, Sendable, Identifiable {
     /// snapshot's own identity for this title: its TMDB id,
     /// its IMDb id when the spine carries one, and every
     /// holder record as an exact (provider, slug) pair in
-    /// TP → KK → VS order, flagged by the pipeline's own
+    /// TP → KK → VS → F4K order, flagged by the pipeline's own
     /// match key. The detail verifies against it (L7) and
     /// orders its holders by measured playability (I1).
     var routeContext: TVBRouteContext {
@@ -809,10 +829,11 @@ struct JoeTVBView: View {
     /// carries the title's TMDB id into the Film4K leg, which
     /// accepts on id where its name test fails (Providers
     /// .searchSlug; TpClient now parses the id its payload
-    /// carries). Titles carried ONLY by Film4K still cannot
-    /// appear in this tab — the snapshot is the tab's
-    /// catalogue; that is a snapshot-rebuild question, not
-    /// this round's (see the FIX4 report).
+    /// carries). Titles carried ONLY by Film4K DO appear in
+    /// this tab since the v2.0.39 rebuilt snapshot: the 13
+    /// f4k-primary titles are sole holders in the snapshot,
+    /// satisfy `isDisplayed`, and route through the explicit
+    /// "f4k" case in `appProviderCode` above.
     private func open(_ title: TVBTitle) {
         guard let target = title.routeTarget else { return }
         nav.movie = MovieRoute(
