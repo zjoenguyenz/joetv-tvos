@@ -291,6 +291,80 @@ final class PlayDirector: ObservableObject {
     /// The one Play budget: 60 s from the first resolution
     /// start to a playing candidate or the exhausted slate.
     private static let resolutionDeadline: TimeInterval = 60
+    /// v2.0.34 (item 8 tightening): the KSPlayer path's
+    /// per-candidate first-frame budget, enforced by the
+    /// ladder-level deadline in armCandidateDeadline().
+    /// Evidence (the owner's 2.0.33 device log, DIAG-2033):
+    /// a warmed candidate's first frame lands in ~100 ms
+    /// and the slowest HEALTHY cold start in that log took
+    /// ~4.4 s in preparing, while a dead TorBox CDN
+    /// candidate rode 11,706 ms before the engine's own
+    /// "Cannot Open" error failed it over. 8 s is ~1.8× the
+    /// worst healthy cold start observed, ~80× the warmed
+    /// time, and cuts both that measured dead ride and the
+    /// KS host watchdog's 30 s silent ride (see
+    /// armCandidateDeadline) to a third or less — while
+    /// staying well under the AVPlayer path's 20 s U-1
+    /// watchdog, the loosest in-tree precedent.
+    private static let ksFirstFrameDeadline: TimeInterval = 8
+    /// The armed candidate deadline (nil = disarmed). One
+    /// at a time: beginCandidate() cancels the previous
+    /// attempt's task before arming the next, and
+    /// itemReady / itemFailed stand it down.
+    private var candidateDeadlineTask: Task<Void, Never>?
+    /// Per-attempt ready flag for the candidate deadline:
+    /// beginCandidate() re-arms it (false) for every new
+    /// candidate; the shared itemReady core sets it the
+    /// first time the live attempt's engine reports ready.
+    private var attemptReadied = false
+    /// Manual-pick exemption for the candidate deadline
+    /// (owner law: a manual source pick is never
+    /// overridden by an automatic mechanism).
+    /// userSwitchSource(to:) — the explicit chooser pick —
+    /// sets nextAttemptManualPick; beginCandidate()
+    /// consumes it into attemptManualPick for the attempt
+    /// it begins. The blind userSwitchSource() advance is
+    /// NOT a pick and does not set it.
+    private var nextAttemptManualPick = false
+    private var attemptManualPick = false
+    /// v2.0.34 (live exemption, REVIEW-2034-LOOP3 R-1;
+    /// E-1 closure, REVIEW-2034-LOOP4): true when this
+    /// session plays a LIVE stream. The determination is
+    /// the entry's explicit live stamp (WatchStore.Entry
+    /// .isLive) OR the "mf-event|" key prefix:
+    ///   • The stamp is set at the one live mint —
+    ///     JoeTVSection.playEvent, the Thể Thao Torrent
+    ///     tap-to-play flow covering both the live sports
+    ///     events and the standing live channels — and it
+    ///     SURVIVES the two re-mints the prefix did not:
+    ///     the player's favourite copy and the progress
+    ///     tick copy the entry whole, and the torrent
+    ///     detail's reopen threading (the Favourites /
+    ///     Continue Watching rails → TorMeta.isLive →
+    ///     makePlayDirector) carries it back onto the
+    ///     fresh "tor|…" session entry. A live row is
+    ///     therefore known live however it was opened.
+    ///   • The prefix remains as the direct flow's own
+    ///     marker (playEvent keys its entry "mf-event|…";
+    ///     WatchStore.canonicalEligible reads the same
+    ///     prefix as the tree's live/sports marker). No
+    ///     VOD factory can mint it (torrent films/series
+    ///     key under "tor|…", provider films under their
+    ///     provider prefixes), and no VOD path sets the
+    ///     stamp — it is written `true` at playEvent only
+    ///     and everywhere else copied, never derived from
+    ///     the meta type ("tv" is shared with torrent
+    ///     series) or the serving base (owner-editable).
+    /// A live session's candidates are exempt from the
+    /// ladder candidate deadline (see
+    /// armCandidateDeadline); the KS host's 30 s
+    /// first-frame watchdog governs them, exactly as in
+    /// 2.0.33. Session-level and immutable: the flag is
+    /// computed once from the identity the session was
+    /// built with; live sessions carry no hop/fallback,
+    /// and a reopened session's identity is the stamped
+    /// entry makePlayDirector built for it.
+    private let sessionIsLive: Bool
     /// PerfLog once-per-session guards (Phase 3 marks).
     private var ladderReadyMarked = false
     private var firstFrameMarked = false
@@ -317,6 +391,8 @@ final class PlayDirector: ObservableObject {
          fallbackCandidates: ((PlayIdentity) async -> [PlayCandidate])? = nil) {
         self.store = store
         self.identity = identity
+        self.sessionIsLive = identity.entry.isLive
+            || identity.entry.key.hasPrefix("mf-event|")
         self.resumeMs = resumeMs
         self.resolveLadder = resolveLadder
         self.hopIdentity = hopIdentity
@@ -406,6 +482,12 @@ final class PlayDirector: ObservableObject {
     }
 
     private func beginCandidate() {
+        // v2.0.34: a new attempt supersedes the old one —
+        // its candidate deadline (if armed) stands down
+        // here, whichever path led in (ladder, failover,
+        // manual switch).
+        candidateDeadlineTask?.cancel()
+        candidateDeadlineTask = nil
         guard candidates.indices.contains(candidateIndex) else {
             resolutionTask = Task { await failoverStep() }
             return
@@ -427,7 +509,107 @@ final class PlayDirector: ObservableObject {
         // — itemReady applies it once per candidate, against
         // the session's furthest position (see itemReady).
         seekApplied = false
+        // v2.0.34: the same per-attempt re-arm for the
+        // candidate deadline — not readied yet, and the
+        // manual-pick marker is consumed from the switch
+        // that (maybe) led here.
+        attemptReadied = false
+        attemptManualPick = nextAttemptManualPick
+        nextAttemptManualPick = false
         phase = .playing
+        armCandidateDeadline()
+    }
+
+    /// v2.0.34 (item 8 tightening): the ladder-level
+    /// first-frame deadline for KSPlayer-path candidates.
+    ///
+    /// Why this exists: the KS host already carries a
+    /// first-frame watchdog of its own (30 s, armed in
+    /// JoeKSPlayerView.start, disarmed at readyToPlay) —
+    /// but 30 s is far too loose for a ladder: in the
+    /// owner's 2.0.33 device log a dead TorBox CDN
+    /// candidate burned 11,706 ms before the engine's own
+    /// error failed it over, and a candidate that never
+    /// errors at all would ride the host's full 30 s. The
+    /// AVPlayer path bounds its items at 20 s (the
+    /// Coordinator's U-1 watchdog); the ladder now bounds
+    /// a KS candidate at ksFirstFrameDeadline (8 s) the
+    /// same way — abandon it and advance — but ONLY where
+    /// advancing costs nothing:
+    ///   • the candidate's engine is .ffmpeg (the KSPlayer
+    ///     path; AVPlayer candidates keep their own U-1);
+    ///   • a NEXT candidate exists in the current ladder —
+    ///     on the last candidate nothing changes: the
+    ///     engine's own error, the host's 30 s watchdog
+    ///     and the failover rungs proceed exactly as
+    ///     before;
+    ///   • the attempt is not the owner's explicit
+    ///     chooser pick (attemptManualPick) — a manual
+    ///     pick is never cut by an automatic mechanism;
+    ///   • the session is not a LIVE one (sessionIsLive):
+    ///     the 8 s budget is justified entirely on
+    ///     film-VOD timings from the owner's log (warmed
+    ///     ~100 ms, worst healthy cold start ~4.4 s) —
+    ///     NO healthy live first-frame time has ever been
+    ///     measured (the 2.0.33 device log held no sports
+    ///     attempt at all), and a live HLS start can
+    ///     legitimately run longer than 8 s. An
+    ///     unmeasured automatic cut has no place in the
+    ///     fragile sports area, whose 2.0.33 behaviour
+    ///     the owner accepted as-is: a live candidate
+    ///     keeps riding the KS host's own 30 s
+    ///     first-frame watchdog exactly as in 2.0.33. A
+    ///     future sports device log that measures healthy
+    ///     live starts is what could justify a live
+    ///     budget of its own.
+    /// Firing routes through itemFailed(cause:), so the
+    /// advance, the failover rungs and the exported log
+    /// lines are the standing ones; the dedicated
+    /// "ks deadline fired" line below is written first so
+    /// the next device export shows the deadline — with
+    /// the candidate's ladder position, host and elapsed
+    /// time — as the cause of that attempt's end. The
+    /// ready signal is the shared itemReady core, the
+    /// same "readied" notion U-1 uses: a candidate that
+    /// has readied and is merely filling its buffer is
+    /// never cut (the host's freeze watchdog guards that
+    /// phase instead).
+    private func armCandidateDeadline() {
+        guard let current = candidate, current.engine == .ffmpeg,
+              candidateIndex + 1 < candidates.count,
+              !attemptManualPick else { return }
+        // v2.0.34 (live exemption, REVIEW-2034-LOOP3 R-1):
+        // a live candidate is never armed — the 8 s budget
+        // was measured on film VOD only, and no healthy
+        // live first-frame time exists yet to justify any
+        // ladder budget on the sports path (see the doc
+        // comment above). The KS host's 30 s first-frame
+        // watchdog governs live exactly as in 2.0.33. The
+        // skip is logged (host only) so the next sports
+        // device export shows the exemption holding.
+        if sessionIsLive {
+            DiagLog.write("play", "ks deadline skipped live candidate \(candidateIndex + 1)/\(candidates.count) host=\(current.url.host ?? "?")")
+            return
+        }
+        let armedAttemptID = attemptID
+        let armedIndex = candidateIndex
+        let armedCount = candidates.count
+        let armedHost = current.url.host ?? "?"
+        candidateDeadlineTask = Task { [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.ksFirstFrameDeadline * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            // Fire only against the very attempt that armed
+            // it, still un-readied and still on screen:
+            // every transition to another attempt cancels
+            // this task first, so a mismatch here means the
+            // session moved on without us.
+            guard phase == .playing, attemptID == armedAttemptID,
+                  !attemptReadied else { return }
+            let elapsedMs = Int(Date().timeIntervalSince(attemptStartedAt) * 1000)
+            DiagLog.write("play", "ks deadline fired candidate \(armedIndex + 1)/\(armedCount) host=\(armedHost) after=\(elapsedMs)ms budget=\(Int(Self.ksFirstFrameDeadline * 1000))ms")
+            itemFailed(cause: "Nguồn không phát sau \(Int(Self.ksFirstFrameDeadline)) giây")
+        }
     }
 
     /// The current item failed (status .failed or failed-to-end).
@@ -438,6 +620,12 @@ final class PlayDirector: ObservableObject {
     /// carry the owner's RD token in the path).
     func itemFailed(cause: String? = nil) {
         guard phase == .playing else { return }
+        // v2.0.34: the attempt is over — its candidate
+        // deadline stands down NOW, before the ladder
+        // advances or the failover step runs, so it can
+        // never fire against the resolution that follows.
+        candidateDeadlineTask?.cancel()
+        candidateDeadlineTask = nil
         if let cause, !cause.isEmpty {
             lastFailure = String(cause.prefix(80))
         }
@@ -659,6 +847,13 @@ final class PlayDirector: ObservableObject {
     /// and performs the seek itself. One rule, two engines —
     /// the >20 s / last-30 s window is identical.
     func itemReady(durationMs: Int64, seek: (Int64) -> Void) {
+        // v2.0.34: the live attempt has readied — the
+        // candidate deadline (armCandidateDeadline) stands
+        // down. Both engines funnel through this core
+        // (itemReady(player:) delegates here), so neither
+        // can skip the stand-down.
+        attemptReadied = true
+        candidateDeadlineTask?.cancel()
         // Phase 3 mark: the session's first ready item, once
         // per session, from this shared core so both engines
         // (AVPlayer above, KSPlayer via durationMs) report it.
@@ -859,6 +1054,12 @@ final class PlayDirector: ObservableObject {
     /// outside .playing.
     func userSwitchSource() {
         guard phase == .playing else { return }
+        // v2.0.34: the current attempt ends here — stand
+        // its candidate deadline down before advancing
+        // (the failover branch below does not pass through
+        // beginCandidate's own stand-down first).
+        candidateDeadlineTask?.cancel()
+        candidateDeadlineTask = nil
         let host = candidate?.url.host ?? "?"
         PlaybackLog.logger.info(
             "user switch source host=\(host, privacy: .public)")
@@ -918,6 +1119,11 @@ final class PlayDirector: ObservableObject {
         let host = candidates[index].url.host ?? "?"
         PlaybackLog.logger.info(
             "user switch source (chosen) host=\(host, privacy: .public)")
+        // v2.0.34: mark the attempt beginCandidate() is
+        // about to begin as the owner's explicit pick —
+        // the candidate deadline never cuts a manual pick
+        // (see armCandidateDeadline).
+        nextAttemptManualPick = true
         candidateIndex = index
         beginCandidate()
     }

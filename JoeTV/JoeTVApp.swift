@@ -652,6 +652,10 @@ struct JoeRootView: View {
             meta.background = q["background"] ?? ""
             meta.year = q["year"] ?? ""
             meta.desc = q["desc"] ?? ""
+            // v2.0.34 (E-2): the writer's torrentLink stamps
+            // live rows with a "live" item; absent = false,
+            // so every pre-existing link parses as before.
+            meta.isLive = q["live"] == "1"
             nav.section = .torrent
             nav.tor = TorRoute(meta: meta, base: q["base"] ?? "",
                                preselectStreamId: q["stream"] ?? "")

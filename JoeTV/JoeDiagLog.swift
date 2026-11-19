@@ -263,6 +263,7 @@ enum DiagLog {
             presence("bundledRD", BundledTokens.rdToken),
             presence("bundledTorbox", BundledTokens.torboxToken),
             presence("bundledPremiumize", BundledTokens.premiumizeToken),
+            presence("bundledMF", BundledTokens.mfURL),
             "configured=\(TorrentSettings.isConfigured)",
             "mfEffective=\(TorrentSettings.mfBase != nil)",
         ]

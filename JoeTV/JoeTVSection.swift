@@ -891,6 +891,15 @@ struct JoeTVSection: View {
         var entry = WatchStore.Entry()
         entry.kind = WatchStore.kindTor
         entry.key = "mf-event|" + event.id
+        // v2.0.34 (E-1): the live stamp. This mint is the
+        // one place a live entry is born (events and the
+        // standing "tv" channels alike — both flow through
+        // this tap); the stamp rides the entry's copies
+        // into the store and the reopen threading back
+        // out, so the session is known live however it is
+        // reopened — the "mf-event|" key alone did not
+        // survive the favourites/CW re-mint under "tor|…".
+        entry.isLive = true
         entry.title = event.name
         entry.poster = event.poster
         entry.metaId = event.id

@@ -260,7 +260,8 @@ struct JoeTorrentHome: View {
                         meta: TorMeta(id: entry.metaId, type: entry.metaType,
                                       name: entry.title, poster: entry.poster,
                                       background: entry.background,
-                                      year: entry.year, desc: entry.desc),
+                                      year: entry.year, desc: entry.desc,
+                                      isLive: entry.isLive),
                         base: entry.metaBase,
                         preselectStreamId: entry.streamId) } label: {
                         PosterCard(
@@ -303,7 +304,8 @@ struct JoeTorrentHome: View {
                         meta: TorMeta(id: entry.metaId, type: entry.metaType,
                                       name: entry.title, poster: entry.poster,
                                       background: entry.background,
-                                      year: entry.year, desc: entry.desc),
+                                      year: entry.year, desc: entry.desc,
+                                      isLive: entry.isLive),
                         base: entry.metaBase) } label: {
                         PosterCard(
                             title: entry.title,
@@ -895,6 +897,7 @@ struct JoeTorrentDetail: View {
             e.year = meta.year
             e.metaId = meta.id
             e.metaType = meta.type
+            e.isLive = meta.isLive
             e.metaBase = route.base
             e.background = meta.background
             e.desc = meta.desc
@@ -1451,6 +1454,7 @@ private struct JoeTorCastCellLabel: View {
         entry.year = meta.year
         entry.metaId = meta.id
         entry.metaType = meta.type
+        entry.isLive = meta.isLive
         entry.streamId = sid
         entry.metaBase = base
         entry.background = meta.background

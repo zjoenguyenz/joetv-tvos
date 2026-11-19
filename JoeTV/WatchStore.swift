@@ -100,6 +100,17 @@ final class WatchStore: ObservableObject {
         // match then falls back to normalized title + year.
         var imdbId = ""
         var tmdbId = ""
+        // v2.0.34 (E-1): the explicit LIVE stamp. Stamped
+        // at the one live mint (JoeTVSection.playEvent) and
+        // carried by the whole-entry copies (the player's
+        // favourite copy, the progress tick) and by the
+        // torrent detail's reopen threading (TorMeta), so a
+        // live row reopened from Favourites / Continue
+        // Watching is still known live after its key is
+        // re-minted under "tor|…". Defaulted, and read by
+        // the tolerant reader below: an entry saved by an
+        // older build (no isLive key on disk) decodes false.
+        var isLive = false
 
         var id: String { key }
         var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
@@ -622,7 +633,7 @@ extension WatchStore.Entry {
     private enum EntryKeys: String, CodingKey {
         case key, kind, pos, dur, ts, ep, epLabel, title, poster,
              year, slug, source, metaId, metaType, streamId,
-             metaBase, background, desc, imdbId, tmdbId
+             metaBase, background, desc, imdbId, tmdbId, isLive
     }
 
     init(from decoder: Decoder) throws {
@@ -647,5 +658,6 @@ extension WatchStore.Entry {
         desc = try c.decodeIfPresent(String.self, forKey: .desc) ?? ""
         imdbId = try c.decodeIfPresent(String.self, forKey: .imdbId) ?? ""
         tmdbId = try c.decodeIfPresent(String.self, forKey: .tmdbId) ?? ""
+        isLive = try c.decodeIfPresent(Bool.self, forKey: .isLive) ?? false
     }
 }

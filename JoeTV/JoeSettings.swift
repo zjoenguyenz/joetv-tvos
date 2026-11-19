@@ -76,9 +76,16 @@ struct JoeSettingsView: View {
                     Text("Cài đặt")
                         .font(.system(size: 56, weight: .heavy))
                         .foregroundStyle(theme.text)
-                    Text(TorrentSettings.isConfigured
-                         ? "Nguồn Torrent: đã cấu hình ✓"
-                         : "Nguồn Torrent: chưa cấu hình — mục Phim Torrent cần ít nhất một mục dưới đây")
+                    // v2.0.34 (item 6): the verdict text comes
+                    // from torrentHeaderText — in 2.0.33 this
+                    // line read isConfigured alone and turned
+                    // green ("đã cấu hình ✓") on the bundled
+                    // tokens while every field below was
+                    // empty (proven by the owner's device
+                    // log). The colour rule is unchanged:
+                    // green whenever torrent is configured in
+                    // either shape, orange when it is not.
+                    Text(torrentHeaderText)
                         .font(.system(size: 25))
                         .foregroundStyle(TorrentSettings.isConfigured
                                          ? JoeTheme.okGreen : .orange)
@@ -101,16 +108,27 @@ struct JoeSettingsView: View {
                 Group {
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
                       hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
-                      text: $addonURL, id: "addon", secure: false, allowsPaste: true)
+                      text: $addonURL, id: "addon", secure: false, allowsPaste: true,
+                      status: fieldStatus(stored: TorrentSettings.addonURL,
+                                          secret: false))
                 field(title: "Token Real-Debrid",
                       hint: "Mã tài khoản Real-Debrid của anh — dùng để giải link torrent và dựng Torrentio khi chưa có link ở trên.",
-                      text: $rdToken, id: "rd", secure: true, allowsPaste: true)
+                      text: $rdToken, id: "rd", secure: true, allowsPaste: true,
+                      status: fieldStatus(stored: TorrentSettings.rdToken,
+                                          secret: true,
+                                          bundledFallback: BundledTokens.rdToken))
                 field(title: "Token TorBox",
                       hint: "Mã tài khoản TorBox của anh (nếu dùng TorBox thay Real-Debrid).",
-                      text: $torboxToken, id: "tb", secure: true, allowsPaste: true)
+                      text: $torboxToken, id: "tb", secure: true, allowsPaste: true,
+                      status: fieldStatus(stored: TorrentSettings.torboxToken,
+                                          secret: true,
+                                          bundledFallback: BundledTokens.torboxToken))
                 field(title: "Token Premiumize",
                       hint: "Mã tài khoản Premiumize của anh (nếu dùng Premiumize cạnh Real-Debrid/TorBox).",
-                      text: $premiumizeToken, id: "pm", secure: true, allowsPaste: true)
+                      text: $premiumizeToken, id: "pm", secure: true, allowsPaste: true,
+                      status: fieldStatus(stored: TorrentSettings.premiumizeToken,
+                                          secret: true,
+                                          bundledFallback: BundledTokens.premiumizeToken))
                 // v2.0.16: MediaFusion — the second torrent
                 // gateway. With its link pasted, the torrent
                 // detail pools both gateways' streams (ranked
@@ -119,7 +137,12 @@ struct JoeSettingsView: View {
                 // off ⇒ MediaFusion is fully absent.
                 field(title: "Link MediaFusion (tuỳ chọn)",
                       hint: "Dán link manifest MediaFusion của anh (trang cấu hình MediaFusion, đã gắn TorBox/Real-Debrid/Premiumize). Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
-                      text: $mfURL, id: "mf", secure: false, allowsPaste: true)
+                      text: $mfURL, id: "mf", secure: false, allowsPaste: true,
+                      status: fieldStatus(stored: TorrentSettings.mfURL,
+                                          secret: false,
+                                          bundledFallback: BundledTokens.mfURL,
+                                          bundledText: "Chưa điền — đang dùng link MediaFusion tích hợp sẵn ✓",
+                                          emptyText: "Chưa điền — chưa có link này thì MediaFusion không hoạt động"))
                 Button {
                     mfEnabled.toggle()
                 } label: {
@@ -137,13 +160,21 @@ struct JoeSettingsView: View {
                 // above — that one also feeds the movie path.
                 field(title: "Thể Thao Torrent — nguồn chính (Nuvio)",
                       hint: "Để trống thì dùng Nuvio công cộng. Dán link khác khi anh tự dựng Nuvio (ví dụ trên PC của anh). Mục Thể Thao Torrent lấy nguồn này trước, MediaFusion dự phòng sau.",
-                      text: $sportsURL, id: "sports", secure: false, allowsPaste: true)
+                      text: $sportsURL, id: "sports", secure: false, allowsPaste: true,
+                      status: fieldStatus(stored: TorrentSettings.sportsURL,
+                                          secret: false,
+                                          emptyText: "Chưa điền — đang dùng Nuvio công cộng mặc định"))
                 field(title: "Addon phụ đề (OpenSubtitles)",
                       hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
-                      text: $subAddonURL, id: "sub", secure: false)
+                      text: $subAddonURL, id: "sub", secure: false,
+                      status: fieldStatus(stored: TorrentSettings.subAddonURL,
+                                          secret: false))
                 field(title: "TMDB API Key",
                       hint: "Chỉ nhập khi anh muốn dùng key TMDB riêng thay cho key tích hợp sẵn trong app.",
-                      text: $tmdbKey, id: "tmdb", secure: true)
+                      text: $tmdbKey, id: "tmdb", secure: true,
+                      status: fieldStatus(stored: UserDefaults.standard.string(forKey: "tmdb_api_key") ?? "",
+                                          secret: true,
+                                          emptyText: "Chưa điền — đang dùng key tích hợp sẵn"))
                 // C-13 / §7.8: the field starts empty on a fresh
                 // install even though TMDB is already active via
                 // the bundled key — v1.8's "Tuỳ chọn" hint made it
@@ -283,9 +314,74 @@ struct JoeSettingsView: View {
         }
     }
 
+    /// v2.0.34 (item 6): true when the owner has entered at
+    /// least one torrent credential himself — a pasted
+    /// Torrentio link or one of the three debrid tokens, in
+    /// STORAGE (the TorrentSettings accessors). The header
+    /// reads this FIRST: the bundled fallback tokens make
+    /// TorrentSettings.isConfigured true entirely on their
+    /// own, and in 2.0.33 that turned the header green over
+    /// fields that were all empty — the owner's device log
+    /// proved every user value absent with only the bundled
+    /// tokens present. The header must say WHICH of the two
+    /// configurations is live, not just that one is.
+    private var hasUserTorrentCredential: Bool {
+        [TorrentSettings.addonURL, TorrentSettings.rdToken,
+         TorrentSettings.torboxToken, TorrentSettings.premiumizeToken]
+            .contains {
+                !$0.trimmingCharacters(in: .whitespaces).isEmpty
+            }
+    }
+
+    /// v2.0.34 (item 6): the header's configuration line —
+    /// user-entered credentials, bundled-only, or nothing,
+    /// stated as which. Both configured shapes keep the
+    /// green ✓ (torrent works either way); only the words
+    /// differ, so the line can never again claim a personal
+    /// configuration over visibly empty fields.
+    private var torrentHeaderText: String {
+        if hasUserTorrentCredential {
+            return "Nguồn Torrent: đã cấu hình ✓"
+        }
+        if TorrentSettings.isConfigured {
+            return "Nguồn Torrent: đang dùng token tích hợp sẵn ✓"
+        }
+        return "Nguồn Torrent: chưa cấu hình — mục Phim Torrent cần ít nhất một mục dưới đây"
+    }
+
+    /// v2.0.34 (item 6): the truth line under one credential
+    /// field, computed from the STORED value (the
+    /// TorrentSettings accessor, trimmed as save() stores
+    /// it) — never from the field's own rendering, which is
+    /// precisely what could not be trusted: in 2.0.32/33
+    /// the bars looked blank and there was no way to tell
+    /// "empty" from "filled but not painting". A filled
+    /// secret/token field shows its character count; NO
+    /// part of any value is ever shown. An empty field with
+    /// a bundled fallback in force says so, instead of
+    /// implying nothing is configured at all.
+    private func fieldStatus(stored: String, secret: Bool,
+                             bundledFallback: String? = nil,
+                             bundledText: String =
+                                "Chưa điền — đang dùng token tích hợp sẵn",
+                             emptyText: String = "Chưa điền")
+        -> (text: String, filled: Bool) {
+        let value = stored.trimmingCharacters(in: .whitespaces)
+        if !value.isEmpty {
+            return (secret ? "Đã điền ✓ (\(value.count) ký tự)"
+                           : "Đã điền ✓", true)
+        }
+        if let bundledFallback,
+           !bundledFallback.trimmingCharacters(in: .whitespaces).isEmpty {
+            return (bundledText, false)
+        }
+        return (emptyText, false)
+    }
+
     private func field(title: String, hint: String,
                        text: Binding<String>, id: String, secure: Bool,
-                       allowsPaste: Bool = false) -> some View {
+                       allowsPaste: Bool = false,
+                       status: (text: String, filled: Bool)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 29, weight: .bold))
@@ -329,6 +425,18 @@ struct JoeSettingsView: View {
                 }
             }
             .frame(maxWidth: 1250, alignment: .leading)
+            // v2.0.34 (item 6): the field's truth line (see
+            // fieldStatus) — additive only, in the hint's own
+            // style: 25 pt, okGreen when filled, theme.meta
+            // when not. It sits between the field and its
+            // hint so the state reads as the field's own.
+            if let status {
+                Text(status.text)
+                    .font(.system(size: 25))
+                    .foregroundStyle(status.filled
+                                     ? JoeTheme.okGreen : theme.meta)
+                    .frame(maxWidth: 1250, alignment: .leading)
+            }
             Text(hint)
                 .font(.system(size: 25))
                 .foregroundStyle(theme.meta)

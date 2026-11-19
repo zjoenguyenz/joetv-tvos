@@ -626,7 +626,35 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             switch press.type {
             case .select:
                 showControls()
-                togglePlayPause()
+                // v2.0.34 (item 1, CONFIRMED by the owner's
+                // 2.0.33 device log): ONE Select press was
+                // reaching togglePlayPause() TWICE whenever
+                // focus sat on the play/pause button — once
+                // through the button's own
+                // .primaryActionTriggered, once through this
+                // branch — and the two toggles cancelled:
+                // 15/15 dead presses in the log are
+                // play→pause pairs 13–68 ms apart, all with
+                // focused=playPauseButton, while presses with
+                // focus anywhere else are single and work.
+                // The same double delivery rode on every
+                // picker pick (the pick plus a stray toggle).
+                // Give Select exactly ONE consumer: when
+                // focus is on one of the bar's own buttons,
+                // the button's action is that consumer and
+                // the host must not toggle. This is NOT a
+                // debounce — the second delivery itself is
+                // removed, not timed out. Select on
+                // non-button surfaces keeps toggling here
+                // (the log's focused=root press worked), and
+                // .playPause below stays unconditional: no
+                // button consumes that press type.
+                if focusIsOnTransportButton() {
+                    DiagLog.write("transport",
+                                  "select owned by focused button focused=\(focusedViewName()) — host toggle skipped")
+                } else {
+                    togglePlayPause()
+                }
                 handled = true
             case .playPause:
                 showControls()
@@ -695,35 +723,58 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         intentPlaying = layer.player.isPlaying
     }
 
-    /// v2.0.33 (item 1c): the name of the currently focused
-    /// view, for the transport log line in togglePlayPause —
-    /// the next device run must show WHERE focus actually
-    /// sat when a press landed, not where it was supposed
-    /// to sit. Walks the host's whole subtree for the one
-    /// view reporting isFocused and names the known
-    /// controls; anything else falls back to its class
-    /// name, and "none" when nothing in the subtree holds
-    /// focus (the dead-press signature itself).
-    private func focusedViewName() -> String {
-        func search(_ candidate: UIView) -> String? {
-            if candidate.isFocused {
-                if candidate === playPauseButton { return "playPauseButton" }
-                if candidate === seekBar { return "seekBar" }
-                if candidate === subtitleButton { return "subtitleButton" }
-                if candidate === audioButton { return "audioButton" }
-                if candidate === switchSourceButton { return "switchSourceButton" }
-                if pickerButtons.contains(where: { $0 === candidate }) {
-                    return "pickerButton"
-                }
-                if candidate === view { return "root" }
-                return String(describing: type(of: candidate))
-            }
+    /// v2.0.34 (item 1): the currently focused view in the
+    /// host's subtree, or nil when nothing in it holds
+    /// focus. Factored out of focusedViewName() (v2.0.33)
+    /// so the pressesEnded Select guard and the transport
+    /// log line read the SAME focus fact — the guard must
+    /// judge the exact view the log names.
+    private func focusedView() -> UIView? {
+        func search(_ candidate: UIView) -> UIView? {
+            if candidate.isFocused { return candidate }
             for subview in candidate.subviews {
                 if let found = search(subview) { return found }
             }
             return nil
         }
-        return search(view) ?? "none"
+        return search(view)
+    }
+
+    /// v2.0.34 (item 1): true when focus sits on one of the
+    /// transport bar's OWN buttons — play/pause, Phụ đề,
+    /// Âm thanh, Đổi nguồn, or any picker row. Every one of
+    /// them consumes Select itself through
+    /// .primaryActionTriggered, so a Select the host ALSO
+    /// answers is delivered twice (see pressesEnded).
+    private func focusIsOnTransportButton() -> Bool {
+        guard let focused = focusedView() else { return false }
+        return focused === playPauseButton
+            || focused === subtitleButton
+            || focused === audioButton
+            || focused === switchSourceButton
+            || pickerButtons.contains(where: { $0 === focused })
+    }
+
+    /// v2.0.33 (item 1c): the name of the currently focused
+    /// view, for the transport log line in togglePlayPause —
+    /// the next device run must show WHERE focus actually
+    /// sat when a press landed, not where it was supposed
+    /// to sit. Names the known controls; anything else
+    /// falls back to its class name, and "none" when
+    /// nothing in the subtree holds focus (the dead-press
+    /// signature itself).
+    private func focusedViewName() -> String {
+        guard let candidate = focusedView() else { return "none" }
+        if candidate === playPauseButton { return "playPauseButton" }
+        if candidate === seekBar { return "seekBar" }
+        if candidate === subtitleButton { return "subtitleButton" }
+        if candidate === audioButton { return "audioButton" }
+        if candidate === switchSourceButton { return "switchSourceButton" }
+        if pickerButtons.contains(where: { $0 === candidate }) {
+            return "pickerButton"
+        }
+        if candidate === view { return "root" }
+        return String(describing: type(of: candidate))
     }
 
     private func togglePlayPause() {

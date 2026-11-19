@@ -272,6 +272,17 @@ enum JoeTopShelfWriter {
             URLQueryItem(name: "base", value: e.metaBase),
             URLQueryItem(name: "stream", value: e.streamId),
         ]
+        // v2.0.34 (E-2): the live stamp rides the link too.
+        // This URL round trip is a rebuild like the rails'
+        // (JoeTVApp's "torrent" case re-mints the TorMeta
+        // field by field), and without the stamp a live CW
+        // row reopened from the Top Shelf lost its live
+        // truth exactly as the favourites/CW re-mint did in
+        // E-1. Appended only when stamped, so an unstamped
+        // entry's link stays byte-identical to before.
+        if e.isLive {
+            c.queryItems?.append(URLQueryItem(name: "live", value: "1"))
+        }
         return c.url?.absoluteString ?? ""
     }
 

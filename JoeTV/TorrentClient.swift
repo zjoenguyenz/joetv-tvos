@@ -94,6 +94,28 @@ enum TorrentSettings {
         set { UserDefaults.standard.set(newValue, forKey: keyMfURL) }
     }
 
+    /// v2.0.34: the EFFECTIVE MediaFusion link, resolving
+    /// exactly like the debrid tokens above (the v2.0.5
+    /// rule): a stored value wins; when storage is empty,
+    /// the build-time bundled value from BundledTokens
+    /// (injected by the workflow from the MF_URL Actions
+    /// secret) applies. MediaFusion was the one credential
+    /// with no bundled fallback, and Signulous cannot
+    /// install over the existing app — the owner deletes
+    /// the app before every install, so the pasted link
+    /// died with the sandbox on every reinstall (the
+    /// 2.0.33 device log: mf=absent, mfEffective=false, the
+    /// whole session). The raw accessor above stays the
+    /// Settings editor's view of storage, exactly as the
+    /// token accessors do. The bundled value is the same
+    /// bearer credential as the pasted one: never logged
+    /// (DiagLog prints presence + length only) and never
+    /// sent anywhere but the MediaFusion host itself.
+    static var effectiveMfURL: String {
+        let stored = mfURL.trimmingCharacters(in: .whitespaces)
+        return stored.isEmpty ? BundledTokens.mfURL : stored
+    }
+
     /// The kill-switch (Android parity, default ON): off ⇒
     /// MediaFusion is fully absent and the torrent surfaces
     /// behave exactly as before it existed.
@@ -107,15 +129,17 @@ enum TorrentSettings {
     }
 
     /// The MediaFusion base to talk to, or nil when it is not
-    /// in play: kill-switch off, nothing pasted, or the pasted
-    /// value does not validate as an http/https URL (the
-    /// effectiveBase rule — a stray word in the field must
-    /// never become a base). Accepts the configure page's
-    /// manifest URL, the bare base, or a stremio:// link
-    /// (stripSlash removes the /manifest.json tail).
+    /// in play: kill-switch off, no link in force (nothing
+    /// pasted and nothing bundled — see effectiveMfURL), or
+    /// the link in force does not validate as an http/https
+    /// URL (the effectiveBase rule — a stray word in the
+    /// field must never become a base). Accepts the
+    /// configure page's manifest URL, the bare base, or a
+    /// stremio:// link (stripSlash removes the
+    /// /manifest.json tail).
     static var mfBase: String? {
         guard mfEnabled else { return nil }
-        let raw = mfURL.trimmingCharacters(in: .whitespaces)
+        let raw = effectiveMfURL.trimmingCharacters(in: .whitespaces)
         guard !raw.isEmpty else { return nil }
         var s = raw
         if s.hasPrefix("stremio://") {
@@ -125,10 +149,13 @@ enum TorrentSettings {
         return isValidAddonBase(base) ? base : nil
     }
 
-    /// True when a MediaFusion URL is saved (regardless of the
-    /// toggle) — the Settings presence tick.
+    /// True when a MediaFusion URL is in force (regardless
+    /// of the toggle) — the Settings presence tick. v2.0.34:
+    /// "in force" reads the EFFECTIVE link, so a build
+    /// carrying the bundled MF_URL reports configured even
+    /// with the Settings field empty.
     static var mfConfigured: Bool {
-        !mfURL.trimmingCharacters(in: .whitespaces).isEmpty
+        !effectiveMfURL.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// v2.0.24: the Thể Thao Torrent tab's OWN sources (the
@@ -292,6 +319,19 @@ struct TorMeta: Identifiable, Hashable, Sendable {
     /// series metas, whose streams come from the configured
     /// gateways as before.
     var servingBase = ""
+    /// v2.0.34 (E-1): the live stamp, threaded from the
+    /// stored WatchStore entry when the torrent detail is
+    /// reopened from the Favourites / Continue Watching
+    /// rails — the rails rebuild a fresh meta from the
+    /// stored entry, and without this field the entry's
+    /// live truth died at that rebuild (the session was
+    /// re-minted under a "tor|…" key and the player read
+    /// it as film VOD). Default false: every catalog /
+    /// search / film meta is unstamped by construction —
+    /// only the two rails set it, from the entry's own
+    /// stamp, and the detail's builders copy it back
+    /// onto the entries they mint.
+    var isLive = false
     var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
 }
 
