@@ -2625,7 +2625,8 @@ private struct JoeCastCellLabel: View {
            !tvbStruck.contains(Providers.F4K),
            let f4kSlug = await Providers.findSlug(
                code: Providers.F4K, name: route.name, origin: "",
-               year: route.year, tmdbId: "\(ctx.tmdbId)") {
+               year: route.year, tmdbId: "\(ctx.tmdbId)",
+               requireIdVerified: true) {
             result.append((code: Providers.F4K, slug: f4kSlug))
         }
         return result
@@ -3059,10 +3060,9 @@ private struct JoeCastCellLabel: View {
                 // or an identity that is not the origin — takes
                 // the fresh fetch exactly as before.
                 let d: Detail
-                if !originBox.consumed,
-                   identity.entry.source == provider,
-                   identity.entry.slug == detail.movie.slug {
-                    originBox.consumed = true
+                if identity.entry.source == provider,
+                   identity.entry.slug == detail.movie.slug,
+                   originBox.claim() {
                     d = detail
                 } else if let fresh = try? await Providers.detail(
                     identity.entry.source, slug: identity.entry.slug) {
@@ -3239,6 +3239,19 @@ private struct JoeCastCellLabel: View {
             imdbId = pinnedImdbId
             tmdbType = "tv"
         }
+        if pinnedImdbId.isEmpty, !pinnedTmdbId.isEmpty {
+            // Swift 6 specialist-review fix (SF4): with a
+            // snapshot TMDB id pinned but no snapshot IMDb
+            // id, the payload's OWN imdbId is unverified —
+            // a different series' id rides exactly this
+            // field, and nothing downstream can contradict
+            // an IMDb id the snapshot has nothing to compare
+            // against. Discard it: the derivation below
+            // runs on the snapshot's TMDB id alone, so the
+            // rung addresses the snapshot's own series, or
+            // nothing.
+            imdbId = ""
+        }
         if imdbId.isEmpty, !pinnedTmdbId.isEmpty {
             // Swift 6 round (fault c): a TVB session whose
             // snapshot carries no IMDb id derives one ONLY
@@ -3359,15 +3372,30 @@ private final class DetailLoadRace: @unchecked Sendable {
 /// closure must mutate it across invocations. `consumed`
 /// flips on the first origin-identity invocation; every
 /// later invocation fetches its detail fresh.
-/// Swift 6: @unchecked Sendable is justified because the
-/// only toucher is the resolveLadder closure of the ONE
-/// PlayDirector built beside the box — PlayDirector is
-/// @MainActor and awaits each ladder invocation to
-/// completion before issuing the next, so invocations
-/// never overlap and each completion happens-before the
-/// next start through the await chain; the flag is only
-/// ever touched by one invocation at a time, whichever
-/// executor the closure body itself runs on.
+/// Swift 6: @unchecked Sendable is justified by the lock,
+/// not by invocation serialisation. The earlier claim on
+/// file — that PlayDirector awaits each ladder invocation
+/// to completion before issuing the next — is FALSE:
+/// PlayDirector.failoverStep() runs a hedged pair, two
+/// concurrent tasks awaiting the same resolveLadder
+/// closure at once, so two invocations CAN reach this
+/// flag simultaneously. The flag is therefore only ever
+/// touched through the box's NSLock, and the test-and-set
+/// is a single atomic claim(): exactly one invocation —
+/// the first origin-identity one — is told it may serve
+/// the on-screen detail; every other invocation fetches
+/// fresh, whichever executor the closure body runs on.
 private final class LadderFirstCallBox: @unchecked Sendable {
-    var consumed = false
+    private let lock = NSLock()
+    private var consumed = false
+
+    /// Atomically test-and-set: true exactly once, for
+    /// the first caller; false for every later caller.
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if consumed { return false }
+        consumed = true
+        return true
+    }
 }

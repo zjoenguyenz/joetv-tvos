@@ -158,7 +158,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// that had announced itself ready was previously still
     /// killed at 12 s because only bufferFinished disarmed
     /// the budget).
-    private var firstFrameWatchdog: DispatchWorkItem?
+    private var firstFrameWatchdog: Task<Void, Never>?
     /// Mid-play freeze watchdog (30 s without playhead advance,
     /// Android POSITION_STALL parity): a 1 s ticker, judging
     /// only after the first frame — the same shape as the
@@ -488,15 +488,14 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         KSOptions.firstPlayerType = KSMEPlayer.self
         let layer = KSPlayerLayer(url: candidate.url, options: options, delegate: self)
         self.layer = layer
-        if let playerView = layer.player.view {
-            playerView.frame = view.bounds
-            playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            // UNDER the transport bar: the controls were added
-            // in viewDidLoad, before this layer existed, so a
-            // plain addSubview here would bury them beneath
-            // the picture surface forever.
-            view.insertSubview(playerView, at: 0)
-        }
+        let playerView = layer.player.view
+        playerView.frame = view.bounds
+        playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // UNDER the transport bar: the controls were added
+        // in viewDidLoad, before this layer existed, so a
+        // plain addSubview here would bury them beneath
+        // the picture surface forever.
+        view.insertSubview(playerView, at: 0)
         // v2.0.5 (P2): play EXPLICITLY. The pre-fix host never
         // called play() at start — playback depended on the
         // library's autoplay behaviour, which this side has
@@ -504,12 +503,17 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // for it.
         layer.play()
         intentPlaying = true
-        let wd = DispatchWorkItem { [weak self] in
-            guard let self, !self.playing else { return }
+        // Swift 6 specialist-review fix (B-2): the delayed
+        // watchdog is a weak Task with a sleep — the house
+        // watchdog form (JoeStores) — not a DispatchWorkItem
+        // on the main queue: a GCD closure is a nonisolated
+        // @Sendable closure and may not touch this host's
+        // @MainActor state. The 30 s budget is unchanged.
+        firstFrameWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard let self, !Task.isCancelled, !self.playing else { return }
             self.stallFail(reason: "Chưa có hình sau 30 giây")
         }
-        firstFrameWatchdog = wd
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: wd)
         lastAdvanceAt = Date()
         let ticker = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkFreeze()
@@ -1118,8 +1122,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         let externalURL = externalSubtitleURL
         guard dataSource != nil || externalURL != nil else { return }
         subtitleFedPlayerID = playerID
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self, let layer = self.layer,
+        // Swift 6 specialist-review fix (B-2): the 1 s
+        // delayed feed is a weak Task with a sleep (the
+        // house delayed form, JoeStores), not a GCD
+        // asyncAfter — the closure touches this host's
+        // @MainActor state, which a nonisolated @Sendable
+        // GCD closure may not do. Delay unchanged.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !Task.isCancelled,
+                  let layer = self.layer,
                   ObjectIdentifier(layer.player as AnyObject) == playerID
             else { return }
             let model = layer.subtitleModel
@@ -1514,8 +1526,12 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
     /// path has always made. Idempotent: a second queued
     /// close reads pickerIsOpen false and no-ops.
     private func closePickerDeferred() {
-        DispatchQueue.main.async { [weak self] in
-            self?.closePicker()
+        // Swift 6 specialist-review fix (B-2): a Task hop,
+        // not DispatchQueue.main.async — the closure
+        // touches @MainActor state (see the B-2 note at
+        // the first-frame watchdog).
+        Task { @MainActor in
+            self.closePicker()
         }
     }
 
@@ -1576,8 +1592,7 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                 ready = true
                 let dur = layer.player.duration
                 let durMs = dur.isFinite ? Int64(dur * 1000) : 0
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                Task { @MainActor in
                     // The track lists exist only from this
                     // point on: size the bar's subtitle/audio
                     // buttons from the live lists now (a file
@@ -1589,6 +1604,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                     self.director?.itemReady(durationMs: durMs) { ms in
                         layer.seek(time: TimeInterval(ms) / 1000,
                                    autoPlay: true) { _ in }
+                        // Swift 6 specialist-review fix
+                        // (SF5): the resume seek auto-plays —
+                        // state the intent, symmetric with
+                        // seekBy. Without it a pause taken
+                        // during preparing left the flag
+                        // false over a playing engine: the
+                        // glyph showed play and the next
+                        // Select sent play() again (a no-op)
+                        // until a state event re-synced.
+                        self.intentPlaying = true
                     }
                 }
             }
@@ -1637,8 +1662,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             fireFail(cause: error.localizedDescription)
         } else if !ended {
             ended = true
-            DispatchQueue.main.async { [weak self] in
-                self?.director?.itemEnded()
+            Task { @MainActor in
+                self.director?.itemEnded()
             }
         }
     }
@@ -1700,8 +1725,8 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         firstFrameWatchdog?.cancel()
         freezeTimer?.invalidate()
         freezeTimer = nil
-        DispatchQueue.main.async { [weak self] in
-            self?.director?.itemFailed(cause: cause)
+        Task { @MainActor in
+            self.director?.itemFailed(cause: cause)
         }
     }
 }

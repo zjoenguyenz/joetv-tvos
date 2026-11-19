@@ -73,6 +73,12 @@ final class StreamWarmer: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entry: Entry?
+    /// Swift 6 specialist-review fix (SF2): bumped under
+    /// the lock by every warm() that replaces the entry;
+    /// a warm() whose generation has been superseded by
+    /// the time its player is built retires that player
+    /// instead of storing it (see warm()).
+    private var warmGeneration = 0
 
     /// Warm one candidate (URL + the exact headers its
     /// ladder entry carries). Replaces any previous warm —
@@ -89,6 +95,16 @@ final class StreamWarmer: @unchecked Sendable {
         }
         let old = entry
         entry = nil
+        // SF2: claim the next generation BEFORE building.
+        // warm() has concurrent callers (a detached
+        // next-episode warm can race a main-actor dwell
+        // warm); the pre-fix check-then-act let two calls
+        // both pass this check, both build a player, and
+        // the second store overwrote the first — the
+        // overwritten player was never paused or emptied,
+        // a leaked player buffering on, owned by no one.
+        warmGeneration += 1
+        let generation = warmGeneration
         lock.unlock()
         old?.player.pause()
         old?.player.replaceCurrentItem(with: nil)
@@ -99,8 +115,20 @@ final class StreamWarmer: @unchecked Sendable {
         item.preferredForwardBufferDuration = 5
         let player = AVPlayer(playerItem: item)
         lock.lock()
-        entry = Entry(url: url, headers: headers, player: player, at: Date())
+        let isCurrent = warmGeneration == generation
+        if isCurrent {
+            entry = Entry(url: url, headers: headers, player: player, at: Date())
+        }
         lock.unlock()
+        guard isCurrent else {
+            // A newer warm superseded this one while the
+            // player was being built: retire the player
+            // built here rather than storing it over the
+            // newer warm's entry.
+            player.pause()
+            player.replaceCurrentItem(with: nil)
+            return
+        }
         // Apple's async key loading, alongside the player's
         // own load: the playable key is what the item's
         // readiness turns on. Fail-soft — a failed load

@@ -79,11 +79,25 @@ struct TVBRouteContext: Hashable, Sendable {
     /// unchanged: their slug was derived from a verified
     /// id, so an id-less payload contradicts nothing and
     /// still stands exactly as before.
+    /// Swift 6 specialist-review fix (SF3): a provider
+    /// that is NOT a snapshot holder at all — the Film4K
+    /// leg appended by tvbOrderedAlternatives — used to
+    /// stand here unchecked (the guard's else returned
+    /// true): a non-holder's payload painted on the
+    /// detail page, and a playback hop adopted it, with
+    /// no identity evidence at all — the same wrong-film
+    /// class, through the one provider the snapshot does
+    /// not carry. A non-holder now faces the fallback
+    /// affirm rule below, unchanged: its payload's TMDB
+    /// or IMDb id must equal the snapshot's, and an
+    /// id-less payload fails closed. (This gate is only
+    /// reachable inside a TVB session — tvbGate returns
+    /// true when route.tvb == nil — so non-TVB pages are
+    /// untouched.)
     func accepts(_ m: Movie, provider: String) -> Bool {
         if contradicts(m) { return false }
-        guard let holder = holders.first(where: { $0.provider == provider })
-        else { return true }
-        if holder.idMatched { return true }
+        if let holder = holders.first(where: { $0.provider == provider }),
+           holder.idMatched { return true }
         if !m.tmdbId.isEmpty || !m.imdbId.isEmpty {
             return (!m.tmdbId.isEmpty && Int(m.tmdbId) == tmdbId)
                 || (!imdbId.isEmpty && !m.imdbId.isEmpty && m.imdbId == imdbId)

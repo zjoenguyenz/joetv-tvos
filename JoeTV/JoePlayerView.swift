@@ -958,9 +958,9 @@ private final class JoeDirectorBox: ObservableObject {
     private func observe(_ director: PlayDirector) {
         advanceSubscription = director.$advanceTarget
             .sink { [weak self] target in
-                guard let target else { return }
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.director !== target,
+                guard let target, let self else { return }
+                Task { @MainActor in
+                    guard self.director !== target,
                           self.director.advanceTarget === target else { return }
                     self.director = target
                     self.observe(target)
@@ -1551,7 +1551,7 @@ private struct PlayerController: UIViewControllerRepresentable {
         private var failed = false
         /// U-1 stall watchdog: fires itemFailed() if the item
         /// has neither readied nor failed 20 s after observe().
-        private var watchdog: DispatchWorkItem?
+        private var watchdog: Task<Void, Never>?
         /// Mid-play freeze watchdog (latency round, audit
         /// §3.2/§6): the U-1 watchdog is cancelled the moment
         /// the item readies, and before this round NOTHING
@@ -1600,8 +1600,12 @@ private struct PlayerController: UIViewControllerRepresentable {
             // this session (e.g. a KS attempt before the
             // torrent substitution rung, or the reverse) had
             // reported its own bar hidden.
-            DispatchQueue.main.async { [weak self] in
-                self?.director.setTransportBarVisible(true)
+            // Swift 6 specialist-review fix (B-2): Task hop,
+            // not DispatchQueue.main.async — a GCD closure is
+            // a nonisolated @Sendable closure and may not
+            // touch this coordinator's @MainActor state.
+            Task { @MainActor in
+                self.director.setTransportBarVisible(true)
             }
         }
 
@@ -1636,8 +1640,8 @@ private struct PlayerController: UIViewControllerRepresentable {
             // rendered unconditionally and the resume line
             // lingered after bar + title had hidden — the
             // owner's normal-film finding on 2.0.28.)
-            DispatchQueue.main.async { [weak self] in
-                self?.director.setTransportBarVisible(visible)
+            Task { @MainActor in
+                self.director.setTransportBarVisible(visible)
             }
         }
 
@@ -1674,7 +1678,7 @@ private struct PlayerController: UIViewControllerRepresentable {
             titleItem.identifier = .commonIdentifierTitle
             titleItem.value = Self.displayTitle(for: entry) as NSString
             titleItem.extendedLanguageTag = nil
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 item.externalMetadata = [titleItem]
             }
             // Artwork: fetch the poster fail-soft and add it
@@ -1694,9 +1698,9 @@ private struct PlayerController: UIViewControllerRepresentable {
                     // before (any error → no artwork).
                     let data = try? await JoeHTTP.getData(
                         posterURL.absoluteString, timeout: 15)
-                    guard let data, !data.isEmpty else { return }
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, self.player?.currentItem === item else { return }
+                    guard let data, !data.isEmpty, let self else { return }
+                    Task { @MainActor in
+                        guard self.player?.currentItem === item else { return }
                         let artItem = AVMutableMetadataItem()
                         artItem.identifier = .commonIdentifierArtwork
                         artItem.value = data as NSData
@@ -1775,12 +1779,21 @@ private struct PlayerController: UIViewControllerRepresentable {
             // silent black screen forever — AVPlayer raises no
             // error for it. The watchdog feeds the stall into
             // the director's normal failover path.
+            // Swift 6 specialist-review fix (B-2): the
+            // watchdog is a weak Task with a sleep — the
+            // house watchdog form (JoeStores) — not a
+            // DispatchWorkItem on the main queue: a GCD
+            // closure is a nonisolated @Sendable closure and
+            // may not touch this coordinator's @MainActor
+            // state. The 20 s budget is unchanged, and
+            // cancellation keeps the DispatchWorkItem shape
+            // (watchdog?.cancel() at every stand-down site).
             watchdog?.cancel()
-            let wd = DispatchWorkItem { [weak self] in
-                self?.fireFail(cause: "Quá 20 giây vẫn chưa sẵn sàng phát")
+            watchdog = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(20))
+                guard let self, !Task.isCancelled else { return }
+                self.fireFail(cause: "Quá 20 giây vẫn chưa sẵn sàng phát")
             }
-            watchdog = wd
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: wd)
             // Mid-play freeze watchdog: armed now, but it only
             // starts judging once the item readies — until
             // then the pre-ready watchdog above owns the start
@@ -1801,8 +1814,8 @@ private struct PlayerController: UIViewControllerRepresentable {
                 // hop; the coordinator's state is main-actor
                 // state and is only touched after the hop.
                 let status = item.status
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                guard let self else { return }
+                Task { @MainActor in
                     switch status {
                     case .readyToPlay:
                         self.handleReady()
@@ -1835,15 +1848,16 @@ private struct PlayerController: UIViewControllerRepresentable {
                 // main actor like every other state touch.
                 let cause = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]
                     as? Error)?.localizedDescription
-                DispatchQueue.main.async { [weak self] in
-                    self?.fireFail(cause: cause)
+                guard let self else { return }
+                Task { @MainActor in
+                    self.fireFail(cause: cause)
                 }
             }
             endToken = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
             ) { [weak self] _ in
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                guard let self else { return }
+                Task { @MainActor in
                     // The freeze watchdog stands down at the
                     // end: a finished item is the end-observer's
                     // transition, never a stall.
@@ -1860,8 +1874,9 @@ private struct PlayerController: UIViewControllerRepresentable {
                 // on the main actor — the observer block
                 // itself carries only the Sendable time.
                 let seconds = time.seconds
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, let item = self.player?.currentItem else { return }
+                guard let self else { return }
+                Task { @MainActor in
+                    guard let item = self.player?.currentItem else { return }
                     let pos = Int64(seconds * 1000)
                     let dur = item.duration.seconds.isFinite ? Int64(item.duration.seconds * 1000) : 0
                     self.director.tick(positionMs: pos, durationMs: dur)
@@ -1885,8 +1900,8 @@ private struct PlayerController: UIViewControllerRepresentable {
                 let now = p.currentTime().seconds
                 lastPositionSec = now.isFinite ? now : -1
             }
-            DispatchQueue.main.async { [weak self] in
-                guard let self, let player = self.player else { return }
+            Task { @MainActor in
+                guard let player = self.player else { return }
                 self.director.itemReady(player: player)
             }
         }
@@ -1947,8 +1962,8 @@ private struct PlayerController: UIViewControllerRepresentable {
             freezeTimer?.invalidate()
             freezeTimer = nil
             let resolved = cause ?? player?.currentItem?.error?.localizedDescription
-            DispatchQueue.main.async { [weak self] in
-                self?.director.itemFailed(cause: resolved)
+            Task { @MainActor in
+                self.director.itemFailed(cause: resolved)
             }
         }
 

@@ -898,21 +898,23 @@ enum Providers {
     /// by Vietnamese name first, then by origin name; accept the
     /// first candidate that sameFilm() approves.
     static func findSlug(code: String, name: String, origin: String, year: String,
-                         tmdbId: String = "") async -> String? {
+                         tmdbId: String = "",
+                         requireIdVerified: Bool = false) async -> String? {
         var slug = await searchSlug(code: code, query: name, name: name, origin: origin, year: year,
-                                    tmdbId: tmdbId)
+                                    tmdbId: tmdbId, requireIdVerified: requireIdVerified)
         if slug == nil && !origin.trimmingCharacters(in: .whitespaces).isEmpty
             && origin.trimmingCharacters(in: .whitespaces).lowercased()
                 != name.trimmingCharacters(in: .whitespaces).lowercased() {
             slug = await searchSlug(code: code, query: origin, name: name, origin: origin, year: year,
-                                    tmdbId: tmdbId)
+                                    tmdbId: tmdbId, requireIdVerified: requireIdVerified)
         }
         return slug
     }
 
     private static func searchSlug(code: String, query: String, name: String,
                                    origin: String, year: String,
-                                   tmdbId: String = "") async -> String? {
+                                   tmdbId: String = "",
+                                   requireIdVerified: Bool = false) async -> String? {
         let q = query.trimmingCharacters(in: .whitespaces)
         if q.isEmpty { return nil }
         guard let results = try? await search(code, keyword: q) else { return nil }
@@ -933,8 +935,21 @@ enum Providers {
                 return m.slug
             }
         }
-        for m in results where sameFilm(m, name: name, origin: origin, year: year) {
-            return m.slug
+        // Swift 6 specialist-review fix (SF3): a strict
+        // caller — a TVB session's Film4K leg, where the
+        // snapshot's identity is the authority — must not
+        // accept on name+year alone: a same-named
+        // different film passes sameFilm while carrying
+        // another series' identity, and the TMDB-id
+        // detail verification below is the only acceptance
+        // evidence the snapshot trusts. Strict callers
+        // skip straight to it (failing closed to nil when
+        // no candidate verifies). Every other caller
+        // keeps the standing order exactly as before.
+        if !requireIdVerified {
+            for m in results where sameFilm(m, name: name, origin: origin, year: year) {
+                return m.slug
+            }
         }
         // FIX4 (fix 8), the operative half: Film4K's SEARCH
         // payload (/api/search/suggest — light items) carries
