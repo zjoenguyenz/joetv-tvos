@@ -66,6 +66,35 @@ struct PlayCandidate: Sendable {
     /// (e.g. 59.94 / 50); nil = no explicit rate in the name.
     var fps: Double? = nil
 
+    /// v2.0.36 (FIX 1, AUDIT-2034 §4): the host of the
+    /// UPSTREAM stream this candidate ultimately plays —
+    /// for a candidate whose play URL is a JoeProxy
+    /// loopback URL, the host of the upstream URL being
+    /// proxied; for a direct candidate, its own URL's host.
+    /// Stamped at construction, where the upstream is still
+    /// known (the provider ladder builder in JoeMovieDetail,
+    /// TorrentClient.playCandidates); nil on any path that
+    /// does not stamp, where the failure memory falls back
+    /// to the play URL's host exactly as in 2.0.35. The
+    /// director's never-ready failure memory keys on this
+    /// host (see failureMemoryHost): keyed on the play URL
+    /// alone, every proxied provider was invisible to the
+    /// memory — 127.0.0.1 names them all at once and is
+    /// rightly forbidden as a key — so a proxy-wrapped leg
+    /// that never readied was re-served by its own refresh
+    /// and burned a second full 20 s U-1 window (the
+    /// 2.0.35 device log's 40.2 s two-window burn,
+    /// DIAG-2035 Q6).
+    var upstreamHost: String? = nil
+
+    /// The host the director's never-ready failure memory
+    /// keys this candidate on: the stamped upstream host
+    /// when present, else the play URL's own host (the
+    /// 2.0.35 behaviour for any unstamped path).
+    var failureMemoryHost: String? {
+        upstreamHost ?? url.host
+    }
+
     /// The AVURLAsset the AVPlayer path opens for this
     /// candidate: exactly the candidate's headers, plus the
     /// house user agent when none was set. Shared by the
@@ -313,6 +342,35 @@ final class PlayDirector: ObservableObject {
     /// snapshot serves exactly one advance. 0 = no
     /// unconsumed snapshot is held.
     private var switchSnapshotMs: Int64 = 0
+    /// v2.0.36 (FIX 2): the CURRENT attempt's last intended
+    /// seek destination — every seek the app performs or
+    /// forwards for this attempt records its target here
+    /// (see noteSeekDestination): the itemReady resume
+    /// seeks on both engines, the KS host's user seeks,
+    /// and the AVPlayer host's AVKit-navigation hand-in.
+    /// The record exists because the engine's own clock
+    /// cannot be trusted to hold the destination: when a
+    /// CDN refuses the scrubbed offset, AVPlayer's clock
+    /// collapses back to the first seconds before the
+    /// failure arrives, and the failover capture — which
+    /// reads that clock — inherits the collapse
+    /// (DIAG-2035 Q2: captures of 1203 ms and 5781 ms
+    /// against an owner scrubbing at +2′; both
+    /// replacements started from 0). itemFailed's
+    /// failover capture therefore takes max(handed-in
+    /// playhead, this destination). Attempt-scoped like
+    /// the rest of the 2.0.35 carry state: beginCandidate
+    /// clears it (the attempt is superseded — its capture,
+    /// if any, already consumed it), the record hand-ins
+    /// are attempt-guarded, and tick() clears it once the
+    /// attempt has readied and played PAST it — from
+    /// there the ordinary capture and furthest machinery
+    /// read positions at or beyond it, and the record has
+    /// nothing left to protect. 0 = no destination
+    /// recorded for this attempt. A live session never
+    /// records: position is meaningless there, as
+    /// everywhere in this machinery.
+    private var attemptSeekDestinationMs: Int64 = 0
     private var started = false
 
     // v2.0.8 (Phase 3): ONE stored resolution task + ONE
@@ -405,6 +463,19 @@ final class PlayDirector: ObservableObject {
     ///     the identical absoluteString in the initial
     ///     ladder and in a refresh ladder, and the URL key
     ///     identifies it exactly.
+    ///     v2.0.36 (FIX 1): the host key is now the
+    ///     candidate's stamped UPSTREAM host whenever it
+    ///     carries one (PlayCandidate.upstreamHost — the
+    ///     AUDIT-2034 §4 plumbing): a proxied provider
+    ///     whose re-resolve mints a FRESH upstream URL —
+    ///     a new proxy token, so the URL key above cannot
+    ///     match — is still recognised by the host that
+    ///     died (DIAG-2035 Q6: the refresh re-served the
+    ///     dead proxy-wrapped leg and burned a second
+    ///     full U-1 window). The play URL's own loopback
+    ///     host remains forbidden as a key, exactly as
+    ///     before; an unstamped candidate falls back to
+    ///     its play URL's host, the 2.0.35 behaviour.
     /// Automatic ladder commits (loadLadder, the failover
     /// hedge) filter recorded candidates out, so a refresh
     /// can never re-serve the candidate whose death
@@ -455,16 +526,23 @@ final class PlayDirector: ObservableObject {
     /// emptied branch as not having won, with an
     /// unfiltered last resort only when both branches
     /// produced ladders that filtered to empty). Every
-    /// drop is logged — host only; a proxy-wrapped
-    /// candidate dropped by its URL key has no host worth
-    /// printing (its loopback host names nothing).
+    /// drop is logged — host only. v2.0.36 (FIX 1): the
+    /// host matched and printed is the candidate's
+    /// failure-memory host (PlayCandidate
+    /// .failureMemoryHost — the stamped upstream host
+    /// when it carries one), so a proxy-wrapped candidate
+    /// dropped by that key now names the provider that
+    /// died; only a candidate dropped by its URL key
+    /// alone, with no usable host, keeps the
+    /// (proxy-wrapped) line — its loopback host names
+    /// nothing.
     private func filteringNeverReadyFailures(
         _ ladder: [PlayCandidate]
     ) -> [PlayCandidate] {
         guard failureMemoryArmed, !neverReadyFailedKeys.isEmpty
         else { return ladder }
         return ladder.filter { candidate in
-            let hostKeyed = candidate.url.host.map {
+            let hostKeyed = candidate.failureMemoryHost.map {
                 !Self.isLoopbackHost($0)
                     && neverReadyFailedKeys.contains($0)
             } ?? false
@@ -472,7 +550,7 @@ final class PlayDirector: ObservableObject {
                 || neverReadyFailedKeys.contains(
                     candidate.url.absoluteString)
             if keyed {
-                if let host = candidate.url.host,
+                if let host = candidate.failureMemoryHost,
                    !Self.isLoopbackHost(host) {
                     DiagLog.write("play", "failure memory filtered host=\(host)")
                 } else {
@@ -688,6 +766,10 @@ final class PlayDirector: ObservableObject {
         // manual-pick marker is consumed from the switch
         // that (maybe) led here.
         attemptReadied = false
+        // v2.0.36 (FIX 2): the seek-destination record is
+        // attempt-scoped — the new attempt starts with
+        // none (see attemptSeekDestinationMs).
+        attemptSeekDestinationMs = 0
         attemptManualPick = nextAttemptManualPick
         nextAttemptManualPick = false
         phase = .playing
@@ -904,6 +986,30 @@ final class PlayDirector: ObservableObject {
         DiagLog.write("play", "switch snapshot kind=\(kind) pos=\(playheadMs)ms candidate=\(candidateIndex + 1)/\(candidates.count)\(rebaseNote)")
     }
 
+    /// v2.0.36 (FIX 2): a host records the seek it is
+    /// performing — or, for the AVPlayer host, the seek
+    /// AVKit is performing at the owner's hand — as the
+    /// current attempt's intended destination (see
+    /// attemptSeekDestinationMs). The LAST record wins:
+    /// it is the owner's most recent intent that a
+    /// failover capture must honour. Attempt-scoped
+    /// exactly like itemReady/itemFailed: a hand-in that
+    /// does not name the current attempt is ignored whole
+    /// (a superseded host's late report must not stamp
+    /// the replacement attempt with the dead one's
+    /// target) and logged in the stale lines' shape. A
+    /// live session records nothing, and a non-positive
+    /// destination is no destination.
+    func noteSeekDestination(_ destinationMs: Int64,
+                             reportingAttemptID: Int) {
+        guard reportingAttemptID == attemptID else {
+            DiagLog.write("play", "seek destination ignored stale attempt=\(reportingAttemptID) current=\(attemptID)")
+            return
+        }
+        guard !sessionIsLive, destinationMs > 0 else { return }
+        attemptSeekDestinationMs = destinationMs
+    }
+
     /// The current item failed (status .failed or failed-to-end).
     /// `cause` is the failing engine's own error description
     /// (or a watchdog label): it is remembered for the
@@ -951,10 +1057,32 @@ final class PlayDirector: ObservableObject {
         // it before the ladder advances, so the next
         // candidate resumes where this one died (see
         // captureSwitchSnapshot). The candidate deadline's
-        // own firing passes no playhead: that candidate
-        // never readied, so there is nothing to carry
-        // beyond furthestPosMs.
-        captureSwitchSnapshot(kind: "failover", playheadMs: playheadMs)
+        // own firing passes no playhead.
+        // v2.0.36 (FIX 2): the capture candidate is the
+        // BETTER of that playhead and the failed attempt's
+        // last intended seek destination (see
+        // attemptSeekDestinationMs): when a CDN refuses a
+        // scrubbed offset, the playhead read inherits the
+        // engine clock's collapse to the first seconds,
+        // while the destination is where the owner
+        // actually sent the film (DIAG-2035 Q2 — captures
+        // of 1203 ms / 5781 ms against a +2′ scrub; both
+        // replacements restarted at 0). The merged value
+        // passes through captureSwitchSnapshot's standing
+        // gates untouched (the subwindow gate, the live
+        // guard, the failover no-rebaseline rule), and the
+        // itemReady side is equally untouched: precedence,
+        // the >20 s floor and the last-30 s window all
+        // apply to the merged value exactly as they did
+        // to a pure playhead capture. The merge is logged
+        // when it supplies the value, so the next export
+        // shows the destination doing the carrying.
+        var failoverPlayheadMs = playheadMs
+        if attemptSeekDestinationMs > (failoverPlayheadMs ?? 0) {
+            DiagLog.write("play", "seek destination applied dest=\(attemptSeekDestinationMs)ms playhead=\(playheadMs ?? -1)ms")
+            failoverPlayheadMs = attemptSeekDestinationMs
+        }
+        captureSwitchSnapshot(kind: "failover", playheadMs: failoverPlayheadMs)
         // v2.0.34: the attempt is over — its candidate
         // deadline stands down NOW, before the ladder
         // advances or the failover step runs, so it can
@@ -982,7 +1110,22 @@ final class PlayDirector: ObservableObject {
            let failedCandidate = candidate {
             neverReadyFailedKeys.insert(
                 failedCandidate.url.absoluteString)
-            if let host = failedCandidate.url.host,
+            // v2.0.36 (FIX 1): the host key is the
+            // candidate's failure-memory host — its stamped
+            // UPSTREAM host when it carries one
+            // (PlayCandidate.failureMemoryHost). A
+            // proxy-wrapped candidate's play URL is
+            // loopback, whose host names every proxied
+            // provider at once and stays forbidden as a
+            // key; its upstream host names exactly the
+            // provider that died, so the record now lands
+            // for proxied legs too, and a refresh that
+            // re-resolves a FRESH upstream URL for the same
+            // dead host is still filtered on it (DIAG-2035
+            // Q6). Unstamped paths fall back to the play
+            // URL's host, the 2.0.35 behaviour, loopback
+            // guard unchanged.
+            if let host = failedCandidate.failureMemoryHost,
                !Self.isLoopbackHost(host) {
                 neverReadyFailedKeys.insert(host)
                 DiagLog.write("play", "failure memory recorded host=\(host)")
@@ -1257,8 +1400,22 @@ final class PlayDirector: ObservableObject {
             // unprovable from a log with no seek lines).
             // Positions only, never a URL. This closure is
             // the AVPlayer path's ONLY app seek call site:
-            // the system transport bar performs the owner's
-            // own scrubs inside AVKit, past no app code.
+            // the system transport bar EXECUTES the owner's
+            // own scrubs inside AVKit — but since v2.0.36
+            // (FIX 2) AVKit first asks its delegate for the
+            // scrub's target (the Coordinator's
+            // timeToSeekAfterUserNavigatedFrom witness),
+            // and that witness records the destination with
+            // the director, so a scrub's destination reaches
+            // the failover capture even though its execution
+            // never touches app code.
+            // v2.0.36 (FIX 2): this resume seek's target is
+            // recorded as the attempt's intended destination
+            // too (see noteSeekDestination) — if the CDN
+            // refuses THIS offset and the item dies with its
+            // clock collapsed, the failover capture still
+            // holds the position this seek sent it to.
+            noteSeekDestination(ms, reportingAttemptID: reportingAttemptID)
             let fromSec = player.currentTime().seconds
             DiagLog.write("play", "seek engine=avplayer from=\(Self.seekLogSeconds(fromSec)) to=\(Self.seekLogSeconds(TimeInterval(ms) / 1000))")
             player.seek(to: CMTime(milliseconds: ms),
@@ -1446,6 +1603,20 @@ final class PlayDirector: ObservableObject {
         // user-initiated capture (see furthestPosMs at
         // its declaration).
         furthestPosMs = max(furthestPosMs, positionMs)
+        // v2.0.36 (FIX 2): the seek-destination record's
+        // retirement — once this attempt has readied and
+        // its real playhead has reached or passed the
+        // recorded destination, the destination is spent:
+        // the ordinary capture and the furthest above now
+        // read positions at or beyond it, so a later
+        // failure needs no protection from it (see
+        // attemptSeekDestinationMs). Ticks BEFORE the
+        // destination (a fresh layer's early reports, the
+        // refill while the seek lands) leave it standing.
+        if attemptReadied, attemptSeekDestinationMs > 0,
+           positionMs >= attemptSeekDestinationMs {
+            attemptSeekDestinationMs = 0
+        }
         lastDurMs = durationMs
         // FIX4 (fix 6): the Up Next trigger moves from the
         // END of the item to its last 10 seconds (owner
@@ -2528,6 +2699,42 @@ private struct PlayerController: UIViewControllerRepresentable {
             Task { @MainActor in
                 self.director.setTransportBarVisible(visible)
             }
+        }
+
+        /// v2.0.36 (FIX 2): AVKit's user-navigation hand-in.
+        /// When the owner scrubs or skips with the system
+        /// transport bar, AVKit performs the seek itself —
+        /// no app code executes it — but it first asks its
+        /// delegate for the target time, and that ask is
+        /// the one moment the scrub's DESTINATION exists in
+        /// app code. This witness records the target as
+        /// this coordinator's attempt's intended seek
+        /// destination with the director (see
+        /// PlayDirector.noteSeekDestination, which applies
+        /// the attempt guard and the live exemption) and
+        /// returns the target UNCHANGED: the seek proceeds
+        /// exactly as AVKit computed it — the record is the
+        /// only addition. Without it, a scrub whose offset
+        /// the CDN refuses leaves no trace of the
+        /// destination in any input the failover capture
+        /// can read: AVPlayer's clock collapses to the
+        /// first seconds and the replacement restarts at
+        /// 0 (DIAG-2035 Q2). The witness lives in the class
+        /// body beside the transport-bar one above, under
+        /// the same @MainActor isolated conformance (see
+        /// the note at the conformance extension).
+        func playerViewController(
+            _ playerViewController: AVPlayerViewController,
+            timeToSeekAfterUserNavigatedFrom oldTime: CMTime,
+            to targetTime: CMTime
+        ) -> CMTime {
+            let targetSec = targetTime.seconds
+            if targetSec.isFinite {
+                director.noteSeekDestination(
+                    Int64(targetSec * 1000),
+                    reportingAttemptID: attemptID)
+            }
+            return targetTime
         }
 
         /// v2.0.29 (item 3): a candidate label flattened for

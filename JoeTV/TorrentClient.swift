@@ -1311,6 +1311,12 @@ enum TorrentClient {
             leadCandidate.dv = match.dv
             leadCandidate.hdr = match.hdr
             leadCandidate.fps = match.fps
+            // v2.0.36 (FIX 1): the upstream-host stamp — a
+            // direct candidate's upstream is its own URL
+            // (see PlayCandidate.upstreamHost). These
+            // candidates also serve the Phim substitution
+            // rung, inside the failure memory's scope.
+            leadCandidate.upstreamHost = url.host
             out.append(leadCandidate)
         }
         // Remaining direct-URL streams, in list order. Each
@@ -1349,6 +1355,9 @@ enum TorrentClient {
                 candidate.dv = s.dv
                 candidate.hdr = s.hdr
                 candidate.fps = s.fps
+                // v2.0.36 (FIX 1): same upstream-host stamp
+                // as the lead candidate above.
+                candidate.upstreamHost = url.host
                 out.append(candidate)
             }
         }

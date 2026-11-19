@@ -3311,6 +3311,21 @@ private struct JoeCastCellLabel: View {
                     epName: identity.entry.ep,
                     epNum: Providers.episodeNumber(identity.entry.ep))
                 let streaming = ladder.entries.compactMap { entry in
+                    // v2.0.36 (FIX 1, AUDIT-2034 §4): every
+                    // candidate is stamped with its UPSTREAM
+                    // host — the host of entry.url, the stream
+                    // the provider actually serves — BEFORE any
+                    // proxy wrapping, so the director's
+                    // never-ready failure memory can key on the
+                    // provider that died even when the play URL
+                    // is the house proxy's loopback address
+                    // (whose host names every proxied provider
+                    // at once and can never be a key). This one
+                    // builder serves the initial ladder, the
+                    // failover refresh rung and the hop rung
+                    // alike — they all re-run this closure — so
+                    // no rung can mint an unstamped candidate.
+                    let upstreamHost = URL(string: entry.url)?.host
                     // PNG-disguised / header-gated streams reach
                     // AVPlayer through the in-app cleaning proxy;
                     // if the proxy is somehow down, fall back to
@@ -3318,11 +3333,17 @@ private struct JoeCastCellLabel: View {
                     if entry.proxy,
                        let local = JoeProxy.shared.playlistURL(
                            for: entry.url, headers: entry.headers) {
-                        return PlayCandidate(url: local, label: entry.title)
+                        var candidate = PlayCandidate(url: local,
+                                                      label: entry.title)
+                        candidate.upstreamHost = upstreamHost
+                        return candidate
                     }
                     return URL(string: entry.url).map {
-                        PlayCandidate(url: $0, headers: entry.headers,
-                                      label: entry.title)
+                        var candidate = PlayCandidate(
+                            url: $0, headers: entry.headers,
+                            label: entry.title)
+                        candidate.upstreamHost = upstreamHost
+                        return candidate
                     }
                 }
                 var seen = Set<String>()

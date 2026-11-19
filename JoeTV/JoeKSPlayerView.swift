@@ -854,6 +854,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         // media-command seeks are library-internal and
         // pass no app code.)
         DiagLog.write("play", "seek engine=ffmpeg from=\(Self.seekLogSeconds(from)) to=\(Self.seekLogSeconds(target))")
+        // v2.0.36 (FIX 2): record the destination with the
+        // director (see PlayDirector.noteSeekDestination),
+        // so the failover capture holds where this seek
+        // sent the film even if the engine's clock later
+        // collapses. One carry rule for both engines; the
+        // director applies the attempt guard.
+        if target.isFinite {
+            director?.noteSeekDestination(Int64(target * 1000),
+                                          reportingAttemptID: hostAttemptID)
+        }
         layer.seek(time: target, autoPlay: true) { _ in }
         intentPlaying = true
         refreshTransport()
@@ -1962,6 +1972,13 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                         // the target the director applied.
                         let fromSec = layer.player.currentPlaybackTime
                         DiagLog.write("play", "seek engine=ffmpeg from=\(Self.seekLogSeconds(fromSec)) to=\(Self.seekLogSeconds(TimeInterval(ms) / 1000))")
+                        // v2.0.36 (FIX 2): the resume seek's
+                        // target is recorded as this attempt's
+                        // intended destination, exactly as at
+                        // the AVPlayer path's twin site (see
+                        // PlayDirector.noteSeekDestination).
+                        self.director?.noteSeekDestination(
+                            ms, reportingAttemptID: self.hostAttemptID)
                         layer.seek(time: TimeInterval(ms) / 1000,
                                    autoPlay: true) { _ in }
                         // Swift 6 specialist-review fix
