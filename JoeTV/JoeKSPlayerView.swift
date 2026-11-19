@@ -103,6 +103,24 @@ struct JoeKSPlayerController: UIViewControllerRepresentable {
 final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate {
     private var layer: KSPlayerLayer?
     private var director: PlayDirector?
+    /// v2.0.35 (REVIEW-2035B-LOOP3 E-1; the failure
+    /// and ended funnels joined under
+    /// REVIEW-2035C-LOOP3 E-1): the attempt this
+    /// host was created under, captured in start() —
+    /// makeUIViewController runs it during the SwiftUI
+    /// commit for this attempt's .id(attemptID) identity,
+    /// with the director's counter standing at exactly
+    /// that attempt. The .readyToPlay funnel hands it to
+    /// the director's attempt-scoped itemReady core, and
+    /// fireFail / the finish delegate hand it to the
+    /// equally scoped itemFailed / itemEnded, so a late
+    /// ready, failure or ended from THIS host after the
+    /// ladder has advanced (a slow candidate cut by the
+    /// 8 s ladder deadline, its engine's terminal error
+    /// landing a beat after the cut, readying before its
+    /// teardown lands) is recognised as stale and ignored
+    /// there.
+    private var hostAttemptID = 0
     /// v2.0.16: the session's side-loaded subtitle URL (the
     /// candidate's subtitleURL — the subtitle addon's best
     /// Vietnamese), fed into the subtitle model beside the
@@ -389,6 +407,9 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
 
     func start(candidate: PlayCandidate, director: PlayDirector) {
         self.director = director
+        // v2.0.35 (REVIEW-2035B-LOOP3 E-1): name the
+        // attempt this host serves — see hostAttemptID.
+        hostAttemptID = director.attemptID
         externalSubtitleURL = candidate.subtitleURL
         pendingCandidate = candidate
         // v2.0.26 (idea 10), tvOS-corrected in v2.0.27:
@@ -807,9 +828,32 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         refreshTransport()
     }
 
+    /// v2.0.35 (seek logging, DIAG-2034 (g)): one-decimal
+    /// seconds for the seek log lines; a non-finite read
+    /// (a layer with no clock yet) logs as 0.0 rather
+    /// than "nan". Twin of PlayDirector's helper — the
+    /// two hosts each format their own lines.
+    private static func seekLogSeconds(_ value: TimeInterval) -> String {
+        String(format: "%.1f", value.isFinite ? value : 0)
+    }
+
     private func seekBy(_ delta: TimeInterval) {
         guard let layer else { return }
-        let target = max(0, layer.player.currentPlaybackTime + delta)
+        let from = layer.player.currentPlaybackTime
+        let target = max(0, from + delta)
+        // v2.0.35 (seek logging, DIAG-2034 (g)): every
+        // app-executed seek leaves one line — engine,
+        // from-position, to-position, in seconds — so the
+        // next export can place a seek immediately before
+        // any freeze/fail line that follows it (the
+        // owner's "tua nhanh là đứt" report is unprovable
+        // from a log with no seek lines). Positions only,
+        // never a URL. This is the user-seek site: the
+        // remote Left/Right steps and the seek bar's steps
+        // both funnel through here. (KSPlayerLayer's own
+        // media-command seeks are library-internal and
+        // pass no app code.)
+        DiagLog.write("play", "seek engine=ffmpeg from=\(Self.seekLogSeconds(from)) to=\(Self.seekLogSeconds(target))")
         layer.seek(time: target, autoPlay: true) { _ in }
         intentPlaying = true
         refreshTransport()
@@ -1725,9 +1769,22 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
             // switches, keeping the position through the
             // standing itemReady resume rule. Picking the
             // current row is the director's no-op.
+            // v2.0.35: the LIVE playhead is read from the
+            // layer synchronously HERE, at the pick — the
+            // same currentPlaybackTime the freeze watchdog
+            // reads — and handed to the director with the
+            // switch: the switch recreates this host, so
+            // after this call the playhead is gone, and the
+            // pre-fix carry (the director's latest tick
+            // value) was destroyed by the NEW host's first
+            // ~0 report before the resume seek read it
+            // (AUDIT-2034-SWITCHRESUME).
             let index = sender.tag
+            let nowSec = layer.player.currentPlaybackTime
+            let playheadMs = (nowSec.isFinite && nowSec > 0)
+                ? Int64(nowSec * 1000) : nil
             closePicker()
-            director?.userSwitchSource(to: index)
+            director?.userSwitchSource(to: index, playheadMs: playheadMs)
             return
         }
         // v2.0.33 (item 1a): only the two TRACK kinds reach
@@ -1895,7 +1952,16 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
                     self.applyDefaultAudio(layer: layer)
                     self.refreshTrackButtons()
                     self.refreshTransport()
-                    self.director?.itemReady(durationMs: durMs) { ms in
+                    self.director?.itemReady(durationMs: durMs,
+                                             reportingAttemptID: self.hostAttemptID) { ms in
+                        // v2.0.35 (seek logging, DIAG-2034
+                        // (g)): the resume seek leaves the
+                        // same line as every app-executed
+                        // seek (see seekBy) — from is the
+                        // fresh layer's clock (≈0), to is
+                        // the target the director applied.
+                        let fromSec = layer.player.currentPlaybackTime
+                        DiagLog.write("play", "seek engine=ffmpeg from=\(Self.seekLogSeconds(fromSec)) to=\(Self.seekLogSeconds(TimeInterval(ms) / 1000))")
                         layer.seek(time: TimeInterval(ms) / 1000,
                                    autoPlay: true) { _ in }
                         // Swift 6 specialist-review fix
@@ -1975,7 +2041,11 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         } else if !ended {
             ended = true
             Task { @MainActor in
-                self.director?.itemEnded()
+                // v2.0.35: hand in this host's captured
+                // attempt — the director ignores an ended
+                // that names a superseded attempt (see
+                // PlayDirector.itemEnded).
+                self.director?.itemEnded(reportingAttemptID: self.hostAttemptID)
             }
         }
     }
@@ -2055,8 +2125,30 @@ final class KSPlayerHostViewController: UIViewController, KSPlayerLayerDelegate 
         firstFrameWatchdog?.cancel()
         freezeTimer?.invalidate()
         freezeTimer = nil
+        // v2.0.35: capture this host's last playhead NOW,
+        // synchronously, before the director call is
+        // dispatched — by the time the task runs, the
+        // switch may already have torn this layer down.
+        // The live read is the same currentPlaybackTime
+        // the freeze watchdog reads; lastPositionSec (the
+        // watchdog's own tracked position) is the fallback
+        // when the layer is already gone or reports
+        // nothing usable. The director snapshots it so the
+        // next candidate resumes where this one died (see
+        // PlayDirector.captureSwitchSnapshot).
+        let liveSec = layer?.player.currentPlaybackTime ?? -1
+        let playheadSec = (liveSec.isFinite && liveSec > 0)
+            ? liveSec
+            : (lastPositionSec > 0 ? lastPositionSec : -1)
+        let playheadMs: Int64? = playheadSec > 0
+            ? Int64(playheadSec * 1000) : nil
         Task { @MainActor in
-            self.director?.itemFailed(cause: cause)
+            // v2.0.35: hand in this host's captured attempt
+            // — a failure whose hop lands after the ladder
+            // advanced past this host is ignored by the
+            // director (see PlayDirector.itemFailed).
+            self.director?.itemFailed(cause: cause, playheadMs: playheadMs,
+                                      reportingAttemptID: self.hostAttemptID)
         }
     }
 }
