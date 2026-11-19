@@ -130,6 +130,15 @@ enum JoeHTTP {
     private static func fetch(_ request: URLRequest, timeout: TimeInterval) async throws -> (Data, URLResponse) {
         var request = request
         request.timeoutInterval = timeout
+        // Swift 6: the task-group children below are
+        // `sending` closures and may not capture a `var`
+        // the enclosing task still touches (the PerfLog
+        // lines after the group read request.url). The
+        // mutation is finished, so freeze the completed
+        // request into an immutable snapshot for the
+        // children to capture — same request, same
+        // timeout, same headers as before.
+        let request = request
         let collector = JoeMetricsCollector()
         do {
             let (data, response) = try await withThrowingTaskGroup(
@@ -146,22 +155,25 @@ enum JoeHTTP {
                 // The drain: next() yields the remaining
                 // child's value (loop), nil once no children
                 // remain (stop), or throws its error, which
-                // try? turns into the stop case. Both
-                // optionals are unwrapped deliberately — a
-                // single-level unwrap would spin forever on
-                // the no-children nil.
+                // try? turns into the stop case. The binding
+                // flattens try?'s optional, so the single
+                // unwrap fails on BOTH stop cases and the
+                // drain cannot spin on the no-children nil.
+                // (A second `pending != nil` condition used
+                // to guard each loop; Swift 6 proved it
+                // always true once the binding succeeds —
+                // the binding's failure already IS the stop
+                // signal — so it was removed.)
                 do {
                     guard let first = try await group.next() else {
                         throw URLError(.unknown)
                     }
                     group.cancelAll()
-                    while let pending = try? await group.next(),
-                          pending != nil {}
+                    while let _ = try? await group.next() {}
                     return first
                 } catch {
                     group.cancelAll()
-                    while let pending = try? await group.next(),
-                          pending != nil {}
+                    while let _ = try? await group.next() {}
                     throw error
                 }
             }
