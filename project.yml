@@ -20,10 +20,27 @@ packages:
   # the "KSPlayer" product is a prebuilt xcframework and the UI
   # layer ships as the separate "KSPlayerUI" product). JoeTV's
   # player is hand-built on KSPlayerLayer from the core module,
-  # so only the "KSPlayer" product is linked.
+  # so only the "KSPlayer" product is linked — plus FFmpegKit
+  # below, which 5.6.2 makes the CONSUMER's job (see there).
   KSPlayer:
     url: https://github.com/kingslay/KSPlayer.git
     exactVersion: "5.6.2"
+  # FFmpegKit — required by KSPlayer 5.6.2 even though JoeTV never
+  # calls it directly. In 2.3.4 the "KSPlayer" product was a source
+  # target that itself depended on the FFmpegKit product, so the
+  # FFmpeg modules arrived transitively. In 5.6.2 the product is a
+  # bare binaryTarget with NO dependencies, while its
+  # .swiftinterface still imports Libavcodec, Libavformat and
+  # libdovi — so an app linking KSPlayer alone fails its
+  # SwiftDriver step with missing-module errors (joetv-tvos CI
+  # run #1). KSPlayer's own source targets (KSPlayerUI, MPVPlayer)
+  # both depend on this product; linking it here mirrors that
+  # intended graph and also satisfies KSPlayer.xcframework's link
+  # references. 9.0.2 is the floor KSPlayer 5.6.2's own manifest
+  # declares (from: "9.0.2"); pinned exactly, like KSPlayer.
+  FFmpegKit:
+    url: https://github.com/kingslay/FFmpegKit.git
+    exactVersion: "9.0.2"
   # libwebp for the image pipeline's WebP fallback — Tủ Phim
   # posters exist ONLY as WebP and some KKPhim posters are WebP
   # too, and tvOS ImageIO has no WebP codec, so those slots
@@ -84,6 +101,7 @@ targets:
       - JoeTV/Assets.xcassets
     dependencies:
       - package: KSPlayer
+      - package: FFmpegKit
       - package: libwebp
       - target: JoeTVTopShelf
     settings:
