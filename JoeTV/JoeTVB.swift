@@ -404,6 +404,12 @@ struct JoeTVBView: View {
     @State private var byId: [Int: TVBTitle] = [:]
     @State private var displayed: [TVBTitle] = []
 
+    /// The YouTube catalogue store (TVB YouTube feature,
+    /// design §1.2): its rails stage above the 803 rails on
+    /// the rails home, and a matched 803 title routes to the
+    /// YouTube detail (YouTube primary, the owner's law).
+    @ObservedObject private var ytStore = JoeYtStore.shared
+
     var body: some View {
         Group {
             if searchOpen {
@@ -429,6 +435,7 @@ struct JoeTVBView: View {
             JoeActorPage(route: route)
         }
         .task { await loadCatalog() }
+        .task { ytStore.ensureLoaded() }
     }
 
     // MARK: - Load
@@ -470,6 +477,13 @@ struct JoeTVBView: View {
                        let ids = catalog.shelves[genre] {
                         genreSection(genre, ids: ids)
                     } else {
+                        // YouTube rails stage ABOVE the 803
+                        // rails (design §1.2), only on the
+                        // rails home; with no snapshot the
+                        // home is exactly what it was.
+                        if let snapshot = ytStore.snapshot {
+                            ytRailSections(snapshot)
+                        }
                         railSections(catalog)
                     }
                 } else if loadFailed {
@@ -743,6 +757,38 @@ struct JoeTVBView: View {
         }
     }
 
+    /// The YouTube rails (design §1.2): the snapshot's rail
+    /// order — Gold, Super VIP, Silver, the main channel's
+    /// free rail, then the sister channels — each card
+    /// opening the YouTube detail. The snapshot builds these
+    /// ONCE per load (JoeYtSnapshot.build), so this body path
+    /// only reads finished rails; no regrouping runs here.
+    @ViewBuilder
+    private func ytRailSections(_ snapshot: JoeYtSnapshot) -> some View {
+        ForEach(snapshot.rails) { rail in
+            Rail(title: rail.title) {
+                ForEach(rail.series) { series in
+                    ytCard(series)
+                }
+            }
+        }
+    }
+
+    private func ytCard(_ series: JoeYtSeries) -> some View {
+        Button {
+            openYouTube(series)
+        } label: {
+            PosterCard(
+                title: series.title,
+                posterURL: series.posterURL,
+                meta: "\(series.eps.count) tập · \(series.tierLabel)",
+                badge: series.isMembersTier ? "YouTube" : nil,
+                form: .rail)
+        }
+        .joeCardButton()
+        .focused($cardFocus, equals: "yt|" + series.pid)
+    }
+
     /// One actor-rail card (Idea 1): the actor's most
     /// popular title's poster carrying the actor's NAME as
     /// its label (the PosterCard construction every other
@@ -835,12 +881,38 @@ struct JoeTVBView: View {
     /// satisfy `isDisplayed`, and route through the explicit
     /// "f4k" case in `appProviderCode` above.
     private func open(_ title: TVBTitle) {
+        // TVB YouTube feature (design §1.6, final paragraph,
+        // + the owner's shared-grid ruling 2026-11-19): a
+        // matched title opens THIS SAME chain detail — the
+        // detail itself gains the YouTube source row and the
+        // one shared episode grid, Auto preferring YouTube
+        // per-episode. Routing matched titles to a parallel
+        // YouTube-only detail was tried and ruled against
+        // (it strands the chain's episodes). The mint below
+        // is byte-identical to the pre-feature route.
         guard let target = title.routeTarget else { return }
         nav.movie = MovieRoute(
             provider: target.provider, slug: target.slug,
             name: title.titleVi, poster: title.posterURLString,
             year: title.yearString,
             tvb: title.routeContext)
+    }
+
+    /// A YouTube rail card: a MATCHED series opens the
+    /// unified chain detail (minted from its matched title,
+    /// exactly as the tab mints it — the shared grid lives
+    /// there); a YouTube-only series opens the YouTube
+    /// detail (JoeYtDetail).
+    private func openYouTube(_ series: JoeYtSeries) {
+        if let title = ytStore.snapshot?.matchedTitleByPid[series.pid],
+           let target = title.routeTarget {
+            nav.movie = MovieRoute(
+                provider: target.provider, slug: target.slug,
+                name: title.titleVi, poster: title.posterURLString,
+                year: title.yearString, tvb: title.routeContext)
+        } else {
+            nav.ytDetail = JoeYtRoute(pid: series.pid)
+        }
     }
 }
 
@@ -866,8 +938,13 @@ struct JoeTVBSearchView: View {
     @Environment(\.joeTheme) private var theme
     @State private var query = ""
     @State private var results: [TVBTitle] = []
+    /// YouTube hits for the same query (design §1.3: TVB
+    /// search covers the FULL YouTube catalogue, railed or
+    /// not — the Sony red team's X-1 lesson).
+    @State private var ytResults: [JoeYtSeries] = []
     @State private var searched = false
     @FocusState private var cardFocus: String?
+    @ObservedObject private var ytStore = JoeYtStore.shared
 
     /// The top area's focus landing (v2.0.17): the shared
     /// letter strip's keys + Quay lại — JoeSearchKeyFocus.
@@ -888,7 +965,7 @@ struct JoeTVBSearchView: View {
             // searches the snapshot live, like the Phim
             // search (this one is instant: it is all local).
             JoeLetterStrip(query: $query, focus: $keyFocus)
-            if searched && results.isEmpty {
+            if searched && results.isEmpty && ytResults.isEmpty {
                 Text("Không tìm thấy phim nào.")
                     .font(.system(size: 29))
                     .foregroundStyle(theme.meta)
@@ -935,25 +1012,16 @@ struct JoeTVBSearchView: View {
 
     private var resultsArea: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
-                                     count: 6),
-                      alignment: .leading, spacing: 40) {
-                ForEach(results) { title in
-                    Button { open(title) } label: {
-                        PosterCard(
-                            title: title.titleVi,
-                            posterURL: title.posterURL,
-                            tmdbId: "\(title.tmdbId)",
-                            tmdbType: "tv",
-                            meta: title.cardMeta,
-                            badge: title.routeTarget.map { Providers.badge($0.provider) })
-                    }
-                    .joeCardButton()
-                    .focused($cardFocus, equals: "tvbsearch|" + "\(title.tmdbId)")
+            VStack(alignment: .leading, spacing: 36) {
+                resultsGrid
+                if !ytResults.isEmpty {
+                    Text("YouTube — TVB")
+                        .font(.system(size: 31, weight: .bold))
+                        .foregroundStyle(theme.text)
+                        .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
+                    ytResultsGrid
                 }
             }
-            .padding(.vertical, 8)
-            .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
         }
         // v2.0.16: CLIPS at its frame, like the JoeSearch
         // grid it was templated from — this copy kept the
@@ -966,12 +1034,57 @@ struct JoeTVBSearchView: View {
         // room inside the frame.
     }
 
+    private var resultsGrid: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
+                                 count: 6),
+                  alignment: .leading, spacing: 40) {
+            ForEach(results) { title in
+                Button { open(title) } label: {
+                    PosterCard(
+                        title: title.titleVi,
+                        posterURL: title.posterURL,
+                        tmdbId: "\(title.tmdbId)",
+                        tmdbType: "tv",
+                        meta: title.cardMeta,
+                        badge: title.routeTarget.map { Providers.badge($0.provider) })
+                }
+                .joeCardButton()
+                .focused($cardFocus, equals: "tvbsearch|" + "\(title.tmdbId)")
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
+    }
+
+    private var ytResultsGrid: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
+                                 count: 6),
+                  alignment: .leading, spacing: 40) {
+            ForEach(ytResults) { series in
+                Button {
+                    openYouTube(series)
+                } label: {
+                    PosterCard(
+                        title: series.title,
+                        posterURL: series.posterURL,
+                        meta: "\(series.eps.count) tập · \(series.tierLabel)",
+                        badge: series.isMembersTier ? "YouTube" : nil)
+                }
+                .joeCardButton()
+                .focused($cardFocus, equals: "ytsearch|" + series.pid)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
+    }
+
     /// v2.0.17: the strip's per-edit search — an emptied
     /// query clears back to the un-searched state instead of
     /// leaving the last round's results standing.
     private func liveSearch() {
         if query.trimmingCharacters(in: .whitespaces).isEmpty {
             results = []
+            ytResults = []
             searched = false
         } else {
             runSearch()
@@ -982,16 +1095,40 @@ struct JoeTVBSearchView: View {
         let kw = query.trimmingCharacters(in: .whitespaces)
         guard !kw.isEmpty else { return }
         results = Self.ranked(query: kw, titles: titles)
+        // The YouTube half searches the snapshot's FULL
+        // catalogue (design §1.3); with no snapshot loaded
+        // it simply contributes nothing.
+        ytResults = ytStore.snapshot.map {
+            JoeYtSearch.ranked(query: kw, series: $0.series)
+        } ?? []
         searched = true
     }
 
     private func open(_ title: TVBTitle) {
+        // The chain detail always (see the tab's open()):
+        // YouTube primacy for matched titles lives inside
+        // the detail's source row + shared grid.
         guard let target = title.routeTarget else { return }
         nav.movie = MovieRoute(
             provider: target.provider, slug: target.slug,
             name: title.titleVi, poster: title.posterURLString,
             year: title.yearString,
             tvb: title.routeContext)
+    }
+
+    /// A YouTube search hit: matched → the unified chain
+    /// detail; YouTube-only → the YouTube detail (the same
+    /// rule as the tab's rail cards).
+    private func openYouTube(_ series: JoeYtSeries) {
+        if let title = ytStore.snapshot?.matchedTitleByPid[series.pid],
+           let target = title.routeTarget {
+            nav.movie = MovieRoute(
+                provider: target.provider, slug: target.slug,
+                name: title.titleVi, poster: title.posterURLString,
+                year: title.yearString, tvb: title.routeContext)
+        } else {
+            nav.ytDetail = JoeYtRoute(pid: series.pid)
+        }
     }
 
     /// Tier ranking over the normalized keys (plan §3.1): a

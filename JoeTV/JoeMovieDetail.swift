@@ -113,6 +113,22 @@ struct JoeMovieDetail: View {
     /// chip/row). Per-session state on the detail view: it is
     /// never persisted and resets with the film.
     @State private var autoSource = true
+    /// TVB YouTube feature (design §1.6 final paragraph +
+    /// the owner's shared-grid ruling, 2026-11-19): when
+    /// this TVB title has a YouTube match, THIS detail gains
+    /// the [Tự động] [YouTube] source modes and ONE shared
+    /// episode grid — Auto takes YouTube per-episode, the
+    /// chain covers the episodes YouTube lacks. Any specific
+    /// chain-source tap pins the chain (ytChainPinned, the
+    /// existing pin gesture); the Tự động / YouTube chips
+    /// clear the pin. Per-session, never persisted — the
+    /// same discipline as autoSource.
+    @ObservedObject private var ytStore = JoeYtStore.shared
+    @ObservedObject private var ytSession = JoeYtSession.shared
+    @State private var ytMode: JoeYtSourceMode = .auto
+    @State private var ytChainPinned = false
+    @State private var ytVipFlash = false
+    @FocusState private var ytEpFocus: Int?
     @FocusState private var focusedEp: String?
     @FocusState private var focusedPlay: Bool
     /// v2.0.5 (N1, pair h): the favourite button joins the
@@ -406,6 +422,20 @@ struct JoeMovieDetail: View {
         // from here on device. Unconditional: it exists exactly
         // while the detail does.
         .onExitCommand { nav.movie = nil }
+        // TVB YouTube feature: the catalogue + session state
+        // the source-row integration reads, and the chain
+        // hand-back — when the YouTube player (launched from
+        // this detail in Auto) gives an episode back, this
+        // detail plays it via the chain itself.
+        .task {
+            ytStore.ensureLoaded()
+            await ytSession.refresh()
+        }
+        .onChange(of: nav.ytChainPlay) { _, token in
+            guard let token, token.route == route else { return }
+            nav.ytChainPlay = nil
+            if let d = detail { play(d, epName: token.epName) }
+        }
     }
 
     /// Instant header built from the tapped card's own data,
@@ -1016,21 +1046,39 @@ struct JoeMovieDetail: View {
         case .auto:
             sourceRow(name: "Tự động",
                       meta: "Phim Âu Mỹ chiếu rạp: ưu tiên Torrent chất lượng cao · còn lại theo thứ tự nguồn",
-                      state: autoSource ? "● Đang chọn" : "Sẵn sàng",
-                      stateColor: autoSource ? JoeTheme.okGreen : theme.meta,
-                      stateWeight: autoSource ? .semibold : .regular,
+                      state: ytAutoActive ? "● Đang chọn" : "Sẵn sàng",
+                      stateColor: ytAutoActive ? JoeTheme.okGreen : theme.meta,
+                      stateWeight: ytAutoActive ? .semibold : .regular,
                       focusID: "auto") {
                 autoSource = true
+                ytChainPinned = false
+                ytMode = .auto
+            }
+        case .youtube:
+            sourceRow(name: "YouTube",
+                      meta: "TVB Vietnam trên YouTube · \(ytMatch?.eps.count ?? 0) tập · \(ytMatch?.tierLabel ?? "")",
+                      state: ytActiveMode == .youtube ? "● Đang chọn" : "Sẵn sàng",
+                      stateColor: ytActiveMode == .youtube ? JoeTheme.okGreen : theme.meta,
+                      stateWeight: ytActiveMode == .youtube ? .semibold : .regular,
+                      focusID: "youtube") {
+                ytChainPinned = false
+                ytMode = .youtube
+                autoSource = false
             }
         case .current:
             sourceRow(name: Providers.displayName(provider),
                       meta: d.servers.map { $0.name }.filter { !$0.isEmpty }
                         .joined(separator: " · "),
-                      state: autoSource ? "Sẵn sàng" : "● Đang phát",
-                      stateColor: autoSource ? theme.meta : JoeTheme.okGreen,
-                      stateWeight: autoSource ? .regular : .semibold,
+                      state: ytActiveMode == nil
+                        ? (autoSource ? "Sẵn sàng" : "● Đang phát")
+                        : "Sẵn sàng",
+                      stateColor: ytActiveMode == nil && !autoSource
+                        ? JoeTheme.okGreen : theme.meta,
+                      stateWeight: ytActiveMode == nil && !autoSource
+                        ? .semibold : .regular,
                       focusID: "current") {
                 autoSource = false
+                ytChainPinned = true
             }
         case .alternative(let code, let altSlug):
             sourceRow(name: Providers.displayName(code),
@@ -1039,6 +1087,7 @@ struct JoeMovieDetail: View {
                       focusID: code) {
                 switchNotice = nil
                 autoSource = false
+                ytChainPinned = true
                 provider = code
                 slug = altSlug
             }
@@ -1372,6 +1421,12 @@ private struct JoeActorNameLabel: View {
     /// compile-visible choice, not an omission.
     private enum SourceEntry: Identifiable {
         case auto
+        /// TVB YouTube feature: the YouTube mode entry —
+        /// present in the membership ONLY when this detail's
+        /// TVB title has a YouTube match (see sourceEntries),
+        /// so every anatomy gains it by construction and no
+        /// anatomy can silently drop it (the D1 rule).
+        case youtube
         case current
         case alternative(code: String, slug: String)
         case torrent
@@ -1379,6 +1434,7 @@ private struct JoeActorNameLabel: View {
         var id: String {
             switch self {
             case .auto: return "auto"
+            case .youtube: return "youtube"
             case .current: return "current"
             case .alternative(let code, _): return "alt|" + code
             case .torrent: return "torrent"
@@ -1387,12 +1443,52 @@ private struct JoeActorNameLabel: View {
     }
 
     private var sourceEntries: [SourceEntry] {
-        var entries: [SourceEntry] = [.auto, .current]
+        var entries: [SourceEntry] = [.auto]
+        if ytMatch != nil { entries.append(.youtube) }
+        entries.append(.current)
         entries += alternatives.map {
             .alternative(code: $0.code, slug: $0.slug)
         }
         entries.append(.torrent)
         return entries
+    }
+
+    /// The YouTube series matched to THIS detail's TVB
+    /// title (the fail-closed snapshot match, design §1.4),
+    /// or nil. TVB-route details only: the snapshot's ids
+    /// are 803-snapshot ids, pinned to route.tvb exactly as
+    /// the enrichment task pins its TMDB identity (the
+    /// fault-c rule) — a non-TVB detail never sees YouTube.
+    private var ytMatch: JoeYtSeries? {
+        guard let ctx = route.tvb else { return nil }
+        return ytStore.snapshot?.matchByTmdbId[ctx.tmdbId]
+    }
+
+    /// The YouTube mode in force for this detail, or nil
+    /// when YouTube is not in play (no match, or the owner
+    /// pinned a chain source with a specific-source tap).
+    private var ytActiveMode: JoeYtSourceMode? {
+        guard ytMatch != nil, !ytChainPinned else { return nil }
+        return ytMode
+    }
+
+    /// The Tự động entry's selected state across anatomies:
+    /// the YouTube-first Auto when a match is in force;
+    /// with no match, exactly the pre-feature autoSource.
+    private var ytAutoActive: Bool {
+        ytActiveMode == .auto || (ytMatch == nil && autoSource)
+    }
+
+    /// The chain's episode names for the shared grid: the
+    /// flattened server lists de-duplicated by name, in
+    /// order — the same universe startEpisode resolves over.
+    private func chainEpisodeNames(_ d: Detail) -> [String] {
+        var seen = Set<String>()
+        var names: [String] = []
+        for ep in d.servers.flatMap({ $0.episodes }) {
+            if seen.insert(ep.name).inserted { names.append(ep.name) }
+        }
+        return names
     }
 
     /// The Torrent entry's state (D1/D2): configuration from
@@ -1493,17 +1589,35 @@ private struct JoeActorNameLabel: View {
         case .auto:
             Button {
                 autoSource = true
+                // TVB YouTube: Tự động is the YouTube-first
+                // mode when a match exists (the owner's law);
+                // with no match this is exactly the old tap.
+                ytChainPinned = false
+                ytMode = .auto
             } label: {
-                JoeChipLabel(title: "Tự động", selected: autoSource)
+                JoeChipLabel(title: "Tự động",
+                             selected: ytAutoActive)
             }
             .joeCardButton()
             .focused($focusedAlt, equals: "auto")
+        case .youtube:
+            Button {
+                ytChainPinned = false
+                ytMode = .youtube
+                autoSource = false
+            } label: {
+                JoeChipLabel(title: "YouTube",
+                             selected: ytActiveMode == .youtube)
+            }
+            .joeCardButton()
+            .focused($focusedAlt, equals: "youtube")
         case .current:
             Button {
                 autoSource = false
+                ytChainPinned = true
             } label: {
                 JoeChipLabel(title: Providers.displayName(provider),
-                             selected: !autoSource)
+                             selected: ytActiveMode == nil && !autoSource)
             }
             .joeCardButton()
             .focused($focusedAlt, equals: "current")
@@ -1511,6 +1625,7 @@ private struct JoeActorNameLabel: View {
             Button {
                 switchNotice = nil
                 autoSource = false
+                ytChainPinned = true
                 provider = code
                 slug = altSlug
             } label: {
@@ -1928,14 +2043,18 @@ private struct JoeCastCellLabel: View {
                                       title: d.movie.name,
                                       year: d.movie.year) != nil
         return Button {
-            if let ep = startEpisode(d) { play(d, epName: ep) }
+            if ytActiveMode != nil, let yt = ytMatch {
+                ytPlayButtonAction(d, yt: yt)
+            } else if let ep = startEpisode(d) { play(d, epName: ep) }
         } label: {
             JoePrimaryLabel(title: isResume ? "Xem tiếp" : "Xem ngay",
                             systemImage: "play.fill")
         }
         .joeCardButton()
         .focused($focusedPlay)
-        .disabled(startEpisode(d) == nil || switching)
+        .disabled((ytActiveMode != nil
+                   ? (ytMatch?.eps.isEmpty ?? true)
+                   : startEpisode(d) == nil) || switching)
         // v2.0.8 (Phase 1): no hand-written exits — the
         // header sits in its own .focusSection() (see the
         // themed compositions) and the focus engine moves
@@ -2145,6 +2264,16 @@ private struct JoeCastCellLabel: View {
                 }
                 .focusable(true)
             }
+            // TVB YouTube feature: with a match in force, the
+            // episode block is ONE shared grid (the owner's
+            // ruling) — the union group below replaces the
+            // per-server groups; without a match (or with a
+            // chain source pinned) the groups render exactly
+            // as before.
+            if let yt = ytMatch, ytActiveMode != nil {
+                ytNotices(yt)
+                ytUnifiedGroup(d, yt: yt, centered: centered)
+            } else {
             ForEach(Array(d.servers.enumerated()), id: \.offset) { serverIndex, server in
                 VStack(alignment: centered ? .center : .leading, spacing: 14) {
                     if d.servers.count > 1 || !server.name.isEmpty {
@@ -2163,6 +2292,7 @@ private struct JoeCastCellLabel: View {
                         }
                     }
                 }
+            }
             }
         }
         // v2.0.5 (N1, pair h): the episode block is a
@@ -2227,6 +2357,145 @@ private struct JoeCastCellLabel: View {
         // episode block is a .focusSection() and the engine
         // crosses it (and leaves it in every direction)
         // without hand-written routing.
+    }
+
+    // MARK: - TVB YouTube shared grid
+
+    /// The YouTube notices at the top of the shared grid —
+    /// the tvbNoPlayableSource notice's placement pattern
+    /// (focusable text, no chrome): the Gold gate line while
+    /// signed out; the Super VIP message after a press.
+    @ViewBuilder
+    private func ytNotices(_ yt: JoeYtSeries) -> some View {
+        if yt.isSuperVIP && ytVipFlash {
+            Text("Mục Super VIP — gói cao hơn gói Gold hiện tại của anh, nên các tập YouTube chưa xem được. Các tập có ở nguồn TVB vẫn xem bình thường trong lưới này.")
+                .font(.system(size: 25, weight: .semibold))
+                .foregroundStyle(.orange)
+                .focusable(true)
+        } else if yt.isMembersTier && !ytSession.signedIn {
+            Text("Xem qua YouTube cần đăng nhập TVB Gold — bấm một tập, app sẽ mở trang đăng nhập nếu anh chưa đăng nhập.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .focusable(true)
+        }
+    }
+
+    /// The ONE shared episode grid (owner ruling,
+    /// 2026-11-19): the union of both sources in the chain
+    /// groups' own grammar (a named group + flow chips) —
+    /// episode i plays YouTube when YouTube has it and the
+    /// chain when it does not; episodes only YouTube has
+    /// play YouTube. No episode is stranded on either side.
+    private func ytUnifiedGroup(_ d: Detail, yt: JoeYtSeries,
+                                centered: Bool) -> some View {
+        let names = chainEpisodeNames(d)
+        let count = max(names.count, yt.eps.count)
+        return VStack(alignment: centered ? .center : .leading, spacing: 14) {
+            Text("YouTube · \(yt.tierLabel)")
+                .font(.system(size: 25, weight: .semibold))
+                .foregroundStyle(theme.meta)
+            FlowLayout(spacing: 14, centered: centered) {
+                ForEach(0..<count, id: \.self) { i in
+                    ytEpChip(d, yt: yt, names: names, index: i)
+                }
+            }
+        }
+    }
+
+    /// One shared-grid chip — epChip's capsule construction
+    /// (same type, paddings, preselected fill and focus
+    /// ring, incl. the design-D white-frame rule), with the
+    /// per-episode source resolution as its action.
+    private func ytEpChip(_ d: Detail, yt: JoeYtSeries,
+                          names: [String], index: Int) -> some View {
+        let storedEp = watch.progressForTitle(slug: slug, provider: provider,
+                                              title: d.movie.name,
+                                              year: d.movie.year)?.ep
+        let preselected = index < names.count
+            && names[index] == (!route.preselectEp.isEmpty
+                                ? route.preselectEp : storedEp)
+        let focused = ytEpFocus == index
+        let label = index < names.count
+            ? names[index]
+            : (yt.epTitle(at: index).isEmpty
+               ? "Tập \(index + 1)" : yt.epTitle(at: index))
+        return Button {
+            ytPlayEpisode(d, yt: yt, names: names, index: index)
+        } label: {
+            Text(label)
+                .font(.system(size: 24, weight: preselected ? .semibold : .medium))
+                .foregroundStyle(preselected ? theme.onAccent : theme.text)
+                .lineLimit(1)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 11)
+                .background(Capsule()
+                    .fill(preselected ? theme.accent : theme.surface2))
+                .overlay(Capsule()
+                    .strokeBorder(focused
+                                  ? (theme.id == .posterWall && preselected
+                                     ? Color.white : theme.focus)
+                                  : (preselected ? Color.clear : theme.stroke),
+                                  lineWidth: focused ? theme.ringWidth : 1.5))
+        }
+        .joeCardButton()
+        .focused($ytEpFocus, equals: index)
+        .disabled(switching)
+    }
+
+    /// The shared grid's per-episode resolution (identical
+    /// for Tự động and YouTube modes — the mode governs only
+    /// the player's failure policy, never the grid's
+    /// coverage):
+    /// - an index YouTube lacks → the chain plays it, via
+    ///   the chain's own play() exactly;
+    /// - Super VIP → the above-tier message, never a player;
+    /// - members tier signed out → the sign-in door;
+    /// - otherwise the YouTube player, carrying the chain
+    ///   hand-back for Auto (total YouTube failure returns
+    ///   THIS episode to this detail, which plays it via
+    ///   the chain — the "always ready" standard).
+    private func ytPlayEpisode(_ d: Detail, yt: JoeYtSeries,
+                               names: [String], index: Int) {
+        if index >= yt.eps.count {
+            play(d, epName: names[index])
+            return
+        }
+        if yt.isSuperVIP {
+            ytVipFlash = true
+            DiagLog.write("YT", "detail: super-vip episode tap — above-tier message shown")
+            return
+        }
+        if yt.isMembersTier && !ytSession.signedIn {
+            nav.ytSignInOpen = true
+            DiagLog.write("YT", "detail: members episode tap while signed out — door opened")
+            return
+        }
+        let mode = ytActiveMode ?? .auto
+        nav.ytPlayer = JoeYtPlayRequest(
+            pid: yt.pid,
+            videoIds: yt.eps,
+            startIndex: index,
+            mode: mode,
+            tier: yt.tier,
+            seriesTitle: d.movie.name,
+            chainRoute: nil,
+            chainPlay: (mode == .auto && index < names.count)
+                ? JoeYtChainPlay(route: route, epName: names[index],
+                                 nonce: UUID())
+                : nil)
+    }
+
+    /// The big Play button in a YouTube mode: the start
+    /// episode (preselection / progress / first) resolved
+    /// through the shared grid's own rule.
+    private func ytPlayButtonAction(_ d: Detail, yt: JoeYtSeries) {
+        let names = chainEpisodeNames(d)
+        var index = 0
+        if let start = startEpisode(d),
+           let i = names.firstIndex(of: start) {
+            index = i
+        }
+        ytPlayEpisode(d, yt: yt, names: names, index: index)
     }
 
     // MARK: - Loading + playing

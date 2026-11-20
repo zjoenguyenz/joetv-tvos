@@ -107,6 +107,17 @@ final class JoeNavigator: ObservableObject {
     @Published var section: Section = .phim
     @Published var movie: MovieRoute?
     @Published var tor: TorRoute?
+    /// TVB YouTube feature (design §1.2/§1.5): the YouTube
+    /// detail route, the player request and the sign-in door
+    /// flag. They ride the same ZStack-layer pattern as
+    /// movie/tor (zIndex 4/5/6) and close in the same order.
+    @Published var ytDetail: JoeYtRoute?
+    @Published var ytPlayer: JoeYtPlayRequest?
+    @Published var ytSignInOpen = false
+    /// The YouTube player's Auto hand-back into the unified
+    /// chain detail (JoeMovieDetail observes it and plays
+    /// the named episode via the chain).
+    @Published var ytChainPlay: JoeYtChainPlay?
     @Published var searchOpen = false
     /// v2.0.5 (N3): the shell root's Menu delivery channel.
     /// Menu pressed while focus sits on a shell pill reaches
@@ -159,6 +170,9 @@ final class JoeNavigator: ObservableObject {
     /// Close the topmost layer; returns false when nothing is
     /// open (the caller then lets the system have the press).
     func closeTop() -> Bool {
+        if ytSignInOpen { ytSignInOpen = false; return true }
+        if ytPlayer != nil { ytPlayer = nil; return true }
+        if ytDetail != nil { ytDetail = nil; return true }
         if movie != nil { movie = nil; return true }
         if tor != nil { tor = nil; return true }
         if searchOpen { searchOpen = false; return true }
@@ -322,7 +336,10 @@ struct JoeRootView: View {
                     // inside this region.
                     .focusSection()
             }
-            .disabled(nav.movie != nil || nav.tor != nil || !launchGate.finished)
+            .disabled(nav.movie != nil || nav.tor != nil
+                      || nav.ytDetail != nil || nav.ytPlayer != nil
+                      || nav.ytSignInOpen
+                      || !launchGate.finished)
             if let route = nav.movie {
                 ZStack {
                     theme.bg.ignoresSafeArea()
@@ -350,6 +367,33 @@ struct JoeRootView: View {
                 // handler lives on JoeTorrentDetail's own root.
                 .transition(.opacity)
                 .zIndex(3)
+            }
+            // TVB YouTube feature: the detail, player and
+            // sign-in door as ZStack layers in the movie/tor
+            // idiom (each view's own root carries its exit
+            // handler — the 1.9.2 placement rule).
+            if let route = nav.ytDetail {
+                ZStack {
+                    theme.bg.ignoresSafeArea()
+                    JoeYtDetail(route: route)
+                }
+                .transition(.opacity)
+                .zIndex(4)
+            }
+            if let request = nav.ytPlayer {
+                // The player paints its own black (and its
+                // veil); no theme background under it.
+                JoeYtPlayerView(request: request)
+                    .transition(.opacity)
+                    .zIndex(5)
+            }
+            if nav.ytSignInOpen {
+                ZStack {
+                    theme.bg.ignoresSafeArea()
+                    JoeYtSignInView()
+                }
+                .transition(.opacity)
+                .zIndex(6)
             }
             // v2.0.22: the launch loading screen — above the
             // shell, below nothing else; it has no focusable
@@ -417,7 +461,13 @@ struct JoeRootView: View {
         // JoePhimHome's ONE exit confirmation via
         // nav.exitRequested (the root never presents its own).
         .onExitCommand {
-            if nav.movie != nil {
+            if nav.ytSignInOpen {
+                nav.ytSignInOpen = false
+            } else if nav.ytPlayer != nil {
+                nav.ytPlayer = nil
+            } else if nav.ytDetail != nil {
+                nav.ytDetail = nil
+            } else if nav.movie != nil {
                 nav.movie = nil
             } else if nav.tor != nil {
                 nav.tor = nil

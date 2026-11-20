@@ -1,0 +1,354 @@
+import SwiftUI
+
+// MARK: - YouTube detail routes
+
+struct JoeYtRoute: Hashable, Sendable, Identifiable {
+    let pid: String
+    var id: String { pid }
+}
+
+/// The detail's source-row modes (design §1.6). Chain chips
+/// are actions, not modes: tapping one hands off to the
+/// existing MovieRoute flow immediately.
+enum JoeYtSourceMode: String, Sendable {
+    case auto
+    case youtube
+}
+
+struct JoeYtPlayRequest: Identifiable, Sendable {
+    let id = UUID()
+    let pid: String
+    /// The series' full ordered episode video-ID list
+    /// (playlist order = episode order) — the player carries
+    /// it so next-episode and auto-next never re-read the
+    /// catalogue mid-play.
+    let videoIds: [String]
+    let startIndex: Int
+    let mode: JoeYtSourceMode
+    let tier: String
+    let seriesTitle: String
+    /// The matched 803 title's primary chain route, minted by
+    /// the detail at tap time; consumed ONLY by Auto's
+    /// fall-through when every YouTube surface fails
+    /// (design §1.6). Nil for YouTube-only series.
+    let chainRoute: MovieRoute?
+    /// The unified-detail hand-back (the owner's shared-grid
+    /// ruling, 2026-11-19): when the player was launched
+    /// from INSIDE the existing chain detail (JoeMovieDetail)
+    /// in Auto mode, a total YouTube failure hands THIS
+    /// episode back to that same detail, which plays it via
+    /// the chain — the app substitutes a working source
+    /// itself, in the same screen. Nil outside that flow
+    /// (and always nil for a manual YouTube pick).
+    let chainPlay: JoeYtChainPlay?
+}
+
+/// One chain-play hand-back token: the detail route it
+/// belongs to, the chain episode name to play, and a nonce
+/// so repeated hand-backs for the same episode still
+/// register as changes.
+struct JoeYtChainPlay: Equatable, Sendable {
+    let route: MovieRoute
+    let epName: String
+    let nonce: UUID
+}
+
+// MARK: - Our detail screen for a YouTube series (design §1.5)
+//
+// Serves the YouTube-ONLY series (no chain entry): reached
+// from a YouTube rail card or from search when the series
+// has no §1.4 match. A MATCHED series never lands here —
+// every entry point opens the existing chain detail
+// (JoeMovieDetail) instead, where the YouTube source row
+// and the ONE shared episode grid live (the owner's
+// shared-grid ruling, 2026-11-19: episode buttons "phải ăn
+// chung" — Auto takes YouTube per-episode, the chain covers
+// the episodes YouTube lacks; a parallel YouTube-only grid
+// for a matched title strands the chain's episodes, the
+// exact fault he ruled against on the Sony build). Built
+// from the existing detail construction — same chips, same
+// labels, no new visual language (the design freeze holds).
+
+struct JoeYtDetail: View {
+    let route: JoeYtRoute
+    @EnvironmentObject private var nav: JoeNavigator
+    @Environment(\.joeTheme) private var theme
+    @ObservedObject private var ytStore = JoeYtStore.shared
+    @ObservedObject private var session = JoeYtSession.shared
+    @State private var mode: JoeYtSourceMode = .auto
+    /// Super VIP press feedback: the honest above-tier
+    /// message, promoted from a quiet line to the accented
+    /// notice when an episode is actually pressed.
+    @State private var vipFlash = false
+    @FocusState private var epFocus: Int?
+    @FocusState private var chipFocus: String?
+
+    private var series: JoeYtSeries? {
+        ytStore.snapshot?.byPid[route.pid]
+    }
+
+    private var matchedTitle: TVBTitle? {
+        guard let snapshot = ytStore.snapshot,
+              let series else { return nil }
+        return snapshot.matchedTitleByPid[series.pid]
+    }
+
+    var body: some View {
+        Group {
+            if let series {
+                content(series)
+            } else {
+                ProgressView("Đang tải danh sách TVB…")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.text)
+                    .tint(theme.text)
+            }
+        }
+        // Own-root Menu handler (the 1.9.2 construction):
+        // one press closes exactly this layer.
+        .onExitCommand { nav.ytDetail = nil }
+        .task {
+            ytStore.ensureLoaded()
+            await session.refresh()
+        }
+    }
+
+    // MARK: Content
+
+    private func content(_ series: JoeYtSeries) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 30) {
+                header(series)
+                sourceRow(series)
+                if series.isSuperVIP {
+                    vipNotice
+                } else if series.isMembersTier && !session.signedIn {
+                    gateRow
+                }
+                episodes(series)
+            }
+            .padding(.horizontal, 80)
+            .padding(.vertical, 60)
+        }
+        .defaultFocus($epFocus, 0)
+    }
+
+    private func header(_ series: JoeYtSeries) -> some View {
+        HStack(alignment: .top, spacing: 34) {
+            JoeRemoteImage(url: series.posterURL, targetPixels: 720) {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(theme.surface2)
+            }
+            .frame(width: 440, height: 330)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 14) {
+                Text(series.title)
+                    .font(.system(size: 46, weight: .heavy))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(3)
+                HStack(spacing: 12) {
+                    JoeChipLabel(title: series.tierLabel,
+                                 selected: series.isMembersTier)
+                    JoeChipLabel(title: "YouTube", selected: false)
+                }
+                Text("\(series.channelDisplay) · \(series.eps.count) tập")
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+                if let views = series.views {
+                    Text("\(views.formatted()) lượt xem trên YouTube")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    // MARK: Source row (design §1.6)
+
+    private func sourceRow(_ series: JoeYtSeries) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Nguồn phát")
+                .font(.system(size: 29, weight: .bold))
+                .foregroundStyle(theme.text)
+            HStack(spacing: 14) {
+                sourceChip(id: "src:auto", title: "Tự động",
+                           selected: mode == .auto) {
+                    mode = .auto
+                }
+                sourceChip(id: "src:yt", title: "YouTube",
+                           selected: mode == .youtube) {
+                    mode = .youtube
+                }
+                if let title = matchedTitle {
+                    ForEach(TVBTitle.priorityKeys, id: \.self) { key in
+                        if let record = title.providers[key],
+                           let slug = record.slugs.first, !slug.isEmpty {
+                            sourceChip(
+                                id: "src:" + key,
+                                title: Providers.displayName(
+                                    TVBTitle.appProviderCode(key)),
+                                selected: false) {
+                                openChain(title, key: key, slug: slug)
+                            }
+                        }
+                    }
+                }
+            }
+            .focusSection()
+            Text(mode == .auto
+                 ? "Tự động: ưu tiên YouTube; nếu YouTube không phát được mà phim có ở nguồn khác, app tự chuyển nguồn."
+                 : "YouTube: chỉ phát qua YouTube, không tự chuyển nguồn.")
+                .font(.system(size: 23))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1250, alignment: .leading)
+        }
+    }
+
+    private func sourceChip(id: String, title: String, selected: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            JoeChipLabel(title: title, selected: selected)
+        }
+        .joeCardButton()
+        .focused($chipFocus, equals: id)
+    }
+
+    // MARK: Gold gate + Super VIP notice
+
+    /// Members tier + signed out (design §1.5): the reason,
+    /// and the door, on one row. Tapping an episode routes
+    /// here too — the door opens, never a dead player
+    /// (owner decision Q2).
+    private var gateRow: some View {
+        HStack(spacing: 18) {
+            Text("Cần đăng nhập TVB Gold để xem mục này.")
+                .font(.system(size: 27))
+                .foregroundStyle(theme.text)
+            Button {
+                nav.ytSignInOpen = true
+            } label: {
+                JoeSecondaryLabel(title: "Đăng nhập TVB Gold")
+            }
+            .joeCardButton()
+            .focused($chipFocus, equals: "gate")
+        }
+        .focusSection()
+    }
+
+    /// Super VIP sits ABOVE the owner's Level-2 Gold
+    /// (his ruling, 2026-11-19): the tier is badged and an
+    /// episode press shows this honest message — never a
+    /// silent dead press, never a playback attempt.
+    private var vipNotice: some View {
+        Text("Mục Super VIP — đây là gói cao hơn gói Gold hiện tại của anh, nên chưa xem được trong app.")
+            .font(.system(size: vipFlash ? 29 : 25,
+                          weight: vipFlash ? .semibold : .regular))
+            .foregroundStyle(vipFlash ? .orange : theme.meta)
+            .frame(maxWidth: 1250, alignment: .leading)
+    }
+
+    // MARK: Episodes
+
+    private func episodes(_ series: JoeYtSeries) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Danh sách tập")
+                .font(.system(size: 29, weight: .bold))
+                .foregroundStyle(theme.text)
+            // Lazy by requirement (design §1.5): a 444-episode
+            // series scrolls as cheaply as a 20-episode one.
+            LazyVStack(alignment: .leading, spacing: 14) {
+                ForEach(Array(series.eps.enumerated()), id: \.offset) { pair in
+                    Button {
+                        tapEpisode(pair.offset, series: series)
+                    } label: {
+                        JoeYtEpisodeLabel(
+                            index: pair.offset,
+                            title: series.epTitle(at: pair.offset))
+                    }
+                    .joeCardButton()
+                    .focused($epFocus, equals: pair.offset)
+                }
+            }
+            .focusSection()
+        }
+    }
+
+    // MARK: Actions
+
+    private func tapEpisode(_ index: Int, series: JoeYtSeries) {
+        if series.isSuperVIP {
+            vipFlash = true
+            DiagLog.write("YT", "super-vip episode tap — above-tier message shown")
+            return
+        }
+        if series.isMembersTier && !session.signedIn {
+            // Owner decision Q2: the door, never a quiet
+            // chain fallback and never a dead player.
+            nav.ytSignInOpen = true
+            DiagLog.write("YT", "members episode tap while signed out — door opened")
+            return
+        }
+        nav.ytPlayer = JoeYtPlayRequest(
+            pid: series.pid,
+            videoIds: series.eps,
+            startIndex: index,
+            mode: mode,
+            tier: series.tier,
+            seriesTitle: series.title,
+            chainRoute: primaryChainRoute(),
+            chainPlay: nil)
+    }
+
+    /// Auto's fall-through target: the matched title's
+    /// primary holder route, minted exactly as the TVB tab
+    /// mints it (JoeTVBView.open).
+    private func primaryChainRoute() -> MovieRoute? {
+        guard let title = matchedTitle,
+              let target = title.routeTarget else { return nil }
+        return MovieRoute(provider: target.provider, slug: target.slug,
+                          name: title.titleVi, poster: title.posterURLString,
+                          year: title.yearString, tvb: title.routeContext)
+    }
+
+    /// A chain chip hands off to the existing chain detail
+    /// for that holder — the chain itself is not
+    /// re-implemented (design §1.6).
+    private func openChain(_ title: TVBTitle, key: String, slug: String) {
+        nav.movie = MovieRoute(
+            provider: TVBTitle.appProviderCode(key), slug: slug,
+            name: title.titleVi, poster: title.posterURLString,
+            year: title.yearString, tvb: title.routeContext)
+    }
+}
+
+// MARK: - Episode row label
+
+/// One episode row: number + the episode's own title from
+/// the playlist. Painted with the theme tokens in the chip
+/// family's construction (resting stroke, focus ring inside).
+private struct JoeYtEpisodeLabel: View {
+    let index: Int
+    let title: String
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 18) {
+            Text("Tập \(index + 1)")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(theme.text)
+            Text(title.isEmpty ? "Tập \(index + 1)" : title)
+                .font(.system(size: 24))
+                .foregroundStyle(theme.meta)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 26)
+        .padding(.vertical, 15)
+        .background(RoundedRectangle(cornerRadius: 14).fill(theme.surface2))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(
+            isFocused ? theme.focus : theme.stroke,
+            lineWidth: isFocused ? theme.ringWidth : 1.5))
+    }
+}

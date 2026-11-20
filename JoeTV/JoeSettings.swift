@@ -56,6 +56,10 @@ struct JoeSettingsView: View {
     /// (logExportBlock) and the cover it presents.
     @FocusState private var logExportFocused: Bool
     @State private var showLogExport = false
+    /// TVB YouTube feature (design §3.1): the Gold session
+    /// store the TVB row reads (presence only) + its focus.
+    @ObservedObject private var ytSession = JoeYtSession.shared
+    @FocusState private var tvbGoldFocused: Bool
     /// Confirmation for the history reset (historyBlock) —
     /// the app's standard destructive shape, the exit
     /// dialog's: destructive confirm + cancel.
@@ -239,6 +243,12 @@ struct JoeSettingsView: View {
                 }
                 .focusSection()
 
+                // TVB YouTube feature (design §3.1): the
+                // TVB Gold session row, between the credential
+                // fields and the history block.
+                tvbGoldBlock
+                    .focusSection()
+
                 historyBlock
                     .focusSection()
 
@@ -296,6 +306,9 @@ struct JoeSettingsView: View {
         .defaultFocus($themeChipFocused, JoeThemeID.billboard.rawValue)
         // Item 5: the KK route probe runs when Settings opens.
         .task { await runKKProbe() }
+        // TVB YouTube feature: the Gold row's state is a
+        // fresh presence read when Settings opens.
+        .task { await ytSession.refresh() }
         // v2.0.33: the log-export cover (see logExportBlock /
         // LogExportView at the end of this file).
         .fullScreenCover(isPresented: $showLogExport) {
@@ -624,6 +637,31 @@ struct JoeSettingsView: View {
         kkStatus = r.ok ? .ok(ms: r.millis) : .down
     }
 
+    /// TVB Gold (YouTube) — design §3.1. One focusable row:
+    /// the session state as a presence dot (the Settings
+    /// law the owner set 2026-11-19: a green dot marks a
+    /// filled / in-use value, readable at a glance) and a
+    /// tap that opens the sign-in door. Signing IN is the
+    /// owner's act, in the door's web view, once per install.
+    private var tvbGoldBlock: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("TVB Gold (YouTube)")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+            Button {
+                nav.ytSignInOpen = true
+            } label: {
+                JoeTVBGoldRowLabel(signedIn: ytSession.signedIn)
+            }
+            .joeCardButton()
+            .focused($tvbGoldFocused)
+            Text("Đăng nhập một lần bằng tài khoản Gold của anh; app chỉ ghi nhớ trạng thái đăng nhập, không lưu mật khẩu. Mỗi lần cài lại app qua Signulous cần đăng nhập lại một lần.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1200, alignment: .leading)
+        }
+    }
+
     /// Opened-movies history reset (v2.0.7, owner requirement:
     /// all three themes lacked any reset for accidentally
     /// opened films). Every opened film lands in Continue
@@ -832,6 +870,38 @@ struct JoeSettingsView: View {
 // file's copy of the conditional move-trap pattern — is
 // DELETED; see the record at the end of JoeTVApp.swift. The
 // first-field routing it powered is geometric on this layout.
+
+/// The TVB Gold row's label (design §3.1): the presence dot
+/// + state word + hint, painted with the app's ONE button
+/// construction — the JoeSecondaryLabel recipe (capsule,
+/// surface2 fill, resting stroke, theme focus ring inside
+/// when focused) — so the door's entry point carries the
+/// same focus treatment as every other Settings button.
+private struct JoeTVBGoldRowLabel: View {
+    let signedIn: Bool
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text(signedIn ? "●" : "○")
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(signedIn ? JoeTheme.okGreen : theme.meta)
+            Text(signedIn ? "Đã đăng nhập" : "Chưa đăng nhập")
+                .font(.system(size: 29, weight: .semibold))
+                .foregroundStyle(theme.text)
+            Text("— bấm để mở trang đăng nhập")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+        }
+        .padding(.horizontal, 36)
+        .padding(.vertical, 17)
+        .background(Capsule().fill(theme.surface2))
+        .overlay(Capsule().strokeBorder(
+            isFocused ? theme.focus : theme.stroke,
+            lineWidth: isFocused ? theme.ringWidth : 1.5))
+    }
+}
 
 // MARK: - Log export screen (v2.0.33)
 //
