@@ -344,7 +344,21 @@ final class JoeYtSession: ObservableObject {
         await withCheckedContinuation {
             (cont: CheckedContinuation<[[String: Any]], Never>) in
             JoeWebBridge.fetchAllCookies { cookies in
-                cont.resume(returning: cookies)
+                // The bridge's completion is nonisolated, so
+                // `cookies` arrives in that closure's own
+                // region; resuming with it from there passes
+                // a non-Sendable value as `sending` across
+                // regions — a Swift 6 error (CI run #16, the
+                // build's only one). Hop into the owning
+                // actor's context first, the file's own
+                // delegate idiom below: this function's
+                // consumer is @MainActor, so the value's
+                // region transfers with the hop and the
+                // resume inside the actor is legal. Same
+                // cookies, same caller-visible behaviour.
+                Task { @MainActor in
+                    cont.resume(returning: cookies)
+                }
             }
         }
     }
@@ -389,7 +403,13 @@ final class JoeYtSession: ObservableObject {
 /// the Swift models. Plain NSObject, the JoePlayerView
 /// Coordinator idiom: WebKit delivers every callback on the
 /// main queue, and each one hops formally into the model's
-/// @MainActor closures.
+/// @MainActor closures. The class itself stays nonisolated
+/// (the ObjC delegate requirements must), but every wrapper
+/// that touches the host view is @MainActor — JoeWebHostView
+/// is a UIView, so its methods and properties are
+/// main-actor-isolated, and every caller of these wrappers
+/// is one of the two @MainActor models (CI run #16 warned
+/// on each of these call sites).
 final class JoeWebController: NSObject, JoeWebHostDelegate {
     weak var host: JoeWebHostView?
 
@@ -399,6 +419,7 @@ final class JoeWebController: NSObject, JoeWebHostDelegate {
     var onTerminated: (@MainActor () -> Void)?
     var onExitURL: (@MainActor (String) -> Void)?
 
+    @MainActor
     func load(url: String, userAgent: String?, lockedURL: String?) {
         host?.lockedURLString = lockedURL
         host?.loadURLString(url, userAgent: userAgent)
@@ -410,14 +431,17 @@ final class JoeWebController: NSObject, JoeWebHostDelegate {
     /// adopted the landed episode: the lock must follow the
     /// model's current episode or the next self-advance would
     /// read as a wander and exit.
+    @MainActor
     func relock(url: String) {
         host?.lockedURLString = url
     }
 
+    @MainActor
     func evaluate(_ js: String) {
         host?.evaluateJavaScript(js, completion: nil)
     }
 
+    @MainActor
     func evaluateForResult(_ js: String,
                            completion: @escaping @MainActor (String?) -> Void) {
         host?.evaluateJavaScript(js) { result in
@@ -425,10 +449,12 @@ final class JoeWebController: NSObject, JoeWebHostDelegate {
         }
     }
 
+    @MainActor
     func startPoll() {
         host?.startPolling(withInterval: 2.0, javaScript: JoeYtJS.poll)
     }
 
+    @MainActor
     func stopPoll() {
         host?.stopPolling()
     }
