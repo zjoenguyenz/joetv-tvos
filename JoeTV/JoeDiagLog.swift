@@ -21,8 +21,11 @@ import Network
 /// WHAT may be written: short, factual breadcrumbs from the
 /// load / playback / settings paths. NEVER a credential value
 /// and never a full URL: debrid tokens ride inside Torrentio /
-/// MediaFusion URLs, so write() scrubs every http(s) URL in a
-/// message down to scheme://host before the line touches disk
+/// MediaFusion URLs, so write() scrubs a message in three
+/// passes before the line touches disk — URLs of any scheme
+/// or case reduce to scheme://host, scheme-less Torrentio
+/// config bases are erased whole, and every credential VALUE
+/// in force is erased wherever it appears in any shape
 /// (defence in depth — callers are expected to log ids and
 /// outcomes, not links, but the scrubber means a careless
 /// caller still cannot leak a token through this file). The
@@ -92,11 +95,25 @@ enum DiagLog {
     private static let sizeCap = 1_000_000
     private static let rotationKeepBytes = 700_000
 
-    /// The URL scrubber's pattern: a whole http(s) URL run —
-    /// no whitespace, no quotes (a quoted URL in a message
-    /// ends at its closing quote, which must survive).
+    /// The URL scrubber's pattern: a whole URL run — no
+    /// whitespace, no quotes (a quoted URL in a message ends
+    /// at its closing quote, which must survive). v2.0.40
+    /// (audit P0.3 / H-2): case-insensitive and stremio:// is
+    /// a scrubbed scheme too — the app itself accepts
+    /// stremio:// MediaFusion links, and an engine error
+    /// string may spell a scheme in capitals; the old
+    /// lowercase-http(s)-only pattern let both shapes through
+    /// with their token-carrying paths intact.
     private static let urlRegex = try! NSRegularExpression(
-        pattern: #"https?://[^\s"']+"#)
+        pattern: #"(?i)(?:https?|stremio)://[^\s"']+"#)
+
+    /// A scheme-less Torrentio config base: a run carrying
+    /// realdebrid= / torbox= / premiumize= segments with no
+    /// scheme in front of it (the shape a bare base or an
+    /// engine error takes). Erased whole — host included —
+    /// because the run's path IS the credential.
+    private static let configBaseRegex = try! NSRegularExpression(
+        pattern: #"(?i)[^\s"']*(?:realdebrid|torbox|premiumize)=[^\s"']*"#)
 
     // MARK: - Writing
 
@@ -186,19 +203,29 @@ enum DiagLog {
         return f.string(from: Date())
     }
 
-    /// Reduce every http(s) URL in the message to
-    /// scheme://host — paths and queries are exactly where
-    /// debrid tokens live (Torrentio config segments,
-    /// MediaFusion's minted link), so they never reach disk.
-    /// A match URLComponents cannot parse at all becomes
-    /// "[url]". Matches are replaced back-to-front so the
-    /// earlier ranges stay valid while the string mutates.
+    /// Scrub a message in three passes (v2.0.40, audit
+    /// P0.3 / H-2):
+    /// 1. Every URL (any case; http / https / stremio)
+    ///    reduces to scheme://host — paths and queries are
+    ///    exactly where debrid tokens live (Torrentio config
+    ///    segments, MediaFusion's minted link), so they never
+    ///    reach disk. A match URLComponents cannot parse at
+    ///    all becomes "[url]".
+    /// 2. A scheme-less Torrentio config base (a run carrying
+    ///    realdebrid= / torbox= / premiumize= with no scheme)
+    ///    is erased whole.
+    /// 3. Value pass: every credential value currently in
+    ///    force is erased wherever it appears, in any shape —
+    ///    this is the pass that catches a bare token inside an
+    ///    engine/FFmpeg error string, the one source whose
+    ///    wording the app does not control.
+    /// Matches are replaced back-to-front so the earlier
+    /// ranges stay valid while the string mutates.
     private static func scrubbed(_ message: String) -> String {
         var result = message
         let full = NSRange(location: 0,
-                           length: (message as NSString).length)
-        let matches = urlRegex.matches(in: message, range: full)
-        for match in matches.reversed() {
+                           length: (result as NSString).length)
+        for match in urlRegex.matches(in: result, range: full).reversed() {
             guard let range = Range(match.range, in: result) else { continue }
             let raw = String(result[range])
             if let comps = URLComponents(string: raw),
@@ -208,7 +235,85 @@ enum DiagLog {
                 result.replaceSubrange(range, with: "[url]")
             }
         }
+        let rest = NSRange(location: 0,
+                           length: (result as NSString).length)
+        for match in configBaseRegex.matches(in: result,
+                                             range: rest).reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            result.replaceSubrange(range, with: "[redacted]")
+        }
+        for secret in secretValues() {
+            result = result.replacingOccurrences(of: secret,
+                                                 with: "[redacted]")
+        }
         return result
+    }
+
+    /// Every credential value in force (stored or bundled),
+    /// longest first so a longer value is erased before any
+    /// shorter value it contains. Gathered fresh on every
+    /// scrub: log writes are breadcrumbs, not a hot loop, and
+    /// a cached list would go stale the moment the owner
+    /// rotates a token mid-session. Values under 8 characters
+    /// are skipped — too short to be a credential, too likely
+    /// to be an innocent substring of ordinary text. Every
+    /// URL-shaped value is ALSO listed scheme-stripped: an
+    /// engine error may carry a link as a bare host/path
+    /// fragment with no scheme in front of it, and the
+    /// literal value pass can only erase a string it is
+    /// given verbatim (review, F-R1-1).
+    private static func secretValues() -> [String] {
+        let raw: [String?] = [
+            TorrentSettings.addonURL,
+            TorrentSettings.effectiveBase,
+            TorrentSettings.rdToken,
+            TorrentSettings.torboxToken,
+            TorrentSettings.premiumizeToken,
+            TorrentSettings.mfURL,
+            TorrentSettings.mfBase,
+            TorrentSettings.subAddonURL,
+            // The sports slots are owner-pasted addon links
+            // of the same kind as the two above (a stored
+            // value may be a self-hosted instance on the
+            // owner's own machine), so their stored and
+            // effective forms belong in the list too — the
+            // public defaults they fall back to are harmless
+            // to erase (review, fresh-count round 1).
+            TorrentSettings.sportsURL,
+            TorrentSettings.sports2URL,
+            TorrentSettings.sportsBase,
+            TorrentSettings.sports2Base,
+            BundledTokens.rdToken,
+            BundledTokens.torboxToken,
+            BundledTokens.premiumizeToken,
+            BundledTokens.mfURL,
+            TMDBBundledKey.value,
+            UserDefaults.standard.string(forKey: "tmdb_api_key"),
+        ]
+        var seen = Set<String>()
+        var out: [String] = []
+        for value in raw {
+            let v = (value ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard v.count >= 8, seen.insert(v).inserted else { continue }
+            out.append(v)
+        }
+        // Scheme-stripped twins of the URL-shaped values (see
+        // the header note): same floor, same dedupe; the
+        // final sort puts every longer form ahead of any
+        // shorter value it contains.
+        let originals = out
+        for v in originals {
+            for scheme in ["https://", "http://", "stremio://"] {
+                guard v.lowercased().hasPrefix(scheme) else { continue }
+                let stripped = String(v.dropFirst(scheme.count))
+                if stripped.count >= 8, seen.insert(stripped).inserted {
+                    out.append(stripped)
+                }
+                break
+            }
+        }
+        return out.sorted { $0.count > $1.count }
     }
 
     // MARK: - Launch presence (audit item 6)
@@ -275,13 +380,20 @@ enum DiagLog {
 
 /// The tiny HTTP server behind Settings → "Gửi log chẩn
 /// đoán": while the export screen is open it serves
-/// DiagLog's file at http://<Apple-TV-LAN-IP>:18080/log to
-/// ANY path, as a download named joetv-diag.txt. It exists
-/// only for the export screen's lifetime (the view starts it
-/// on appear and stops it on disappear), binds no
-/// authentication — the file is already token-free by
-/// DiagLog's scrubber, and the server dies with the screen —
-/// and serves nothing else.
+/// DiagLog's file at http://<Apple-TV-LAN-IP>:18080/log, as a
+/// download named joetv-diag.txt. It exists only for the
+/// export screen's lifetime (the view starts it on appear
+/// and stops it on disappear) and serves nothing else.
+///
+/// v2.0.40 (audit P0.2 / H-1): the request must carry a
+/// ONE-TIME PIN — a random 4-digit code minted at every
+/// start(), shown on the export screen and carried in the
+/// address the screen displays (…/log?pin=NNNN, or an
+/// X-Diag-Pin header). The log file is token-free by
+/// DiagLog's scrubber, but it still holds viewing history,
+/// hosts and seek positions, and the old server handed it
+/// to ANY device on the LAN that knocked. Three wrong codes
+/// stop the server for 60 seconds.
 ///
 /// Swift 6: the server is @MainActor — the listener, the
 /// live-connection table and the state callback are touched
@@ -314,11 +426,38 @@ final class DiagLogServer {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
 
+    /// The one-time PIN for this serving session (v2.0.40,
+    /// P0.2): minted fresh by every start() that creates a
+    /// listener, shown on the export screen, and required on
+    /// every request. Read by the view to display it.
+    private(set) var pin = ""
+    /// Consecutive wrong-PIN requests since the last success.
+    private var failedAttempts = 0
+    /// After 3 consecutive wrong PINs the server refuses to
+    /// start until this instant (the 60-second lockout).
+    /// STATIC on purpose (review round 3, R3-1): this server
+    /// instance is owned by LogExportView's @State, and the
+    /// full-screen cover destroys that state on dismiss — an
+    /// instance lockout would die with the screen, and the
+    /// failure message itself tells the owner to close and
+    /// reopen it. The deadline must live at class level so
+    /// the promised 60-second pause survives the only
+    /// restart path that exists; reopening inside the window
+    /// reports .failed, reopening after it serves with a
+    /// fresh PIN. Main-actor isolation comes from the class.
+    private static var lockoutUntil: Date?
+
     /// Start serving on port 18080. Idempotent while a
     /// listener is alive. Reports .starting immediately, then
     /// .serving / .failed from the listener's own state.
     func start() {
+        if let until = Self.lockoutUntil, until > Date() {
+            emit(.failed("Kênh gửi log đang tạm dừng sau 3 lần nhập sai mã PIN — chờ khoảng 1 phút rồi mở lại màn hình này."))
+            return
+        }
         guard listener == nil else { return }
+        pin = String(format: "%04d", Int.random(in: 0...9999))
+        failedAttempts = 0
         emit(.starting)
         guard let port = NWEndpoint.Port(rawValue: 18080) else {
             emit(.failed("Không mở được kênh gửi log (cổng không hợp lệ)."))
@@ -365,7 +504,7 @@ final class DiagLogServer {
                 emit(.failed("Không tìm thấy địa chỉ mạng nội bộ"))
                 return
             }
-            emit(.serving(url: "http://\(ip):\(port.rawValue)/log"))
+            emit(.serving(url: "http://\(ip):\(port.rawValue)/log?pin=\(pin)"))
         case .failed(let error):
             if self.listener === listener { self.listener = nil }
             emit(.failed("Kênh gửi log lỗi: \(error.localizedDescription)"))
@@ -379,20 +518,87 @@ final class DiagLogServer {
     /// Accept one connection: register it (so stop() can
     /// cancel it), start it on the server queue, and read ONE
     /// bounded request (8192 bytes is far more than a Safari
-    /// request line + headers). The request's content is
-    /// never inspected — ANY path gets the log; the owner
-    /// just opens the shown address. A client that connects
-    /// and never sends is reaped by stop() when the screen
-    /// closes.
+    /// request line + headers). Only the PIN is read from the
+    /// request (v2.0.40, P0.2 — see handle); the path itself
+    /// is not routed on. A client that connects and never
+    /// sends is reaped by stop() when the screen closes.
     private func accept(_ conn: NWConnection) {
         connections[ObjectIdentifier(conn)] = conn
         conn.start(queue: queue)
         conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) {
-            [weak self] _, _, _, _ in
+            [weak self] data, _, _, _ in
             Task { @MainActor in
-                self?.respond(to: conn)
+                self?.handle(conn, requestData: data ?? Data())
             }
         }
+    }
+
+    /// The PIN gate (v2.0.40, P0.2 / H-1): a request carrying
+    /// this session's PIN gets the log and resets the failure
+    /// count; any other request gets a 403 and counts. The
+    /// third consecutive failure stops the server for 60
+    /// seconds (lockoutUntil) — the offending connection
+    /// still receives its 403 before the listener goes down.
+    /// A connection that closed without sending a single byte
+    /// never made a request at all, so it is NOT a wrong-PIN
+    /// attempt and never counts: a LAN port scan or a browser
+    /// preconnect must not be able to lock the owner out of
+    /// his own export (review round 2, F-1).
+    private func handle(_ conn: NWConnection, requestData: Data) {
+        guard !requestData.isEmpty else {
+            conn.cancel()
+            connections.removeValue(forKey: ObjectIdentifier(conn))
+            return
+        }
+        if !pin.isEmpty, Self.requestPIN(in: requestData) == pin {
+            failedAttempts = 0
+            respond(to: conn)
+            return
+        }
+        failedAttempts += 1
+        let locking = failedAttempts >= 3
+        if locking {
+            Self.lockoutUntil = Date().addingTimeInterval(60)
+        }
+        respondForbidden(to: conn) { [weak self] in
+            guard let self, locking else { return }
+            self.listener?.cancel()
+            self.listener = nil
+            for other in self.connections.values { other.cancel() }
+            self.connections.removeAll()
+            self.emit(.failed("Quá 3 lần nhập sai mã PIN — kênh gửi log đã tạm dừng 60 giây. Đóng màn hình này, chờ một chút rồi mở lại."))
+        }
+    }
+
+    /// Extract the PIN a request carries: the `pin=` item of
+    /// the request line's query, or an `X-Diag-Pin` header.
+    /// Nothing else in the request is inspected or stored,
+    /// and the PIN itself is only ever compared, never logged.
+    nonisolated private static func requestPIN(in data: Data) -> String? {
+        let text = String(decoding: data, as: UTF8.self)
+        for line in text.components(separatedBy: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("x-diag-pin:") {
+                return lower.dropFirst("x-diag-pin:".count)
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            if lower.hasPrefix("get ") || lower.hasPrefix("head "),
+               let r = lower.range(of: "pin=") {
+                let tail = lower[r.upperBound...]
+                let digits = tail.prefix { $0.isNumber }
+                // The digit run must BE the whole query value:
+                // it ends at end-of-line, a space (the HTTP
+                // version follows), & or # — "pin=0123xyz" is
+                // the value "0123xyz", not this session's PIN
+                // (review round 2, F-2).
+                let next = tail.dropFirst(digits.count).first
+                if !digits.isEmpty,
+                   next == nil || next == " " || next == "&" || next == "#" {
+                    return String(digits)
+                }
+            }
+        }
+        return nil
     }
 
     /// Send the log as a plain-text download and close. The
@@ -412,12 +618,36 @@ final class DiagLogServer {
             + "Connection: close\r\n\r\n"
         var payload = Data(header.utf8)
         payload.append(body)
+        sendAndClose(conn, payload: payload)
+    }
+
+    /// The wrong/missing-PIN answer: a short 403, no log
+    /// content, no hint about the right code. `after` runs
+    /// once the answer is on its way (the lockout path uses
+    /// it to take the listener down).
+    private func respondForbidden(to conn: NWConnection,
+                                  after: @escaping @MainActor () -> Void) {
+        let body = Data("403 — wrong or missing PIN.\n".utf8)
+        let header = "HTTP/1.1 403 Forbidden\r\n"
+            + "Content-Type: text/plain; charset=utf-8\r\n"
+            + "Content-Length: \(body.count)\r\n"
+            + "Connection: close\r\n\r\n"
+        var payload = Data(header.utf8)
+        payload.append(body)
+        sendAndClose(conn, payload: payload, after: after)
+    }
+
+    /// Send one payload, then close the connection and drop
+    /// it from the live table.
+    private func sendAndClose(_ conn: NWConnection, payload: Data,
+                              after: (@MainActor () -> Void)? = nil) {
         conn.send(content: payload, completion: .contentProcessed {
             [weak self] _ in
             conn.cancel()
             Task { @MainActor in
                 self?.connections.removeValue(
                     forKey: ObjectIdentifier(conn))
+                after?()
             }
         })
     }

@@ -256,6 +256,12 @@ enum JoeTopShelfWriter {
     /// Torrent CW entries rebuild their TorMeta on the app
     /// side, so the link carries the meta's fields verbatim
     /// (the same fields WatchStore.Entry already stores).
+    /// v2.0.40 (audit P0.1 / C-1): the link NO LONGER carries
+    /// the serving base — that URL embeds the debrid tokens /
+    /// the private MediaFusion link, and topshelf.json lives
+    /// in the shared App Group container. It carries only the
+    /// base's family code (`src`); the app rebuilds the base
+    /// from its current settings when the link opens.
     private static func torrentLink(_ e: WatchStore.Entry) -> String {
         guard !e.metaId.isEmpty else { return "" }
         var c = URLComponents()
@@ -269,9 +275,12 @@ enum JoeTopShelfWriter {
             URLQueryItem(name: "background", value: e.background),
             URLQueryItem(name: "year", value: e.year),
             URLQueryItem(name: "desc", value: e.desc),
-            URLQueryItem(name: "base", value: e.metaBase),
             URLQueryItem(name: "stream", value: e.streamId),
         ]
+        if !e.metaSource.isEmpty {
+            c.queryItems?.append(URLQueryItem(name: "src",
+                                              value: e.metaSource))
+        }
         // v2.0.34 (E-2): the live stamp rides the link too.
         // This URL round trip is a rebuild like the rails'
         // (JoeTVApp's "torrent" case re-mints the TorMeta

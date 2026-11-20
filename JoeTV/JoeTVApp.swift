@@ -657,8 +657,18 @@ struct JoeRootView: View {
             // so every pre-existing link parses as before.
             meta.isLive = q["live"] == "1"
             nav.section = .torrent
-            nav.tor = TorRoute(meta: meta, base: q["base"] ?? "",
-                               preselectStreamId: q["stream"] ?? "")
+            // v2.0.40 (audit P0.1 / C-1): the link carries no
+            // base any more — only its family code ("src").
+            // The base is rebuilt from the CURRENT settings;
+            // a legacy "base" item (written by an older build
+            // into a stale topshelf.json) is deliberately
+            // IGNORED: a URL arriving in a link is never
+            // trusted as a config base.
+            nav.tor = TorRoute(
+                meta: meta,
+                base: TorrentSettings.base(forMetaSource: q["src"] ?? "",
+                                           metaType: meta.type),
+                preselectStreamId: q["stream"] ?? "")
         default:
             return
         }

@@ -108,7 +108,7 @@ struct JoeSettingsView: View {
                 Group {
                 field(title: "Link Torrentio của anh (tuỳ chọn)",
                       hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
-                      text: $addonURL, id: "addon", secure: false, allowsPaste: true,
+                      text: $addonURL, id: "addon", secure: true, allowsPaste: true,
                       status: addonFieldStatus,
                       inForce: !TorrentSettings.addonURL
                                    .trimmingCharacters(in: .whitespaces).isEmpty
@@ -142,7 +142,7 @@ struct JoeSettingsView: View {
                 // off ⇒ MediaFusion is fully absent.
                 field(title: "Link MediaFusion (tuỳ chọn)",
                       hint: "Dán link manifest MediaFusion của anh (trang cấu hình MediaFusion, đã gắn TorBox/Real-Debrid/Premiumize). Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
-                      text: $mfURL, id: "mf", secure: false, allowsPaste: true,
+                      text: $mfURL, id: "mf", secure: true, allowsPaste: true,
                       status: fieldStatus(stored: TorrentSettings.mfURL,
                                           secret: false,
                                           bundledFallback: BundledTokens.mfURL,
@@ -882,6 +882,18 @@ private struct LogExportView: View {
                         .font(.system(size: 44, weight: .bold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
+                    // v2.0.40 (P0.2 / H-1): the address above
+                    // already carries the one-time PIN; it is
+                    // also shown on its own line so the owner
+                    // can type it separately if he opened the
+                    // bare address. The code changes every
+                    // time this screen opens, and 3 wrong tries
+                    // pause the channel for 60 seconds.
+                    if !server.pin.isEmpty {
+                        Text("Mã PIN một lần: \(server.pin)")
+                            .font(.system(size: 36, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
                     if let qr = Self.qrImage(for: url) {
                         // White card = the QR's quiet zone
                         // (see the header note): constant
@@ -894,7 +906,7 @@ private struct LogExportView: View {
                             .background(RoundedRectangle(cornerRadius: 28)
                                 .fill(Color.white))
                     }
-                    Text("Trên iPhone, mở Safari và nhập đúng địa chỉ trên — file log sẽ tải về máy. Hoặc dùng Camera của iPhone quét mã QR. Lấy xong, gửi file vào cuộc trò chuyện với em.")
+                    Text("Trên iPhone, mở Safari và nhập đúng địa chỉ trên (địa chỉ đã gồm mã PIN một lần) — file log sẽ tải về máy. Hoặc dùng Camera của iPhone quét mã QR. Địa chỉ chỉ mở được khi màn hình này đang hiện. Lấy xong, gửi file vào cuộc trò chuyện với em.")
                         .font(.system(size: 25))
                         .foregroundStyle(theme.meta)
                         .multilineTextAlignment(.center)

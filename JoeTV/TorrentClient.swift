@@ -279,6 +279,75 @@ enum TorrentSettings {
 
     static var isConfigured: Bool { effectiveBase != nil }
 
+    // MARK: - CW base identity (v2.0.40, audit P0.1 / C-1)
+    //
+    // A configured base is a CREDENTIAL in URL form: the
+    // Torrentio base embeds every debrid token, and the
+    // MediaFusion base IS the owner's private link. Neither
+    // may be persisted. WatchStore.Entry therefore stores
+    // only WHICH addon family served the entry (one of the
+    // short codes below — never a URL), and the base is
+    // rebuilt from the CURRENT settings every time the entry
+    // reopens. A token rotated since the entry was saved is
+    // picked up automatically; the stored state can never
+    // leak a credential to disk or into a deep link.
+
+    /// The family code for a live base string, or "" when
+    /// the base matches no known family. Exact match first;
+    /// the host pass second, because a rotated token changes
+    /// the base string but never its host.
+    static func metaSource(forBase base: String) -> String {
+        let b = base.trimmingCharacters(in: .whitespaces)
+        guard !b.isEmpty else { return "" }
+        if b == cinemeta { return "cinemeta" }
+        if let eff = effectiveBase, b == eff { return "torrentio" }
+        if let mf = mfBase, b == mf { return "mf" }
+        if let s = sportsBase, b == s { return "sports" }
+        if let s2 = sports2Base, b == s2 { return "sports2" }
+        guard let host = URL(string: b)?.host?.lowercased()
+        else { return "" }
+        func hostIs(_ candidate: String?) -> Bool {
+            guard let candidate,
+                  let h = URL(string: candidate)?.host?.lowercased()
+            else { return false }
+            return h == host
+        }
+        if host == "torrentio.strem.fun" { return "torrentio" }
+        if hostIs(cinemeta) { return "cinemeta" }
+        if hostIs(mfBase) { return "mf" }
+        if hostIs(sportsBase) { return "sports" }
+        if hostIs(sports2Base) { return "sports2" }
+        return ""
+    }
+
+    /// Rebuild the base a stored family code reopens with,
+    /// from the settings in force NOW. The "" (legacy /
+    /// unknown) case falls back along the same chains the
+    /// live paths use: sports-shaped entries (events / tv)
+    /// through the sports slots then MediaFusion, everything
+    /// else through the configured Torrentio base then
+    /// Cinemeta.
+    static func base(forMetaSource source: String,
+                     metaType: String) -> String {
+        switch source {
+        case "cinemeta":
+            return cinemeta
+        case "mf":
+            return mfBase ?? ""
+        case "sports":
+            return sportsBase ?? mfBase ?? ""
+        case "sports2":
+            return sports2Base ?? mfBase ?? ""
+        case "torrentio":
+            return effectiveBase ?? cinemeta
+        default:
+            if metaType == "events" || metaType == "tv" {
+                return sportsBase ?? mfBase ?? ""
+            }
+            return effectiveBase ?? cinemeta
+        }
+    }
+
     static func stripSlash(_ s: String) -> String {
         var out = s
         while out.hasSuffix("/") { out = String(out.dropLast()) }
@@ -571,9 +640,9 @@ enum TorrentClient {
     }
 
     /// Series episodes from the meta endpoint (Cinemeta-shaped).
-    static func fetchVideos(metaBase: String, type: String, id: String) async throws -> [TorVideo] {
+    static func fetchVideos(addonBase: String, type: String, id: String) async throws -> [TorVideo] {
         let root = try await JoeHTTP.getJSON(
-            metaBase + "/meta/\(type)/\(id).json", timeout: 8)
+            addonBase + "/meta/\(type)/\(id).json", timeout: 8)
         guard let meta = JSON.obj(root, "meta") else { return [] }
         return (JSON.arr(meta, "videos") ?? []).compactMap { v in
             var video = TorVideo()

@@ -914,7 +914,10 @@ struct JoeTVSection: View {
         // StremVerse, or MediaFusion), never a fixed MF base.
         let servingBase = event.servingBase.isEmpty
             ? (TorrentSettings.mfBase ?? "") : event.servingBase
-        entry.metaBase = servingBase
+        // v2.0.40 (P0.1 / C-1): persist only the serving
+        // base's family code — the base itself may be the
+        // private MediaFusion link and never reaches disk.
+        entry.metaSource = TorrentSettings.metaSource(forBase: servingBase)
         entry.background = event.background
         entry.desc = event.desc
         let eventId = event.id

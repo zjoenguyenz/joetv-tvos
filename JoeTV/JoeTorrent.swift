@@ -262,7 +262,7 @@ struct JoeTorrentHome: View {
                                       background: entry.background,
                                       year: entry.year, desc: entry.desc,
                                       isLive: entry.isLive),
-                        base: entry.metaBase,
+                        base: entry.reopenBase,
                         preselectStreamId: entry.streamId) } label: {
                         PosterCard(
                             title: entry.title,
@@ -306,7 +306,7 @@ struct JoeTorrentHome: View {
                                       background: entry.background,
                                       year: entry.year, desc: entry.desc,
                                       isLive: entry.isLive),
-                        base: entry.metaBase) } label: {
+                        base: entry.reopenBase) } label: {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,
@@ -898,7 +898,9 @@ struct JoeTorrentDetail: View {
             e.metaId = meta.id
             e.metaType = meta.type
             e.isLive = meta.isLive
-            e.metaBase = route.base
+            // v2.0.40 (P0.1 / C-1): store the base's family
+            // code, never the base itself (it carries tokens).
+            e.metaSource = TorrentSettings.metaSource(forBase: route.base)
             e.background = meta.background
             e.desc = meta.desc
             e.ts = Int64(Date().timeIntervalSince1970 * 1000)
@@ -1219,7 +1221,7 @@ struct JoeTorrentDetail: View {
         if meta.type == "series" {
             do {
                 videos = try await TorrentClient.fetchVideos(
-                    metaBase: route.base, type: meta.type, id: meta.id)
+                    addonBase: route.base, type: meta.type, id: meta.id)
                 videosFailed = false
             } catch {
                 videos = []
@@ -1456,7 +1458,9 @@ private struct JoeTorCastCellLabel: View {
         entry.metaType = meta.type
         entry.isLive = meta.isLive
         entry.streamId = sid
-        entry.metaBase = base
+        // v2.0.40 (P0.1 / C-1): family code only — the base
+        // itself (tokens inside) is never persisted.
+        entry.metaSource = TorrentSettings.metaSource(forBase: base)
         entry.background = meta.background
         entry.desc = meta.desc
         let resume = watch.progressFor(matching: entry)?.pos ?? 0

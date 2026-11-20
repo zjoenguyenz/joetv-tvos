@@ -90,7 +90,17 @@ final class WatchStore: ObservableObject {
         var metaId = ""
         var metaType = ""
         var streamId = ""
-        var metaBase = ""
+        // v2.0.40 (audit P0.1 / C-1): WHICH addon family served
+        // this entry — a TorrentSettings.metaSource code
+        // ("torrentio" / "cinemeta" / "mf" / "sports" /
+        // "sports2"), never a URL. The base itself embeds the
+        // debrid tokens / the private MediaFusion link, so it
+        // is rebuilt from the CURRENT settings at reopen time
+        // (see reopenBase) and never persisted. Pre-2.0.40
+        // files carried the raw base in a `metaBase` key; the
+        // tolerant reader below converts it to a family code
+        // on load and the value itself is discarded.
+        var metaSource = ""
         var background = ""
         var desc = ""
         // canonical identity bridges (v2.0.29, cluster C):
@@ -114,6 +124,15 @@ final class WatchStore: ObservableObject {
 
         var id: String { key }
         var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
+        /// The addon base this entry reopens against, rebuilt
+        /// from the CURRENT settings via its stored family code
+        /// (v2.0.40, audit P0.1 / C-1) — the base itself is
+        /// never stored, so a rotated token is picked up and
+        /// no credential ever sits in the persisted file.
+        var reopenBase: String {
+            TorrentSettings.base(forMetaSource: metaSource,
+                                 metaType: metaType)
+        }
         /// 0…1 watched fraction for the tile's progress bar.
         var fraction: Double {
             guard dur > 0 else { return 0 }
@@ -338,7 +357,7 @@ final class WatchStore: ObservableObject {
     /// detail pages address — and the other side contributes
     /// every identity field the survivor lacks, so the merged
     /// row can still reopen through the torrent side too
-    /// (metaId/streamId/metaBase ride along). Two provider
+    /// (metaId/streamId/metaSource ride along). Two provider
     /// entries (a failover hop) or two torrent entries keep
     /// the incoming side's identity, exactly as before.
     private nonisolated static func mergedEntry(incoming: Entry, old: Entry) -> Entry {
@@ -361,7 +380,7 @@ final class WatchStore: ObservableObject {
         if base.metaId.isEmpty { base.metaId = donor.metaId }
         if base.metaType.isEmpty { base.metaType = donor.metaType }
         if base.streamId.isEmpty { base.streamId = donor.streamId }
-        if base.metaBase.isEmpty { base.metaBase = donor.metaBase }
+        if base.metaSource.isEmpty { base.metaSource = donor.metaSource }
         if base.background.isEmpty { base.background = donor.background }
         if base.desc.isEmpty { base.desc = donor.desc }
         if base.imdbId.isEmpty { base.imdbId = donor.imdbId }
@@ -682,7 +701,7 @@ final class WatchStore: ObservableObject {
 /// tolerance (optString with defaults). Swift's SYNTHESIZED
 /// Decodable ignores declared defaults — one key missing from
 /// an older build's file (fields were added across builds:
-/// the torrent CW fields metaBase/metaType among them) failed
+/// the torrent CW fields metaSource/metaType among them) failed
 /// the WHOLE Doc decode, and the old load() turned that into
 /// an empty store. With this reader, a file from any older or
 /// newer build decodes field by field and can never fail
@@ -693,7 +712,7 @@ extension WatchStore.Entry {
     private enum EntryKeys: String, CodingKey {
         case key, kind, pos, dur, ts, ep, epLabel, title, poster,
              year, slug, source, metaId, metaType, streamId,
-             metaBase, background, desc, imdbId, tmdbId, isLive
+             metaSource, metaBase, background, desc, imdbId, tmdbId, isLive
     }
 
     init(from decoder: Decoder) throws {
@@ -713,7 +732,19 @@ extension WatchStore.Entry {
         metaId = try c.decodeIfPresent(String.self, forKey: .metaId) ?? ""
         metaType = try c.decodeIfPresent(String.self, forKey: .metaType) ?? ""
         streamId = try c.decodeIfPresent(String.self, forKey: .streamId) ?? ""
-        metaBase = try c.decodeIfPresent(String.self, forKey: .metaBase) ?? ""
+        metaSource = try c.decodeIfPresent(String.self, forKey: .metaSource) ?? ""
+        // v2.0.40 (audit P0.1 / C-1): a pre-2.0.40 file stored
+        // the raw serving base under `metaBase` — a URL with
+        // the debrid tokens / MediaFusion link inside it.
+        // Convert it to its family code here and DISCARD the
+        // value: the entry reopens against the base rebuilt
+        // from current settings, and the next persist() writes
+        // a file with no credential in it.
+        if metaSource.isEmpty,
+           let legacyBase = try c.decodeIfPresent(String.self, forKey: .metaBase),
+           !legacyBase.isEmpty {
+            metaSource = TorrentSettings.metaSource(forBase: legacyBase)
+        }
         background = try c.decodeIfPresent(String.self, forKey: .background) ?? ""
         desc = try c.decodeIfPresent(String.self, forKey: .desc) ?? ""
         imdbId = try c.decodeIfPresent(String.self, forKey: .imdbId) ?? ""
