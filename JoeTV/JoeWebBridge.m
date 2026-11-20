@@ -671,20 +671,32 @@ static BOOL (^JoeRemotePressConsumer)(NSInteger pressType) = nil;
 
 - (void)joe_sendEvent:(UIEvent *)event {
     BOOL (^consumer)(NSInteger) = JoeRemotePressConsumer;
-    if (consumer != nil && event.type == UIEventTypePresses) {
+    if (consumer != nil && event.type == UIEventTypePresses
+        && [event isKindOfClass:[UIPressesEvent class]]) {
+        // Presses ride the UIPressesEvent SUBCLASS of
+        // UIEvent, and allPresses is declared on the
+        // subclass, not the base class (reading it on a
+        // UIEvent * was CI run #18's only error). The
+        // class check keeps the routing semantics
+        // identical — the same press set is iterated —
+        // and a presses-type event that is somehow not
+        // the subclass simply delivers untouched below
+        // instead of raising on the missing property.
+        NSSet<UIPress *> *allPresses =
+            ((UIPressesEvent *)event).allPresses;
         // Pass 1: Menu anywhere in the event delivers the
         // whole event untouched — checked BEFORE any press
         // is offered, so the invariant never depends on the
         // (unordered) set's iteration order (review MINOR,
         // 2026-11-19).
         BOOL hasMenu = NO;
-        for (UIPress *press in event.allPresses) {
+        for (UIPress *press in allPresses) {
             if (press.type == UIPressTypeMenu) { hasMenu = YES; break; }
         }
         if (!hasMenu) {
             BOOL sawEnded = NO;
             BOOL allConsumed = YES;
-            for (UIPress *press in event.allPresses) {
+            for (UIPress *press in allPresses) {
                 if (press.phase != UIPressPhaseEnded) { continue; }
                 sawEnded = YES;
                 if (!consumer((NSInteger)press.type)) {
