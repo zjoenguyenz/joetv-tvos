@@ -314,7 +314,7 @@ final class JoeYtSession: ObservableObject {
     func mirrorNow() async {
         let cookies = await Self.fetchAllCookies()
         let records = cookies
-            .compactMap { Self.record(from: $0) }
+            .map { Self.record(from: $0) }
             .filter {
                 $0.domain.contains("youtube.com")
                     || $0.domain.contains("google.com")
@@ -340,48 +340,98 @@ final class JoeYtSession: ObservableObject {
 
     // MARK: Bridge wrappers
 
-    private static func fetchAllCookies() async -> [[String: Any]] {
+    /// Sendable snapshot of one cookie — the ONLY shape
+    /// that crosses the fetch continuation. The bridge
+    /// delivers [String: Any] dictionaries; a dictionary
+    /// array (like [HTTPCookie]) is not Sendable, and a
+    /// continuation's resume argument is a `sending`
+    /// parameter, so resuming with the dictionaries is a
+    /// Swift 6 error from ANY isolation domain: CI run #16
+    /// rejected it from the bridge completion's own region,
+    /// and run #17 rejected the same statement hopped into
+    /// the MainActor. No hop fixes a non-Sendable value.
+    /// This struct is Sendable BY CONSTRUCTION — every
+    /// stored property is a value type (String / Bool /
+    /// Date?) — and the mapping happens INSIDE the bridge
+    /// completion, so the dictionaries never cross.
+    ///
+    /// The field set is the exact union the consumers
+    /// read, verified against the old dictionary code:
+    /// fetchPresence reads name + domain; mirrorNow (via
+    /// record(from:)) reads name, value, domain, path,
+    /// secure, expires. It is also exactly the key set the
+    /// bridge emits (JoeWebBridge.m fetch) and consumes
+    /// (restore), so the persisted mirror payload is
+    /// unchanged field for field. NSHTTPCookie's HTTPOnly
+    /// flag is deliberately NOT carried: the bridge never
+    /// exports it, no consumer reads it, and it cannot be
+    /// set at rebuild time (no HTTPOnly key exists in the
+    /// public cookie-properties API), so it can never
+    /// participate in mirror fidelity.
+    private struct CookieSnapshot: Sendable {
+        var name: String
+        var value: String
+        var domain: String
+        var path: String
+        var secure: Bool
+        var expires: Date?
+    }
+
+    private static func fetchAllCookies() async -> [CookieSnapshot] {
         await withCheckedContinuation {
-            (cont: CheckedContinuation<[[String: Any]], Never>) in
-            JoeWebBridge.fetchAllCookies { cookies in
-                // The bridge's completion is nonisolated, so
-                // `cookies` arrives in that closure's own
-                // region; resuming with it from there passes
-                // a non-Sendable value as `sending` across
-                // regions — a Swift 6 error (CI run #16, the
-                // build's only one). Hop into the owning
-                // actor's context first, the file's own
-                // delegate idiom below: this function's
-                // consumer is @MainActor, so the value's
-                // region transfers with the hop and the
-                // resume inside the actor is legal. Same
-                // cookies, same caller-visible behaviour.
-                Task { @MainActor in
-                    cont.resume(returning: cookies)
-                }
+            (cont: CheckedContinuation<[CookieSnapshot], Never>) in
+            JoeWebBridge.fetchAllCookies { entries in
+                // Map HERE, inside the completion: only the
+                // Sendable snapshots cross the continuation.
+                cont.resume(returning: entries.compactMap(Self.snapshot(from:)))
             }
         }
     }
 
-    private static func fetchPresence() async -> Bool {
-        let cookies = await fetchAllCookies()
-        return cookies.contains { entry in
-            (entry["name"] as? String) == "SAPISID"
-                && ((entry["domain"] as? String) ?? "").contains("youtube.com")
-        }
-    }
-
-    private static func record(from entry: [String: Any]) -> CookieRecord? {
+    /// Dictionary → snapshot, with the old record(from:)
+    /// extraction rules verbatim: an entry missing a
+    /// String name, value or domain is dropped; path
+    /// defaults to "/"; secure reads NSNumber's boolValue
+    /// (default false); expires is the optional Date.
+    /// Dropping malformed entries here (rather than in
+    /// mirrorNow's old compactMap) yields the identical
+    /// record set downstream — both mappings are
+    /// order-preserving filters over the same entries.
+    /// nonisolated: it runs inside the bridge's
+    /// nonisolated completion and touches only its
+    /// argument.
+    nonisolated private static func snapshot(from entry: [String: Any]) -> CookieSnapshot? {
         guard let name = entry["name"] as? String,
               let value = entry["value"] as? String,
               let domain = entry["domain"] as? String else { return nil }
-        return CookieRecord(
+        return CookieSnapshot(
             name: name,
             value: value,
             domain: domain,
             path: (entry["path"] as? String) ?? "/",
             secure: (entry["secure"] as? NSNumber)?.boolValue ?? false,
             expires: entry["expires"] as? Date)
+    }
+
+    private static func fetchPresence() async -> Bool {
+        let cookies = await fetchAllCookies()
+        return cookies.contains {
+            $0.name == "SAPISID" && $0.domain.contains("youtube.com")
+        }
+    }
+
+    /// Snapshot → persisted record: a total conversion —
+    /// every snapshot already carries a name, value and
+    /// domain (snapshot(from:) enforced them), which is
+    /// why mirrorNow's map is no longer a compactMap.
+    private static func record(from snapshot: CookieSnapshot) -> CookieRecord {
+        CookieRecord(
+            name: snapshot.name,
+            value: snapshot.value,
+            domain: snapshot.domain,
+            path: snapshot.path,
+            secure: snapshot.secure,
+            expires: snapshot.expires)
     }
 
     private static func dictionary(from record: CookieRecord) -> [String: Any] {
