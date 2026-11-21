@@ -460,17 +460,17 @@ final class JoeYtHlsServer {
     /// Only chunk-sized events cross back here.
     private func relay(_ conn: NWConnection, sessionID: String, entry: StreamEntry,
                        rangeHeader: String?, headOnly: Bool) async {
-        var request = URLRequest(url: entry.origin)
-        request.timeoutInterval = 30
-        // A HEAD probe is answered with a HEAD to the
-        // origin too (review round 7, MINOR): issuing a
-        // full GET and discarding the body after the
-        // headers wasted an origin download per probe.
-        if headOnly { request.httpMethod = "HEAD" }
-        request.setValue(entry.userAgent, forHTTPHeaderField: "User-Agent")
-        if let rangeHeader {
-            request.setValue(rangeHeader, forHTTPHeaderField: "Range")
-        }
+        // Only immutable Sendable values cross into the
+        // detached producer below (FL-341): the
+        // URLRequest is built INSIDE the detached task
+        // from these lets. Building and mutating it here
+        // — inside this @MainActor function — made the
+        // request a main actor-region value, and Swift 6
+        // rejected capturing it into the producer's
+        // `sending` closure (CI run #21 error at the
+        // Task.detached line).
+        let originURL = entry.origin
+        let userAgent = entry.userAgent
         let fallbackType = entry.mimeType
         // Bounded stream WITH back-pressure (review
         // round 7, MINOR): the buffer holds at most 8
@@ -494,6 +494,21 @@ final class JoeYtHlsServer {
                         return true
                     }
                     return false
+                }
+                // The request is assembled here, inside
+                // the detached task (FL-341 — see the
+                // note at the top of relay()).
+                var request = URLRequest(url: originURL)
+                request.timeoutInterval = 30
+                // A HEAD probe is answered with a HEAD to
+                // the origin too (review round 7, MINOR):
+                // issuing a full GET and discarding the
+                // body after the headers wasted an origin
+                // download per probe.
+                if headOnly { request.httpMethod = "HEAD" }
+                request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                if let rangeHeader {
+                    request.setValue(rangeHeader, forHTTPHeaderField: "Range")
                 }
                 do {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
