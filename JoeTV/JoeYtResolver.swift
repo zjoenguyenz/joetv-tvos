@@ -533,8 +533,8 @@ actor JoeYtResolver {
     /// tlang parameter is ever attached anywhere (Q3 ban).
     private static func parseCaptions(_ json: [String: Any])
         -> (tracks: [JoeYtCaptionTrack], chosen: Int, inventory: String) {
-        let renderer = (json["captions"] as? [String: Any])?
-            ["playerCaptionsTracklistRenderer"] as? [String: Any]
+        let captionsDict = json["captions"] as? [String: Any]
+        let renderer = captionsDict?["playerCaptionsTracklistRenderer"] as? [String: Any]
         let raw = renderer?["captionTracks"] as? [[String: Any]] ?? []
         struct RawTrack {
             var lang: String
