@@ -1608,13 +1608,15 @@ final class JoeYtNativePlayerModel: ObservableObject {
     // MARK: Media selections (defaults + owner's manual picks)
 
     /// On an item's ready: apply the standing defaults
-    /// (subtitles vi → en, audio en) ONLY where the owner
+    /// (subtitles OFF, audio en) ONLY where the owner
     /// has not picked manually; a manual pick is captured
     /// from the outgoing item and re-applied instead
-    /// (FL-049). The assembled HLS carries the single
-    /// resolved audio rendition and no subtitle rendition
-    /// — the groups are then simply absent and this is a
-    /// no-op, which the log records once per item.
+    /// (FL-049). 2.0.46 (owner ruling 2026-11-21 02:05):
+    /// TVB YouTube titles are already Vietnamese-dubbed,
+    /// so the legible default is NO selection — the
+    /// assembled HLS still carries the subtitle
+    /// renditions for the player's own panel, where the
+    /// owner's manual pick (including a track) applies.
     private func applyMediaSelections(to item: AVPlayerItem?) {
         guard let item else { return }
         let asset = item.asset
@@ -1627,13 +1629,15 @@ final class JoeYtNativePlayerModel: ObservableObject {
                 continue
             }
             if characteristic == .legible {
-                // Locale.languageCode is deprecated
-                // since tvOS 16 (review round 7, MINOR);
-                // the supported replacement is in-slice
-                // for the tvOS 17 floor.
-                let pick = group.options.first { $0.locale?.language.languageCode?.identifier == "vi" }
-                    ?? group.options.first { $0.locale?.language.languageCode?.identifier == "en" }
-                if let pick { item.select(pick, in: group) }
+                // 2.0.46 (owner ruling 2026-11-21 02:05):
+                // subtitles start OFF — explicitly select
+                // no legible option so neither the playlist
+                // nor a system preference can surface one.
+                // AVPlayerItem.select(_:in:) takes an
+                // Optional option; passing nil deselects
+                // every option in the group (AVFoundation,
+                // AVPlayerItem.h — selectMediaOption:inGroup:).
+                item.select(nil, in: group)
             } else {
                 let pick = group.options.first { $0.locale?.language.languageCode?.identifier == "en" }
                     ?? group.defaultOption

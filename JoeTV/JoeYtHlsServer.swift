@@ -798,6 +798,13 @@ final class JoeYtHlsServer {
         // master stays byte-identical to the pre-subtitle
         // shape (no SUBTITLES declaration, no fake panel
         // entry).
+        // 2.0.46 (owner ruling 2026-11-21 02:05): TVB
+        // YouTube titles are already Vietnamese-dubbed,
+        // so subtitle renditions are PANEL-ONLY — emitted
+        // with DEFAULT=NO and AUTOSELECT=NO so nothing
+        // pre-selects them; the rendition's isDefault
+        // record no longer drives emission. The owner's
+        // manual panel pick remains available.
         var lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:6",
@@ -805,7 +812,7 @@ final class JoeYtHlsServer {
             "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"AAC\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"",
         ]
         for rendition in session.subtitles {
-            lines.append("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"\(rendition.name)\",LANGUAGE=\"\(rendition.language)\",DEFAULT=\(rendition.isDefault ? "YES" : "NO"),AUTOSELECT=YES,URI=\"subs/\(rendition.language).vtt\"")
+            lines.append("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"\(rendition.name)\",LANGUAGE=\"\(rendition.language)\",DEFAULT=NO,AUTOSELECT=NO,URI=\"subs/\(rendition.language).vtt\"")
         }
         let subtitlesAttr = session.subtitles.isEmpty ? "" : ",SUBTITLES=\"subs\""
         lines.append("#EXT-X-STREAM-INF:BANDWIDTH=\(bandwidth)\(resolution)\(codecs),AUDIO=\"aud\"\(subtitlesAttr)")
