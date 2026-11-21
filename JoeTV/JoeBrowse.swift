@@ -627,6 +627,10 @@ struct JoeWallHomeView: View {
     /// follow goes) — the same observation JoePhimHome's
     /// rail home carries.
     @ObservedObject private var followStore = FollowStore.shared
+    /// FL-352 (2.0.45, leg 5): the TVB catalogue store,
+    /// observed for the TVB Continue Watching wall rail's
+    /// poster lookup by pid (see tvbCwWallRail).
+    @ObservedObject private var ytStore = JoeYtStore.shared
     @Environment(\.joeTheme) private var theme
     @State private var filter = JoeBrowseFilter()
     /// D-20: same "a load has been attempted" gate as the rail
@@ -655,6 +659,17 @@ struct JoeWallHomeView: View {
     private var movieFavorites: [WatchStore.Entry] {
         Array(WatchStore.filterKinds(watch.favorites(),
                                      [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS, WatchStore.kindTP])
+            .prefix(WatchStore.railCap))
+    }
+
+    /// FL-352 (2.0.45, leg 5): the TVB (kindYT) progress
+    /// rows — the wall home's half of the read side (the
+    /// rail home's half is JoePhimHome.tvbProgress). Own
+    /// rail, never folded into the movie rail: a YT row
+    /// reopens by pid, not by provider route.
+    private var tvbProgress: [WatchStore.Entry] {
+        Array(WatchStore.filterKinds(watch.progress(),
+                                     [WatchStore.kindYT])
             .prefix(WatchStore.railCap))
     }
 
@@ -762,6 +777,7 @@ struct JoeWallHomeView: View {
                         .focusSection()
                     if !filter.filtersActive {
                         cwWallRail
+                        tvbCwWallRail
                         favWallRail
                         followWallRail
                     }
@@ -811,6 +827,7 @@ struct JoeWallHomeView: View {
                         wallStateSurface
                     }
                     cwWallRail
+                    tvbCwWallRail
                     favWallRail
                     followWallRail
                 }
@@ -1034,6 +1051,39 @@ struct JoeWallHomeView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// FL-352 (2.0.45, leg 5): the TVB Continue Watching
+    /// wall rail — cwWallRail's construction, with the
+    /// poster resolved from the TVB catalogue by pid and
+    /// the tap reopening the series' detail.
+    @ViewBuilder
+    private var tvbCwWallRail: some View {
+        if !tvbProgress.isEmpty {
+            Rail(title: "▶ TVB · Đang xem dở") {
+                ForEach(tvbProgress) { entry in
+                    Button { nav.ytDetail = JoeYtRoute(pid: entry.slug) } label: {
+                        PosterCard(
+                            title: entry.title,
+                            posterURL: ytStore.snapshot?.byPid[entry.slug]?.posterURL,
+                            meta: entry.epLabel,
+                            progress: entry.fraction,
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
+                            form: .rail)
+                    }
+                    .joeCardButton()
+                    .focused($entryFocus, equals: "tvbcw|" + entry.key)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            watch.removeProgress(key: entry.key)
+                        } label: {
+                            Text("Xoá khỏi Đang xem dở")
+                        }
+                    }
+                }
+            }
+            .onAppear { ytStore.ensureLoaded() }
         }
     }
 

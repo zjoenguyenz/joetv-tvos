@@ -78,9 +78,13 @@ struct JoeYtChainPlay: Equatable, Sendable {
 struct JoeYtDetail: View {
     let route: JoeYtRoute
     @EnvironmentObject private var nav: JoeNavigator
+    @EnvironmentObject private var watch: WatchStore
     @Environment(\.joeTheme) private var theme
     @ObservedObject private var ytStore = JoeYtStore.shared
     @ObservedObject private var session = JoeYtSession.shared
+    /// v2.0.45 (leg 3): the user addon store — read for
+    /// this series' backup-source match (sourceRow).
+    @ObservedObject private var addonStore = JoeAddonStore.shared
     @State private var mode: JoeYtSourceMode = .auto
     /// Super VIP press feedback: the honest above-tier
     /// message, promoted from a quiet line to the accented
@@ -97,6 +101,24 @@ struct JoeYtDetail: View {
         guard let snapshot = ytStore.snapshot,
               let series else { return nil }
         return snapshot.matchedTitleByPid[series.pid]
+    }
+
+    /// FL-352 (2.0.45, leg 5): the saved progress row for
+    /// this series (the detail never read the store
+    /// before this leg). One row per series — its latest
+    /// episode — so the row's episode is the preselect
+    /// target; the player itself resumes the position
+    /// when that episode is played.
+    private var resumeRow: WatchStore.Entry? {
+        watch.progressFor(key: WatchStore.ytProgressKey(pid: route.pid))
+    }
+
+    /// The 0-based index resumeRow names, or nil when
+    /// there is no row (or the row names no episode).
+    private var resumeIndex: Int? {
+        guard let row = resumeRow else { return nil }
+        let n = WatchStore.episodeNumber(of: row)
+        return n >= 1 ? n - 1 : nil
     }
 
     var body: some View {
@@ -134,7 +156,13 @@ struct JoeYtDetail: View {
             .padding(.horizontal, 80)
             .padding(.vertical, 60)
         }
-        .defaultFocus($epFocus, 0)
+        // FL-352 (2.0.45, leg 5): entry focus lands on
+        // the saved episode when one exists (clamped to
+        // the loaded episode list), else the first
+        // episode, exactly as before.
+        .defaultFocus($epFocus, resumeIndex.map {
+            min($0, series.eps.count - 1)
+        } ?? 0)
     }
 
     private func header(_ series: JoeYtSeries) -> some View {
@@ -198,6 +226,26 @@ struct JoeYtDetail: View {
                         }
                     }
                 }
+                // v2.0.45 (leg 3): the user addon's backup
+                // row — shown only when the addon library
+                // matched this series by name (§5.6's TVB
+                // key). The chip hands off to the addon's
+                // own detail for the series, exactly the
+                // chain chips' shape; its episodes' streams
+                // route per §5.5 there.
+                if let backup = addonStore.tvbBackup(forSeriesTitle: series.title),
+                   let base = addonStore.servingBase {
+                    sourceChip(
+                        id: "src:addon",
+                        title: "Nguồn phụ — \(addonStore.addonName)",
+                        selected: false) {
+                        nav.addonDetail = JoeAddonRoute(
+                            base: base, type: backup.type,
+                            metaId: backup.id, name: series.title,
+                            poster: series.posterURL?.absoluteString ?? "",
+                            year: "", addonName: addonStore.addonName)
+                    }
+                }
             }
             .focusSection()
             Text(mode == .auto
@@ -249,6 +297,16 @@ struct JoeYtDetail: View {
             Text("Danh sách tập")
                 .font(.system(size: 29, weight: .bold))
                 .foregroundStyle(theme.text)
+            // FL-352 (2.0.45, leg 5): the saved-position
+            // label — the row's own epLabel ("Đang xem:
+            // Tập N"), shown only when the row names an
+            // episode this series actually carries.
+            if let row = resumeRow, let ri = resumeIndex,
+               ri < series.eps.count {
+                Text(row.epLabel)
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(JoeTheme.okGreen)
+            }
             // Lazy by requirement (design §1.5): a 444-episode
             // series scrolls as cheaply as a 20-episode one.
             LazyVStack(alignment: .leading, spacing: 14) {

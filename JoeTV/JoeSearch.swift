@@ -50,6 +50,17 @@ struct JoeSearchView: View {
     @State private var typeAheadTask: Task<Void, Never>?
     @FocusState private var focusedMovie: Movie.ID?
     @FocusState private var retryFocused: Bool
+    // v2.0.45 (leg 3): the user addon's search group —
+    // its own state beside the round's pools (the addon
+    // branch rides the round generation but stays out of
+    // the branch bookkeeping and the snapshot rule).
+    @ObservedObject private var addonStore = JoeAddonStore.shared
+    /// v2.0.45 (leg 3): the TVB catalogue store — read
+    /// for the addon search branch's match snapshot.
+    @ObservedObject private var ytStore = JoeYtStore.shared
+    @State private var addonResults: [TorMeta] = []
+    @State private var addonGroupName = ""
+    @FocusState private var focusedAddon: String?
 
     /// The top area's focus landing (v2.0.17): a letter-strip
     /// key or the Quay lại button — see JoeSearchKeyFocus.
@@ -241,6 +252,7 @@ struct JoeSearchView: View {
                             }
                         }
                     }
+                    addonGroupRail
                 }
                 .padding(.vertical, 8)
             }
@@ -264,6 +276,11 @@ struct JoeSearchView: View {
             // now the hard boundary nothing crosses.
         } else {
             ScrollView(.vertical, showsIndicators: false) {
+                // v2.0.45 (leg 3): the grid and the addon
+                // group stack in one column — the group
+                // rides below the provider grid (and still
+                // shows when the providers found nothing).
+                VStack(alignment: .leading, spacing: 40) {
                 // Fixed 6 columns (was .adaptive(minimum: 240)).
                 // v2.0.8 (Phase 1): no arithmetic routing any
                 // more — resultMove is deleted and the engine
@@ -283,6 +300,8 @@ struct JoeSearchView: View {
                 // grows past it under D so the outer columns'
                 // rings are never clipped by the scroll frame.
                 .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
+                addonGroupRail
+                }
             }
             // v2.0.12 (search overlap fix): CLIPS at its
             // frame, same as the source-board branch above —
@@ -322,6 +341,56 @@ struct JoeSearchView: View {
         }
         .joeCardButton()
         .focused($focusedMovie, equals: "search|" + movie.id)
+    }
+
+    // v2.0.45 (leg 3): the user addon's search group. The
+    // branch rides the round generation (a stale round's
+    // answer never lands) but stays OUT of the branch
+    // bookkeeping: the addon's silence never fails a
+    // round, and its hits never enter the snapshot rule.
+    // Results are match-filtered in the store (a title
+    // the app already carries gets no duplicate card).
+    private func runAddonBranch(gen: Int, kw: String) {
+        addonResults = []
+        addonGroupName = ""
+        guard addonStore.hasAddon else { return }
+        Task {
+            let found = await addonStore.search(
+                keyword: kw, movies: storeMovies(),
+                tvbSeries: ytStore.snapshot?.series ?? [])
+            guard gen == roundID else { return }
+            addonGroupName = found.name
+            addonResults = found.metas
+        }
+    }
+
+    @ViewBuilder
+    private var addonGroupRail: some View {
+        if !addonResults.isEmpty {
+            Rail(title: "\(addonGroupName) — \(addonResults.count) kết quả") {
+                ForEach(addonResults) { meta in
+                    addonCard(meta)
+                }
+            }
+        }
+    }
+
+    private func addonCard(_ meta: TorMeta) -> some View {
+        Button {
+            if let base = addonStore.servingBase {
+                nav.addonDetail = JoeAddonRoute(
+                    base: base, type: meta.type, metaId: meta.id,
+                    name: meta.name, poster: meta.poster,
+                    year: meta.year, addonName: addonStore.addonName)
+            }
+        } label: {
+            PosterCard(
+                title: meta.name,
+                posterURL: meta.posterURL,
+                meta: meta.year)
+        }
+        .joeCardButton()
+        .focused($focusedAddon, equals: "addon|" + meta.type + "|" + meta.id)
     }
 
     // v2.0.8 (Phase 1): resultMove is DELETED — result
@@ -407,6 +476,8 @@ struct JoeSearchView: View {
         localPool = []
         serverPool = []
         results = []
+        addonResults = []
+        addonGroupName = ""
     }
 
     private func runSearch() {
@@ -430,6 +501,7 @@ struct JoeSearchView: View {
             results = Self.renderPool(local: snap.local,
                                       server: snap.server, query: kw)
             LoadSignpost.log("JOESEARCH snapshot query=\"\(kw)\" results=\(results.count)")
+            runAddonBranch(gen: roundID, kw: kw)
             return
         }
 
@@ -451,6 +523,7 @@ struct JoeSearchView: View {
         serverPool = []
         results = Self.renderPool(local: hits, server: [], query: kw)
         if !hits.isEmpty { logFirstPaint(localHits: hits.count) }
+        runAddonBranch(gen: gen, kw: kw)
 
         // 2. Branch fan-out with progressive merge.
         for code in Providers.priority {

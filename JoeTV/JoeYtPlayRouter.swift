@@ -261,6 +261,14 @@ struct JoeYtPlayRouter: View {
     @StateObject private var model: JoeYtPlayRouterModel
     @ObservedObject private var identity = JoeYtIdentity.shared
     @FocusState private var retryFocused: Bool
+    /// FL-353 (2.0.45, leg 6): the membersLocked and
+    /// loading slates each own a focus slot for their new
+    /// back button — a slate with NO focusable element
+    /// never receives Menu (its .onExitCommand is dead),
+    /// which is exactly how the SVIP slate trapped the
+    /// owner out to the tvOS Home screen.
+    @FocusState private var membersLockedFocused: Bool
+    @FocusState private var loadingFocused: Bool
 
     init(request: JoeYtPlayRequest) {
         self.request = request
@@ -323,11 +331,29 @@ struct JoeYtPlayRouter: View {
                 Text("\(request.seriesTitle) · Tập \(request.startIndex + 1) / \(request.videoIds.count)")
                     .font(.system(size: 24))
                     .foregroundStyle(.white.opacity(0.7))
+                // FL-353 sweep (2.0.45, leg 6): the same
+                // latent trap as the SVIP slate — a
+                // text-only slate owns no focus, so Menu
+                // fell through to the system while a slow
+                // resolve ran. A real button makes this
+                // slate's own .onExitCommand reachable.
+                Button {
+                    DiagLog.write("YT-ROUTE", "slate loading — về detail (trigger=nút)")
+                    nav.ytPlayer = nil
+                } label: {
+                    JoeSecondaryLabel(title: "Quay lại")
+                }
+                .joeCardButton()
+                .focused($loadingFocused)
             }
         }
         // Own-root Menu handler while resolving (the
         // player surfaces carry their own once up).
-        .onExitCommand { nav.ytPlayer = nil }
+        .onExitCommand {
+            DiagLog.write("YT-ROUTE", "slate loading — về detail (trigger=menu)")
+            nav.ytPlayer = nil
+        }
+        .defaultFocus($loadingFocused, true)
     }
 
     /// The honest above-tier slate: the live /player
@@ -349,10 +375,32 @@ struct JoeYtPlayRouter: View {
                 Text("Bấm Menu để quay lại danh sách tập.")
                     .font(.system(size: 24))
                     .foregroundStyle(theme.meta)
+                // FL-353 (2.0.45, leg 6): the fix itself.
+                // This slate was Text-only — no focusable
+                // element, no default focus — so its
+                // .onExitCommand never received Menu and
+                // the press fell to the system, exiting
+                // the app. The button below is
+                // failureSlate's exact construction; with
+                // it focused by default, Menu reaches the
+                // slate's own handler again and the text
+                // above tells the truth.
+                Button {
+                    DiagLog.write("YT-ROUTE", "slate membersLocked — về detail (trigger=nút)")
+                    nav.ytPlayer = nil
+                } label: {
+                    JoeSecondaryLabel(title: "Quay lại danh sách tập")
+                }
+                .joeCardButton()
+                .focused($membersLockedFocused)
             }
             .padding(.horizontal, 80)
         }
-        .onExitCommand { nav.ytPlayer = nil }
+        .onExitCommand {
+            DiagLog.write("YT-ROUTE", "slate membersLocked — về detail (trigger=menu)")
+            nav.ytPlayer = nil
+        }
+        .defaultFocus($membersLockedFocused, true)
     }
 
     private func failureSlate(_ text: String) -> some View {
@@ -442,6 +490,29 @@ struct JoeYtDeviceCodeView: View {
                         .font(.system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
+                // FL-353 sweep (2.0.45, leg 6): both
+                // WAITING branches (the ~40 s code display
+                // and the spinner) had no focusable element
+                // at all — .defaultFocus pointed at the
+                // error branch's button, which does not
+                // exist here — so Menu fell through to the
+                // system exactly as on the SVIP slate. The
+                // Huỷ button below is the waiting branches'
+                // own exit; it shares retryFocused because
+                // the branches are mutually exclusive (only
+                // one button exists at a time). Its action
+                // is the .onExitCommand body, verbatim.
+                if identity.flowError == nil {
+                    Button {
+                        DiagLog.write("YT-ROUTE", "slate device-code — về detail (trigger=nút)")
+                        identity.cancelDeviceCodeFlow()
+                        nav.ytPlayer = nil
+                    } label: {
+                        JoeSecondaryLabel(title: "Huỷ")
+                    }
+                    .joeCardButton()
+                    .focused($retryFocused)
+                }
                 Text("\(request.seriesTitle) · Tập \(request.startIndex + 1)")
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
@@ -449,6 +520,7 @@ struct JoeYtDeviceCodeView: View {
             .padding(.horizontal, 80)
         }
         .onExitCommand {
+            DiagLog.write("YT-ROUTE", "slate device-code — về detail (trigger=menu)")
             identity.cancelDeviceCodeFlow()
             nav.ytPlayer = nil
         }

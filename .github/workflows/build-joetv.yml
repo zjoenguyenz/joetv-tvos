@@ -52,8 +52,9 @@ jobs:
           TORBOX_TOKEN: ${{ secrets.TORBOX_TOKEN }}
           PREMIUMIZE_TOKEN: ${{ secrets.PREMIUMIZE_TOKEN }}
           MF_URL: ${{ secrets.MF_URL }}
+          RETV_URL: ${{ secrets.RETV_URL }}
         run: |
-          printf 'enum BundledTokens {\n    static let rdToken = "%s"\n    static let torboxToken = "%s"\n    static let premiumizeToken = "%s"\n    static let mfURL = "%s"\n}\n' "$RD_TOKEN" "$TORBOX_TOKEN" "$PREMIUMIZE_TOKEN" "$MF_URL" > JoeTV/BundledTokens.swift
+          printf 'enum BundledTokens {\n    static let rdToken = "%s"\n    static let torboxToken = "%s"\n    static let premiumizeToken = "%s"\n    static let mfURL = "%s"\n    static let retvURL = "%s"\n}\n' "$RD_TOKEN" "$TORBOX_TOKEN" "$PREMIUMIZE_TOKEN" "$MF_URL" "$RETV_URL" > JoeTV/BundledTokens.swift
 
       - name: Generate Xcode project
         run: xcodegen generate

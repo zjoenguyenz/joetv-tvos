@@ -31,6 +31,9 @@ struct JoeSettingsView: View {
     /// v2.0.16: the MediaFusion gateway's field + kill-switch.
     @State private var mfURL: String = TorrentSettings.mfURL
     @State private var mfEnabled: Bool = TorrentSettings.mfEnabled
+    /// v2.0.45 (leg 3): the user-addon link's field (re TV
+    /// is the first addon) — the MF field's storage shape.
+    @State private var userAddonURL: String = TorrentSettings.userAddonURL
     /// v2.0.24: the Thể Thao Torrent primary source's field
     /// (Nuvio — the Sony 2.3.37 Settings parity).
     @State private var sportsURL: String = TorrentSettings.sportsURL
@@ -165,6 +168,28 @@ struct JoeSettingsView: View {
                 }
                 .joeCardButton()
                 .focused($mfToggleFocused)
+                // v2.0.45 (leg 3): the user-addon link —
+                // the owner's own Stremio addon (re TV is
+                // the first) as a library section + backup
+                // stream source. The field is the MF
+                // field's exact config (secure, paste,
+                // bundled fallback status); its focus id
+                // is "useraddon" — the design's "addon" id
+                // is already the Torrentio field's in this
+                // file, and two fields may not share one
+                // focus identity.
+                field(title: "Link Addon (tuỳ chọn)",
+                      hint: "Dán link manifest của addon Stremio anh muốn thêm (ví dụ re TV). Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
+                      text: $userAddonURL, id: "useraddon", secure: true, allowsPaste: true,
+                      status: fieldStatus(stored: TorrentSettings.userAddonURL,
+                                          secret: false,
+                                          bundledFallback: BundledTokens.retvURL,
+                                          bundledText: "Chưa điền — đang dùng link addon tích hợp sẵn ✓",
+                                          emptyText: "Chưa điền — chưa có link addon nào"),
+                      inForce: !TorrentSettings.userAddonURL
+                                   .trimmingCharacters(in: .whitespaces).isEmpty
+                               || !BundledTokens.retvURL
+                                   .trimmingCharacters(in: .whitespaces).isEmpty)
                 // v2.0.24: the Thể Thao Torrent tab's primary
                 // source (Sony 2.3.37 parity). Empty = the
                 // Nuvio public instance; the owner can paste
@@ -321,6 +346,7 @@ struct JoeSettingsView: View {
         .onChange(of: premiumizeToken) { save() }
         .onChange(of: mfURL) { save() }
         .onChange(of: mfEnabled) { save() }
+        .onChange(of: userAddonURL) { save() }
         .onChange(of: sportsURL) { save() }
         .onChange(of: subAddonURL) { save() }
         .onChange(of: tmdbKey) { save() }
@@ -852,6 +878,7 @@ struct JoeSettingsView: View {
         TorrentSettings.premiumizeToken = premiumizeToken.trimmingCharacters(in: .whitespaces)
         TorrentSettings.mfURL = mfURL.trimmingCharacters(in: .whitespaces)
         TorrentSettings.mfEnabled = mfEnabled
+        TorrentSettings.userAddonURL = userAddonURL.trimmingCharacters(in: .whitespaces)
         TorrentSettings.sportsURL = sportsURL.trimmingCharacters(in: .whitespaces)
         TorrentSettings.subAddonURL = subAddonURL.trimmingCharacters(in: .whitespaces)
         UserDefaults.standard.set(tmdbKey.trimmingCharacters(in: .whitespaces),

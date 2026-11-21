@@ -14,14 +14,18 @@ import AVKit
 //   (hiding the ~2.4 s solver cost) and inserted into the
 //   same queue — prefetch depth is 1, never a second
 //   player pulling media in parallel (FL-065).
-// - Auto-advance is the queue's own. Manual next rides
-//   the window-level press consumer (the bridge's proven
-//   routing): it takes ONLY the Right-arrow press — the
-//   owner's settled YouTube priorities are full-screen,
-//   next-episode and auto-next, with seeking dropped —
-//   and declines everything else so the native player's
-//   own transport (play/pause, the Down-panel with the
-//   subtitle/audio pickers) is untouched.
+// - Auto-advance is the queue's own. Manual next lives
+//   in the player's OWN transport bar
+//   (AVPlayerViewController.transportBarCustomMenuItems —
+//   the Q1 ruling): NO press is consumed on this surface.
+//   The window-level press consumer that used to eat
+//   Right-arrow here is DELETED (FL-349): it starved the
+//   native seek and broke the subtitle panel, because it
+//   fired panel-unaware while the panel was open. Right/
+//   Left are the native seek, the Down-panel with the
+//   subtitle/audio pickers is fully native, and a manual
+//   advance fires through a readiness gate (below) so it
+//   never jumps into an item that cannot frame yet.
 // - NO focusable SwiftUI buttons overlay the player
 //   (the 2026-11-20 11:15 device lesson: AVPlayerView-
 //   Controller traps focus — overlay buttons are
@@ -103,6 +107,64 @@ final class JoeYtNativePlayerModel: ObservableObject {
     /// supervisor's transition bookkeeping confirms the
     /// queued item actually became current.
     private var queuedPlayable: JoeYtPlayable?
+    /// FL-349 (2.0.45, leg 1): the HLS session behind
+    /// the prefetched queue entry (the makeSession
+    /// handle), kept beside queuedItem so the advance
+    /// gate can ask the server whether the item's first
+    /// media byte has actually been served. Nil for
+    /// non-assembly items.
+    private var queuedSessionID: String?
+    /// FL-351 Branch D (2.0.45, leg 4): the height of
+    /// the variant ACTUALLY in the player / in the
+    /// queue — the figure the status pill and the start
+    /// veil speak. Probe 18 closed every client door
+    /// above the per-title ceiling, so the app states
+    /// the true level instead of leaving it to
+    /// guesswork (§6.3 Branch D). Tracked per BUILT
+    /// item, not per playable: an assembly build that
+    /// fell back to the muxed file plays the muxed
+    /// height, and the label follows the item. Assigned
+    /// wherever an item is built for currency (start,
+    /// recovery, the muxed swap) and promoted with the
+    /// queue bookkeeping in the transition block.
+    private var currentItemHeight = 0
+    private var queuedItemHeight = 0
+
+    /// The spoken quality label for a variant height
+    /// ("480p"); empty when the height is unknown (an
+    /// HLS-manifest playable carries no fixed variant) —
+    /// the display then says nothing rather than
+    /// guessing.
+    static func qualityText(height: Int) -> String {
+        height > 0 ? "\(height)p" : ""
+    }
+
+    /// The starting episode's quality label (the veil).
+    /// Once the first item is BUILT, its own height is
+    /// the truth (an assembly build that fell back to
+    /// the muxed file plays the muxed height — gate
+    /// round 1, B-1); before the build lands, the
+    /// playable's height is the only figure there is.
+    var startingQualityLabel: String {
+        Self.qualityText(height: currentItemHeight > 0
+                         ? currentItemHeight : firstPlayable.height)
+    }
+    /// FL-349 (2.0.45, leg 1): the manual-advance
+    /// readiness gate's stamp. A MANUAL advance (the
+    /// transport-bar menu action — the only manual
+    /// entry) stamps the moment it arms; the advance
+    /// then fires only when the queued item can
+    /// actually frame (readyToPlay + ≥3 s buffered, or
+    /// the session's first media byte served), checked
+    /// at the arm-consumption points and on every
+    /// supervisor tick, with a hard 10 s cap after
+    /// which it fires anyway. Queue auto-advance and
+    /// the episode-end paths never stamp — the gate
+    /// binds manual advance only. The FL-330
+    /// advancePending lifecycle is untouched: the stamp
+    /// is a condition ON TOP of its consumption points,
+    /// never a replacement for them.
+    private var gatedAdvanceArmedAt: Date?
     /// FL-347: the muxed swap tier's spent flag — ONE
     /// muxed attempt per episode, reset exactly where
     /// recoverySpent resets (the transition block and
@@ -140,7 +202,7 @@ final class JoeYtNativePlayerModel: ObservableObject {
     private var stallObserver: NSObjectProtocol?
     /// FL-343 (A) paused-limbo bookkeeping. The leg's
     /// precondition is POSITIVE evidence the pause is
-    /// not the owner's: performAdvance() stamps the
+    /// not the owner's: fireAdvance() stamps the
     /// moment (and playhead) of a model-issued
     /// advanceToNextItem, and the stamp lives until the
     /// supervisor's transition bookkeeping confirms the
@@ -190,6 +252,24 @@ final class JoeYtNativePlayerModel: ObservableObject {
     /// moved — the JoePlayerView points, §3.4).
     private var ticksSinceSave = 0
     private var lastSavedPosition: Double = -1
+    /// FL-352 (2.0.45, leg 5): the nil-store save skip is
+    /// logged ONCE per player session. The view attaches
+    /// the store before start(), so a nil here means the
+    /// wiring broke — the log must say so instead of the
+    /// save dying silently (the banned silent-guard
+    /// pattern on a user-data write path).
+    private var nilStoreSaveLogged = false
+    /// FL-352 (2.0.45, leg 5): the resume candidate for
+    /// the STARTING episode, read from the store in
+    /// start() BEFORE any save of this session can
+    /// overwrite the row (the first-frame force save
+    /// writes the live ~0 position). Nil = no row for
+    /// this episode (or no store). Evaluated once, in
+    /// the supervisor's first playing tick after the
+    /// first frame.
+    private var resumeCandidateSeconds: Double?
+    private var resumeCandidateDuration: Double = 0
+    private var resumeEvaluated = false
     /// The CURRENT item's duration, refreshed by the
     /// supervisor on every tick while that item is
     /// current (review count round 1, Lens A F-2): at
@@ -229,6 +309,19 @@ final class JoeYtNativePlayerModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        // FL-352 (2.0.45, leg 5): capture the resume
+        // candidate for the starting episode NOW, before
+        // this session's saves can overwrite the row. The
+        // store keeps ONE row per series (its latest
+        // episode), so the candidate applies only when
+        // the row's episode IS the starting one — a row
+        // for another episode counts as no row at all.
+        if let store = watchStore,
+           let row = store.progressFor(key: WatchStore.ytProgressKey(pid: request.pid)),
+           WatchStore.episodeNumber(of: row) == request.startIndex + 1 {
+            resumeCandidateSeconds = Double(row.pos) / 1000
+            resumeCandidateDuration = Double(row.dur) / 1000
+        }
         player.automaticallyWaitsToMinimizeStalling = true
         startSupervisor()
         // The initial build chain carries the attempt
@@ -239,7 +332,7 @@ final class JoeYtNativePlayerModel: ObservableObject {
         let startAttempt = attempt
         Task { [weak self] in
             guard let self else { return }
-            let item = await self.buildItem(for: self.firstPlayable)
+            let built = await self.buildItem(for: self.firstPlayable)
             // If stop() landed during buildItem, this
             // completion is stale twice over (terminal +
             // the attempt bump in stop()). A session the
@@ -251,11 +344,13 @@ final class JoeYtNativePlayerModel: ObservableObject {
             // (review round 7, MINOR — accepted residue,
             // recorded here rather than hidden).
             guard !self.terminal, self.attempt == startAttempt else { return }
-            guard let item else {
+            guard let built else {
                 self.handOverToPageFallback(reason: "không dựng được item đầu tiên — assembly chết và không có muxed dự phòng")
                 return
             }
+            let item = built.item
             self.currentPlayable = self.firstPlayable
+            self.currentItemHeight = built.height
             self.currentItemFramed = false
             self.player.replaceCurrentItem(with: item)
             self.observeCurrentItem(item)
@@ -277,7 +372,12 @@ final class JoeYtNativePlayerModel: ObservableObject {
         // the last vouched position of the episode on
         // screen leaves with the player.
         saveProgressSnapshot()
-        JoeWebBridge.setRemotePressConsumer(nil)
+        // FL-349 (2.0.45, leg 1): no consumer clear here
+        // any more — this model owns no press consumer
+        // at all (registerPressConsumer is deleted), so
+        // there is nothing to clear, and clearing would
+        // have risked un-registering the PAGE surface's
+        // own consumer on a surface swap.
         // Reset the prefetch bookkeeping synchronously —
         // the cancelled task's defer only runs if the
         // model is still alive to execute it (review
@@ -310,20 +410,32 @@ final class JoeYtNativePlayerModel: ObservableObject {
 
     /// Item construction (assembly sessions are
     /// created here; the result is applied by the caller
-    /// under its attempt token).
-    private func buildItem(for playable: JoeYtPlayable) async -> AVPlayerItem? {
+    /// under its attempt token). FL-349 (2.0.45, leg 1):
+    /// the result also carries the assembly session's id
+    /// (the makeSession handle) so a QUEUED item's
+    /// readiness can be checked against the server's
+    /// first-media-served record; nil for direct items.
+    /// FL-351 Branch D (2.0.45, leg 4): the result also
+    /// carries the height of the variant the item
+    /// ACTUALLY plays — the assembly height on the
+    /// session path, the MUXED height when the build
+    /// fell back to the muxed file — the figure the
+    /// player's quality label speaks.
+    private func buildItem(for playable: JoeYtPlayable)
+        async -> (item: AVPlayerItem, sessionID: String?, height: Int)? {
         switch playable.kind {
         case .hlsManifest, .muxed:
             guard let url = playable.directURL else { return nil }
-            return AVPlayerItem(url: url)
+            return (AVPlayerItem(url: url), nil, playable.height)
         case .assembly:
-            if let url = await JoeYtHlsServer.shared.makeSession(
+            if let session = await JoeYtHlsServer.shared.makeSession(
                 playable: playable, userAgent: JoeYtClientSpec.tvSamsung.userAgent) {
-                return AVPlayerItem(url: url)
+                return (AVPlayerItem(url: session.url), session.sessionID,
+                        playable.height)
             }
             if let fallback = playable.fallbackDirectURL {
                 log("assembly server không khởi động được — rơi xuống bản muxed dự phòng")
-                return AVPlayerItem(url: fallback)
+                return (AVPlayerItem(url: fallback), nil, playable.fallbackHeight)
             }
             return nil
         }
@@ -398,6 +510,14 @@ final class JoeYtNativePlayerModel: ObservableObject {
         switch status {
         case .readyToPlay:
             applyMediaSelections(to: player.currentItem)
+            // FL-350 (2.0.45, leg 2): the apply point's
+            // own evidence line — what each group actually
+            // selected for THIS item, read back from the
+            // item after the apply. (The comment inside
+            // applyMediaSelections long claimed a per-item
+            // log; this line is that log, at the call
+            // point, once per item.)
+            log("media selection ep=\(currentIndex + 1): legible=\(selectionLanguage(of: player.currentItem, characteristic: .legible)) audible=\(selectionLanguage(of: player.currentItem, characteristic: .audible))")
         case .failed:
             let message = errorText
                 ?? "item failed (không có error text)"
@@ -486,9 +606,24 @@ final class JoeYtNativePlayerModel: ObservableObject {
             currentIndex = index
             queuedItem = nil
             queuedIndex = nil
+            queuedSessionID = nil
+            // FL-351 (leg 4): the queued variant's height
+            // becomes the playing variant's height.
+            currentItemHeight = queuedItemHeight
+            queuedItemHeight = 0
             // An arm the natural advance just satisfied is
             // spent (review round 2, BLOCKER 1).
             advancePending = false
+            // FL-349 (2.0.45, leg 1): a MANUAL advance the
+            // natural queue advance just satisfied is
+            // spent too — the gate stamp and its pill clear
+            // with the transition that consumed them.
+            if gatedAdvanceArmedAt != nil {
+                gatedAdvanceArmedAt = nil
+                if statusLine == "Đang tải tập tiếp theo…" {
+                    statusLine = nil
+                }
+            }
             recoverySpent = false
             // FL-347: the new episode gets its own muxed
             // budget, and the prefetched playable is
@@ -511,9 +646,75 @@ final class JoeYtNativePlayerModel: ObservableObject {
             playStartedAt = Date()
             observeCurrentItem(player.currentItem)
             phase = .playing
-            flashStatus("Tập \(currentIndex + 1)")
+            // FL-351 Branch D (leg 4): the pill states the
+            // level actually playing — the promoted
+            // item's own height — beside the episode.
+            let pillQuality = Self.qualityText(height: currentItemHeight)
+            flashStatus(pillQuality.isEmpty
+                        ? "Tập \(currentIndex + 1)"
+                        : "Tập \(currentIndex + 1) · \(pillQuality)")
             log("đã qua tập — currentItem là ep=\(currentIndex + 1) (đọc cùng đại lượng: item identity)")
             startPrefetch()
+        }
+
+        // FL-349 (2.0.45, leg 1): the manual-advance
+        // readiness gate's tick. A stamped advance whose
+        // item is not yet ready waits here (the pill the
+        // arm raised says so) until the item can actually
+        // frame; past the hard 10 s cap it fires anyway —
+        // the pre-gate behaviour — rather than stranding
+        // the owner's press. A stamp whose item never
+        // landed is simply spent at the cap: the
+        // advancePending / prefetch machinery still owns
+        // that advance itself.
+        if let armedAt = gatedAdvanceArmedAt {
+            let age = Date().timeIntervalSince(armedAt)
+            // Gate round 2 (C2-1): the spend-without-firing
+            // belongs ONLY to the terminal slates (.failed /
+            // .ended). In .starting the gate evaluates
+            // exactly as in .playing — a stamp can
+            // legitimately be live there (the transport
+            // menu is installed during .starting and the
+            // queued item can already exist), and spending
+            // it there would silently drop the owner's
+            // press, or un-gate it via advancePending.
+            let onTerminalSlate: Bool
+            switch phase {
+            case .failed, .ended: onTerminalSlate = true
+            case .starting, .playing: onTerminalSlate = false
+            }
+            if onTerminalSlate {
+                // If the episode failed or ended while the
+                // gate waited, the arm is spent WITHOUT
+                // firing — advancing out of the failure
+                // slate would hide the failure the owner
+                // must see and answer.
+                gatedAdvanceArmedAt = nil
+                if statusLine == "Đang tải tập tiếp theo…" {
+                    statusLine = nil
+                }
+            } else if queuedItem != nil, !opInFlight {
+                if gateReadiness().itemReady {
+                    gatedAdvanceArmedAt = nil
+                    if statusLine == "Đang tải tập tiếp theo…" {
+                        statusLine = nil
+                    }
+                    fireAdvance()
+                    log("advance fired — sẵn sàng sau \(Int(age * 1000))ms")
+                } else if age > 10 {
+                    gatedAdvanceArmedAt = nil
+                    if statusLine == "Đang tải tập tiếp theo…" {
+                        statusLine = nil
+                    }
+                    fireAdvance()
+                    log("advance fired — quá trần 10s, bắn cưỡng bức")
+                }
+            } else if age > 10 {
+                gatedAdvanceArmedAt = nil
+                if statusLine == "Đang tải tập tiếp theo…" {
+                    statusLine = nil
+                }
+            }
         }
 
         // Refresh the tracked duration from the item
@@ -560,6 +761,15 @@ final class JoeYtNativePlayerModel: ObservableObject {
             if ticksSinceSave >= 30, position.isFinite,
                abs(position - lastSavedPosition) >= 5 {
                 saveProgressSnapshot()
+            }
+            // FL-352 (2.0.45, leg 5): the resume seek,
+            // evaluated ONCE, on the first playing tick
+            // after the first frame (the candidate was
+            // captured in start(), before this session's
+            // saves could overwrite the row).
+            if !resumeEvaluated, firstFrameLogged {
+                resumeEvaluated = true
+                evaluateResume()
             }
         } else if status == .waitingToPlayAtSpecifiedRate {
             // 2.0.44 watchdog (spec §5.2): TWO thresholds
@@ -631,7 +841,7 @@ final class JoeYtNativePlayerModel: ObservableObject {
     ///
     /// The leg's precondition is the model's OWN
     /// unconfirmed advance (see the stamp's declaration):
-    /// performAdvance() issued advanceToNextItem and the
+    /// fireAdvance() issued advanceToNextItem and the
     /// transition bookkeeping never confirmed it. That
     /// stamp is something a user pause can never
     /// produce, so the leg is safe for the owner's pause
@@ -730,7 +940,8 @@ final class JoeYtNativePlayerModel: ObservableObject {
             }
             switch result {
             case .playable(let playable, _):
-                if let item = await self.buildItem(for: playable) {
+                if let built = await self.buildItem(for: playable) {
+                    let item = built.item
                     guard !self.terminal, self.attempt == myAttempt else {
                         self.opInFlight = false
                         return
@@ -744,6 +955,7 @@ final class JoeYtNativePlayerModel: ObservableObject {
                     // current from THIS playable — retain
                     // it (and restart its startup window).
                     self.currentPlayable = playable
+                    self.currentItemHeight = built.height
                     self.currentItemFramed = false
                     self.player.replaceCurrentItem(with: item)
                     self.observeCurrentItem(item)
@@ -763,6 +975,8 @@ final class JoeYtNativePlayerModel: ObservableObject {
                         self.queuedItem = nil
                         self.queuedIndex = nil
                         self.queuedPlayable = nil
+                        self.queuedSessionID = nil
+                        self.queuedItemHeight = 0
                         self.log("recovery: item prefetch không còn trong hàng đợi sau replace — dọn sổ, prefetch lại")
                         self.startPrefetch()
                     }
@@ -863,6 +1077,9 @@ final class JoeYtNativePlayerModel: ObservableObject {
               let muxedURL = playable.fallbackDirectURL else { return false }
         muxedSpent = true
         log("lùi muxed 18 — lý do: \(reason)")
+        // FL-351 (leg 4): the item now playing is the
+        // muxed variant — the spoken height follows it.
+        currentItemHeight = playable.fallbackHeight
         let item = AVPlayerItem(url: muxedURL)
         player.replaceCurrentItem(with: item)
         observeCurrentItem(item)
@@ -874,6 +1091,8 @@ final class JoeYtNativePlayerModel: ObservableObject {
             queuedItem = nil
             queuedIndex = nil
             queuedPlayable = nil
+            queuedSessionID = nil
+            queuedItemHeight = 0
             log("muxed swap: item prefetch không còn trong hàng đợi sau replace — dọn sổ, prefetch lại")
             startPrefetch()
         }
@@ -923,7 +1142,19 @@ final class JoeYtNativePlayerModel: ObservableObject {
     /// shared 40-row progress store.
     private func saveProgressSnapshot(force: Bool = false,
                                       durationOverride: Double? = nil) {
-        guard let store = watchStore else { return }
+        guard let store = watchStore else {
+            // FL-352 (2.0.45, leg 5): a save path with no
+            // store attached is a wiring fault, not a
+            // state to pass over in silence — logged once
+            // per session (this function is called from
+            // stop() and the periodic ticks; once is
+            // evidence, more is spam).
+            if !nilStoreSaveLogged {
+                nilStoreSaveLogged = true
+                log("progress save BỎ QUA — watchStore chưa gắn (nil)")
+            }
+            return
+        }
         var position = checkpointSeconds
         let live = player.currentTime().seconds
         if live.isFinite, live > position { position = live }
@@ -950,8 +1181,41 @@ final class JoeYtNativePlayerModel: ObservableObject {
         }
         entry.ts = Int64(Date().timeIntervalSince1970 * 1000)
         store.saveProgress(entry)
+        // FL-352 (2.0.45, leg 5): the write side's own
+        // evidence line — FL-352's conviction rested on
+        // the save being healthy, and the acceptance
+        // check pairs this line with the rail row on the
+        // read side (two-ended evidence).
+        log("progress save — yt|\(request.pid) ep=\(currentIndex + 1) pos=\(Int(position))s")
         lastSavedPosition = position
         ticksSinceSave = 0
+    }
+
+    /// FL-352 (2.0.45, leg 5): apply the resume
+    /// candidate captured in start(), or log why it does
+    /// not apply. The thresholds are the house resume
+    /// rule: at least 5 s in (a smaller position is a
+    /// fresh start, not a resume) and at least 30 s left
+    /// before the episode's end (a position inside that
+    /// tail is a finished episode, not a resume).
+    private func evaluateResume() {
+        guard let pos = resumeCandidateSeconds else {
+            log("resume — bỏ qua (không có hàng)")
+            return
+        }
+        if pos < 5 {
+            log("resume — bỏ qua (pos<5s)")
+            return
+        }
+        let duration = currentDurationSeconds > 0
+            ? currentDurationSeconds : resumeCandidateDuration
+        if duration > 0, duration - pos < 30 {
+            log("resume — bỏ qua (sát cuối tập)")
+            return
+        }
+        player.seek(to: CMTime(seconds: pos, preferredTimescale: 600))
+        checkpointSeconds = pos
+        log("resume — yt|\(request.pid) ep=\(currentIndex + 1) tại \(Int(pos))s")
     }
 
     private func terminalFailure(reason: String) {
@@ -1052,17 +1316,25 @@ final class JoeYtNativePlayerModel: ObservableObject {
                 self.handOffArmedAdvance()
                 return
             }
-            guard let item = await self.buildItem(for: playable) else {
+            guard let built = await self.buildItem(for: playable) else {
                 self.log("prefetch ep=\(nextIndex + 1): dựng item thất bại")
                 self.handOffArmedAdvance()
                 return
             }
+            let item = built.item
             guard !self.terminal, !Task.isCancelled,
                   self.currentIndex + 1 == nextIndex, self.queuedItem == nil
             else { return }
             self.player.insert(item, after: nil)
             self.queuedItem = item
             self.queuedIndex = nextIndex
+            // FL-349 (leg 1): the session handle rides
+            // beside the queued item for the gate's
+            // first-media-served check.
+            self.queuedSessionID = built.sessionID
+            // FL-351 (leg 4): the queued variant's height
+            // rides beside it, promoted at the transition.
+            self.queuedItemHeight = built.height
             // FL-347: retained for the promotion at the
             // supervisor's transition confirmation —
             // prefetch alone never touches currentPlayable.
@@ -1074,60 +1346,106 @@ final class JoeYtNativePlayerModel: ObservableObject {
             // recovery then replaceCurrentItem back would
             // desync the index bookkeeping from the
             // screen. The recovery completion consumes
-            // the arm instead.
+            // the arm instead. FL-349 (leg 1): the
+            // consumption passes through the readiness
+            // gate — a stamped MANUAL advance fires here
+            // only when the item is ready, else the
+            // supervisor tick owns it (with the 10 s cap).
             if self.advancePending, !self.opInFlight {
                 self.advancePending = false
-                self.performAdvance()
+                self.consumeAdvance()
             }
         }
     }
 
-    // MARK: Manual next (Right-arrow press)
+    // MARK: Manual next (transport-bar menu — FL-349)
 
-    /// The window-level press consumer (bridge routing):
-    /// registered while this player is on screen, it
-    /// takes ONLY Right-arrow — the next-episode press —
-    /// and declines everything else (PlayPause, Select,
-    /// arrows for the player's own panel, Menu above all:
-    /// the bridge never offers Menu).
-    func registerPressConsumer() {
-        JoeWebBridge.setRemotePressConsumer { [weak self] pressType in
-            MainActor.assumeIsolated {
-                // ONLY while actually playing (review
-                // round 1, BLOCKER 3): during .starting
-                // the first item is not live yet, and an
-                // advance chain in that window corrupts
-                // the queue bookkeeping — presses then
-                // belong to the native panel, not to us.
-                guard let self, !self.terminal,
-                      self.phase == .playing
-                else { return false }
-                if pressType == UIPress.PressType.rightArrow.rawValue {
-                    self.advanceManually()
-                    return true
-                }
-                return false
-            }
+    /// FL-349 (2.0.45, leg 1): the press consumer that
+    /// used to live here is DELETED, not replaced. It ate
+    /// every Right-arrow while playing — panel-unaware —
+    /// so the owner's seek presses became next-episode
+    /// jumps and the subtitle panel lost its keys (the
+    /// Diag_9 conviction). On this surface NO press is
+    /// consumed: Right/Left are the native seek, the
+    /// panel is fully native, and manual next is the
+    /// transport-bar menu action (Q1) calling
+    /// requestAdvance(trigger:) below.
+
+    /// Whether the queued item can actually frame: its
+    /// status is readyToPlay AND (its loaded ranges
+    /// already cover ≥ 3 s OR its assembly session has
+    /// served its first media byte — the server's own
+    /// record, for an item whose ranges AVPlayer has not
+    /// filled yet).
+    private func gateReadiness() -> (itemReady: Bool, mediaServed: Bool) {
+        guard let item = queuedItem else { return (false, false) }
+        let mediaServed = queuedSessionID.map {
+            JoeYtHlsServer.shared.firstMediaServed(sessionID: $0)
+        } ?? false
+        let ready = item.status == .readyToPlay
+            && (loadedBufferEndSeconds(item) >= 3 || mediaServed)
+        return (ready, mediaServed)
+    }
+
+    /// Arm the readiness gate for a manual advance: the
+    /// stamp, the waiting pill (the existing statusPill —
+    /// no new chrome), and the arm log line. Re-arming
+    /// while a stamp is live only refreshes the log; the
+    /// original stamp (and its 10 s cap) stands.
+    private func armGate() {
+        if gatedAdvanceArmedAt == nil {
+            gatedAdvanceArmedAt = Date()
+            statusTask?.cancel()
+            statusLine = "Đang tải tập tiếp theo…"
         }
+        let r = gateReadiness()
+        log("advance đã arm — chờ item sẵn sàng (ready=\(r.itemReady ? 1 : 0) media=\(r.mediaServed ? 1 : 0))")
+    }
+
+    /// The one consumption funnel for every advance the
+    /// FL-330 machinery fires (prefetch success, advance
+    /// chain completions): with a gate stamp live, the
+    /// fire passes through the readiness gate — ready
+    /// fires now (with the fired log), not-ready leaves
+    /// the stamp for the supervisor tick and its 10 s
+    /// cap. Without a stamp this is fireAdvance()
+    /// exactly — queue auto-advance and the episode-end
+    /// paths are never gated.
+    private func consumeAdvance() {
+        guard gatedAdvanceArmedAt != nil else {
+            fireAdvance()
+            return
+        }
+        guard queuedItem != nil, !opInFlight else { return }
+        let r = gateReadiness()
+        guard r.itemReady, let armedAt = gatedAdvanceArmedAt else { return }
+        gatedAdvanceArmedAt = nil
+        if statusLine == "Đang tải tập tiếp theo…" {
+            statusLine = nil
+        }
+        fireAdvance()
+        log("advance fired — sẵn sàng sau \(Int(Date().timeIntervalSince(armedAt) * 1000))ms")
     }
 
     /// Manual next, serialised through the in-flight
     /// gate: with the prefetched item in the queue the
-    /// advance is immediate; without it, the advance is
-    /// armed and fires when the prefetch lands (or a
-    /// resolve-then-advance chain runs if no prefetch is
-    /// in flight).
-    func advanceManually() {
+    /// advance fires through the readiness gate at once;
+    /// without it, the advance is armed and fires when
+    /// the prefetch lands (or a resolve-then-advance
+    /// chain runs if no prefetch is in flight). The ONLY
+    /// manual entry — the transport-bar menu action.
+    func requestAdvance(trigger: String) {
         // player.currentItem != nil: no advance chain may
         // run before the first item is live (BLOCKER 3).
         guard !terminal, hasNextEpisode, !opInFlight,
               player.currentItem != nil
         else { return }
+        log("advance bằng tay (trigger=\(trigger)) — ep=\(currentIndex + 2)")
+        armGate()
         if queuedItem != nil {
-            performAdvance()
+            consumeAdvance()
         } else if prefetchInFlight {
             advancePending = true
-            log("next bằng tay: prefetch chưa xong — advance đã arm, bắn khi item vào hàng đợi")
         } else {
             // No prefetch running (its resolve failed
             // earlier): the gated chain.
@@ -1150,9 +1468,11 @@ final class JoeYtNativePlayerModel: ObservableObject {
         // here with the next item ALREADY queued (the
         // prefetch finished meanwhile): advance to it
         // instead of resolving a second copy (review
-        // round 3, MINOR).
+        // round 3, MINOR). FL-349 (leg 1): the fire
+        // passes through the readiness gate like every
+        // consumption (consumeAdvance).
         if queuedItem != nil {
-            performAdvance()
+            consumeAdvance()
             return
         }
         opInFlight = true
@@ -1169,8 +1489,9 @@ final class JoeYtNativePlayerModel: ObservableObject {
             }
             switch result {
             case .playable(let playable, _):
-                if let item = await self.buildItem(for: playable),
+                if let built = await self.buildItem(for: playable),
                    !self.terminal, self.attempt == myAttempt {
+                    let item = built.item
                     // Re-check the queue AFTER the awaits
                     // (review round 4, BLOCKER): a prefetch
                     // that landed meanwhile already inserted
@@ -1183,17 +1504,21 @@ final class JoeYtNativePlayerModel: ObservableObject {
                     if self.queuedItem != nil {
                         self.opInFlight = false
                         self.log("advance chain: prefetch đã kịp vào hàng đợi — advance tới bản đó, không insert trùng")
-                        self.performAdvance()
+                        self.consumeAdvance()
                     } else {
                         self.player.insert(item, after: nil)
                         self.queuedItem = item
                         self.queuedIndex = nextIndex
+                        // FL-349 (leg 1): the session
+                        // handle, as at the prefetch insert.
+                        self.queuedSessionID = built.sessionID
+                        self.queuedItemHeight = built.height
                         // FL-347: same retention as the
                         // prefetch insert — promoted at
                         // the transition confirmation.
                         self.queuedPlayable = playable
                         self.opInFlight = false
-                        self.performAdvance()
+                        self.consumeAdvance()
                     }
                 } else if !self.terminal, self.attempt == myAttempt {
                     // buildItem nil: the construction is
@@ -1259,7 +1584,7 @@ final class JoeYtNativePlayerModel: ObservableObject {
         }
     }
 
-    private func performAdvance() {
+    private func fireAdvance() {
         guard let queued = queuedItem, player.currentItem !== queued else { return }
         player.advanceToNextItem()
         // An advance consumed after the current item had
@@ -1328,6 +1653,23 @@ final class JoeYtNativePlayerModel: ObservableObject {
         }
     }
 
+    /// FL-350 (2.0.45, leg 2): one group's selected
+    /// language for the apply-point log line — the
+    /// language code when an option is selected, "off"
+    /// when the group exists but nothing is selected,
+    /// "none" when the item carries no such group at
+    /// all.
+    private func selectionLanguage(of item: AVPlayerItem?,
+                                   characteristic: AVMediaCharacteristic) -> String {
+        guard let item,
+              let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: characteristic)
+        else { return "none" }
+        guard let option = item.currentMediaSelection
+            .selectedMediaOption(in: group)
+        else { return "off" }
+        return option.locale?.language.languageCode?.identifier ?? "?"
+    }
+
     private func flashStatus(_ text: String) {
         statusLine = text
         statusTask?.cancel()
@@ -1347,11 +1689,27 @@ final class JoeYtNativePlayerModel: ObservableObject {
 /// overlaid on it (the 11:15 lesson).
 private struct JoeYtPlayerControllerView: UIViewControllerRepresentable {
     let player: AVQueuePlayer
+    /// FL-349 (2.0.45, leg 1, path A — Q1): the
+    /// next-episode action's presence + handler for the
+    /// transport bar's custom menu items. The action
+    /// lives in the player's OWN transport bar (Apple's
+    /// AVPlayerViewController.transportBarCustomMenuItems,
+    /// tvOS 15+ — "you can extend the list of transport
+    /// bar controls, using the new property of
+    /// AVPlayerViewController, transportBarCustomMenuItems.
+    /// It supports instances of UIAction and UIMenu
+    /// classes", WWDC21 session 10191), so it is reached
+    /// by the native focus engine like every other
+    /// transport control — no press is consumed and no
+    /// overlay is drawn.
+    let hasNextEpisode: Bool
+    let onNextEpisode: () -> Void
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.showsPlaybackControls = true
+        applyMenuItems(to: controller)
         return controller
     }
 
@@ -1359,6 +1717,17 @@ private struct JoeYtPlayerControllerView: UIViewControllerRepresentable {
                                 context: Context) {
         if controller.player !== player {
             controller.player = player
+        }
+        applyMenuItems(to: controller)
+    }
+
+    private func applyMenuItems(to controller: AVPlayerViewController) {
+        if hasNextEpisode {
+            controller.transportBarCustomMenuItems = [
+                UIAction(title: "Tập tiếp theo") { _ in onNextEpisode() }
+            ]
+        } else if !controller.transportBarCustomMenuItems.isEmpty {
+            controller.transportBarCustomMenuItems = []
         }
     }
 }
@@ -1376,6 +1745,9 @@ struct JoeYtNativePlayerView: View {
     @Environment(\.joeTheme) private var theme
     @StateObject private var model: JoeYtNativePlayerModel
     @FocusState private var retryFocused: Bool
+    /// FL-353 sweep (2.0.45 gate round 5, C5-3): the end
+    /// slate's back button focus.
+    @FocusState private var endFocused: Bool
 
     init(request: JoeYtPlayRequest, firstPlayable: JoeYtPlayable,
          onPageFallback: (() -> Void)? = nil) {
@@ -1396,7 +1768,10 @@ struct JoeYtNativePlayerView: View {
             // left mounted under an overlay is a focus
             // trap (the 2026-11-20 11:15 lesson).
             if model.phase == .starting || model.phase == .playing {
-                JoeYtPlayerControllerView(player: model.player)
+                JoeYtPlayerControllerView(
+                    player: model.player,
+                    hasNextEpisode: model.hasNextEpisode,
+                    onNextEpisode: { model.requestAdvance(trigger: "menu") })
                     .ignoresSafeArea()
             }
             if model.phase == .starting {
@@ -1413,12 +1788,18 @@ struct JoeYtNativePlayerView: View {
             }
         }
         // Menu closes THIS player back to the detail (the
-        // house own-root construction).
-        .onExitCommand { nav.ytPlayer = nil }
+        // house own-root construction). In the end phase
+        // the exit is logged in the §8.3 slate family form
+        // (the button path logs its own trigger=nút line).
+        .onExitCommand {
+            if model.phase == .ended {
+                DiagLog.write("YT-PLAY", "slate end — về detail (trigger=menu)")
+            }
+            nav.ytPlayer = nil
+        }
         .onAppear {
             model.attachStore(watch)
             model.onPageFallback = onPageFallback
-            model.registerPressConsumer()
             model.onFallThrough = { route in
                 nav.ytPlayer = nil
                 nav.ytDetail = nil
@@ -1445,7 +1826,7 @@ struct JoeYtNativePlayerView: View {
                 Text("Đang mở phim…")
                     .font(.system(size: 29, weight: .semibold))
                     .foregroundStyle(.white)
-                Text("\(request.seriesTitle) · \(model.episodeLabel)")
+                Text("\(request.seriesTitle) · \(model.episodeLabel)\(model.startingQualityLabel.isEmpty ? "" : " · \(model.startingQualityLabel)")")
                     .font(.system(size: 24))
                     .foregroundStyle(.white.opacity(0.7))
             }
@@ -1477,12 +1858,31 @@ struct JoeYtNativePlayerView: View {
                 Text("Đã hết tập cuối của bộ này.")
                     .font(.system(size: 31, weight: .semibold))
                     .foregroundStyle(.white)
+                // FL-353 same-family sweep (gate round 5,
+                // C5-3): this slate was TEXT-ONLY — no
+                // focusable element, so the Menu promise in
+                // its own second line could never fire (the
+                // §8.1 mechanism: an onExitCommand receives
+                // Menu only while something in its tree
+                // holds focus) and Menu exited the app
+                // instead. One focusable button —
+                // failureSlate's exact construction in this
+                // file — makes both exits real.
+                Button {
+                    DiagLog.write("YT-PLAY", "slate end — về detail (trigger=nút)")
+                    nav.ytPlayer = nil
+                } label: {
+                    JoeSecondaryLabel(title: "Quay lại danh sách tập")
+                }
+                .joeCardButton()
+                .focused($endFocused)
                 Text("Bấm Menu để quay lại danh sách tập.")
                     .font(.system(size: 25))
                     .foregroundStyle(.white.opacity(0.75))
             }
         }
         .ignoresSafeArea()
+        .defaultFocus($endFocused, true)
     }
 
     private func failureSlate(_ text: String) -> some View {

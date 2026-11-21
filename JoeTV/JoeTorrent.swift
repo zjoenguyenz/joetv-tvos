@@ -1386,7 +1386,9 @@ private struct JoeTorCastCellLabel: View {
         // of the stream fetch's.
         async let pooledFetch = TorrentClient.fetchPooledStreams(
             torrentioBase: torBase, mfBase: mfBase,
-            type: meta.type, id: videoId)
+            type: meta.type, id: videoId,
+            userAddonBase: TorrentSettings.userAddonBase,
+            userAddonName: JoeAddonStore.shared.addonName)
         async let subsFetch = TorrentClient.fetchSubtitles(
             base: TorrentSettings.subtitleBase(addonBase: torBase ?? mfBase ?? ""),
             type: meta.type, id: videoId)
@@ -1440,12 +1442,23 @@ private struct JoeTorCastCellLabel: View {
     /// output, served once, so the pooled top-30 /
     /// cached-first / 2160 REMUX > BluRay > WEB /
     /// TorBox > RD > Premiumize behaviour cannot change.
+    @MainActor
     private static func makePlayDirector(
         meta: TorMeta, base: String, watch: WatchStore,
         video: TorVideo?, preferred: TorStream?,
         seedStreams: [TorStream], seedSubtitleURL: URL?
     ) -> PlayDirector {
         let sid = video?.id ?? meta.id
+        // v2.0.45 (leg 3, gate round 3 A3-1): the user
+        // addon's name is read HERE, in this @MainActor
+        // builder (both call sites are MainActor
+        // contexts: the detail's play action and the
+        // @MainActor nextEpisodeFactory), and the ladder
+        // literal below captures the String VALUE — the
+        // literal's declared type carries no isolation
+        // annotation, so it must never read the
+        // @MainActor store itself.
+        let userAddonName = JoeAddonStore.shared.addonName
         var entry = WatchStore.Entry()
         entry.kind = WatchStore.kindTor
         entry.key = WatchStore.torProgressKey(streamId: sid)
@@ -1495,7 +1508,9 @@ private struct JoeTorCastCellLabel: View {
                     let pooled = await TorrentClient.fetchPooledStreams(
                         torrentioBase: TorrentSettings.effectiveBase,
                         mfBase: TorrentSettings.mfBase,
-                        type: type, id: identity.entry.streamId)
+                        type: type, id: identity.entry.streamId,
+                        userAddonBase: TorrentSettings.userAddonBase,
+                        userAddonName: userAddonName)
                     list = pooled.streams
                 }
                 var cands = await TorrentClient.playCandidates(
@@ -1633,7 +1648,9 @@ private final class TorNextEpisodePrep {
         async let pooledFetch = TorrentClient.fetchPooledStreams(
             torrentioBase: TorrentSettings.effectiveBase,
             mfBase: TorrentSettings.mfBase,
-            type: type, id: videoId)
+            type: type, id: videoId,
+            userAddonBase: TorrentSettings.userAddonBase,
+            userAddonName: JoeAddonStore.shared.addonName)
         async let subsFetch = TorrentClient.fetchSubtitles(
             base: TorrentSettings.subtitleBase(
                 addonBase: TorrentSettings.effectiveBase

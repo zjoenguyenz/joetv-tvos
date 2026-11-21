@@ -120,6 +120,13 @@ struct JoeYtPlayable: Sendable {
     /// (kind == .assembly only; nil when no muxed format
     /// was solvable).
     var fallbackDirectURL: URL?
+    /// FL-351 Branch D (2.0.45, leg 4): the muxed
+    /// fallback's own height, stamped beside its URL —
+    /// when the player falls back to (or swaps to) the
+    /// muxed file, the variant actually playing is the
+    /// muxed one, and the player's quality label must
+    /// speak ITS height, not the assembly's.
+    var fallbackHeight: Int = 0
     /// Codec strings for the master playlist's CODECS
     /// attribute, lifted from the formats' mimeTypes.
     var videoCodec: String = ""
@@ -131,6 +138,28 @@ struct JoeYtPlayable: Sendable {
     var videoBitrate: Int = 0
     var audioBitrate: Int = 0
     var durationSeconds: Double = 0
+    /// FL-350 (2.0.45, leg 2): the caption tracks the
+    /// assembly carries — at most TWO: the chosen track
+    /// (at `chosenCaption`) plus the best track of the
+    /// other language, so the player's subtitle panel
+    /// offers a real manual switch. URLs live only in
+    /// this value (memory), like every other URL here.
+    var captions: [JoeYtCaptionTrack] = []
+    /// Index into `captions` of the default track;
+    /// -1 = no captions.
+    var chosenCaption: Int = -1
+}
+
+/// FL-350 (2.0.45, leg 2): one caption track from the
+/// /player response's caption tracklist. Only REAL
+/// tracks are ever modelled here — translation tracks
+/// (the response's translationLanguages / any tlang
+/// variant) are banned by the owner's Q3 ruling and are
+/// never read, never carried.
+struct JoeYtCaptionTrack: Sendable {
+    var languageCode: String
+    var isASR: Bool
+    var baseURL: URL
 }
 
 struct JoeYtResolveMetrics: Sendable {
@@ -263,7 +292,21 @@ actor JoeYtResolver {
             .map { String($0) }.joined(separator: ",")
         log("resolve vid=\(videoId): /player \(call.ms)ms playability=OK formats=\(all.count) ciphered=\(cipheredCount)")
 
+        // FL-350 (2.0.45, leg 2): the caption inventory —
+        // parsed HERE, at the same parse point, and
+        // logged for EVERY OK resolve (the pre-fix
+        // resolver discarded `captions` whole, which is
+        // why the assembly never had a legible group).
+        // The selection rule is the owner's Q3 law:
+        // manual vi → manual en → ASR vi → ASR en → none.
+        let captionParse = Self.parseCaptions(json)
+        log("resolve vid=\(videoId): captions \(captionParse.inventory)")
+
         if let hls = streaming?["hlsManifestUrl"] as? String, let hlsURL = URL(string: hls) {
+            // The HLS playable does NOT consume the parsed
+            // captions: YouTube's own manifest carries its
+            // own renditions. The inventory log above still
+            // fired — it is per-resolve evidence.
             log("resolve vid=\(videoId): response có HLS manifest — dùng thẳng, census=[\(censusList)]")
             var playable = JoeYtPlayable(kind: .hlsManifest)
             playable.directURL = hlsURL
@@ -446,8 +489,11 @@ actor JoeYtResolver {
             playable.audioCodec = Self.codecString(from: audio.mimeType)
             if let muxedFallback, let muxedURL = solvedURLs[muxedFallback.itag] {
                 playable.fallbackDirectURL = muxedURL
+                playable.fallbackHeight = muxedFallback.height
             }
             playable.durationSeconds = max(video.approxDurationMs, audio.approxDurationMs) / 1000.0
+            playable.captions = captionParse.tracks
+            playable.chosenCaption = captionParse.chosen
             log("resolve vid=\(videoId): OK — cặp adaptive itag \(video.itag)+\(audio.itag) "
                 + "(\(video.width)x\(video.height)) cho assembly, solver \(metrics.solverMs)ms, census=[\(censusList)]")
             return .playable(playable, metrics)
@@ -460,12 +506,83 @@ actor JoeYtResolver {
             playable.height = muxedFallback.height
             playable.videoBitrate = muxedFallback.bitrate
             playable.durationSeconds = muxedFallback.approxDurationMs / 1000.0
+            playable.captions = captionParse.tracks
+            playable.chosenCaption = captionParse.chosen
             log("resolve vid=\(videoId): OK — bản muxed itag \(muxedFallback.itag) (không đủ cặp adaptive), census=[\(censusList)]")
             return .playable(playable, metrics)
         }
         log("resolve vid=\(videoId): không dựng được playable nào từ các target đã giải")
         return .solverFailed(step: "apply",
                              message: "Không dựng được URL phát từ các format đã giải mã.")
+    }
+
+    /// FL-350 (2.0.45, leg 2): the caption inventory of
+    /// one /player response — the tracklist under
+    /// captions.playerCaptionsTracklistRenderer
+    /// .captionTracks. A track is ASR when its kind is
+    /// "asr" or its vssId carries the "a." prefix
+    /// (".vi" = manual, "a.vi" = ASR — YouTube's own
+    /// grammar). Selection is the owner's Q3 law:
+    /// manual vi → manual en → ASR vi → ASR en → none;
+    /// the carried set is the chosen track plus the best
+    /// track of the OTHER language (manual first), so
+    /// the panel offers a real switch and the two
+    /// rendition URIs (subs/<lang>.vtt) stay unique.
+    /// Translation tracks are NEVER read: the response's
+    /// translationLanguages list is not touched and no
+    /// tlang parameter is ever attached anywhere (Q3 ban).
+    private static func parseCaptions(_ json: [String: Any])
+        -> (tracks: [JoeYtCaptionTrack], chosen: Int, inventory: String) {
+        let renderer = (json["captions"] as? [String: Any])?
+            ["playerCaptionsTracklistRenderer"] as? [String: Any]
+        let raw = renderer?["captionTracks"] as? [[String: Any]] ?? []
+        struct RawTrack {
+            var lang: String
+            var asr: Bool
+            var url: URL
+        }
+        var all: [RawTrack] = []
+        for track in raw {
+            let vssId = track["vssId"] as? String ?? ""
+            let lang = track["languageCode"] as? String ?? ""
+            let kind = track["kind"] as? String ?? ""
+            guard !lang.isEmpty,
+                  let base = track["baseUrl"] as? String,
+                  let url = URL(string: base)
+            else { continue }
+            all.append(RawTrack(
+                lang: lang,
+                asr: kind == "asr" || vssId.hasPrefix("a."),
+                url: url))
+        }
+        guard !all.isEmpty else {
+            return ([], -1, "tracks=0")
+        }
+        func matches(_ track: RawTrack, _ code: String) -> Bool {
+            track.lang == code || track.lang.hasPrefix(code + "-")
+        }
+        func pick(_ code: String, asr: Bool) -> RawTrack? {
+            all.first { matches($0, code) && $0.asr == asr }
+        }
+        let inventoryList = all
+            .map { "\($0.lang):\($0.asr ? "asr" : "manual")" }
+            .joined(separator: ", ")
+        guard let chosenRaw = pick("vi", asr: false) ?? pick("en", asr: false)
+                ?? pick("vi", asr: true) ?? pick("en", asr: true) else {
+            return ([], -1, "tracks=\(all.count) [\(inventoryList)] chọn=none")
+        }
+        var carried = [JoeYtCaptionTrack(
+            languageCode: chosenRaw.lang, isASR: chosenRaw.asr,
+            baseURL: chosenRaw.url)]
+        let otherCode = matches(chosenRaw, "vi") ? "en" : "vi"
+        if let other = pick(otherCode, asr: false) ?? pick(otherCode, asr: true) {
+            carried.append(JoeYtCaptionTrack(
+                languageCode: other.lang, isASR: other.asr,
+                baseURL: other.url))
+        }
+        return (carried, 0,
+                "tracks=\(all.count) [\(inventoryList)] "
+                + "chọn=\(chosenRaw.lang)(\(chosenRaw.asr ? "asr" : "manual"))")
     }
 
     /// `video/mp4; codecs="avc1.640028"` → `avc1.640028`

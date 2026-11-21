@@ -113,6 +113,11 @@ final class JoeNavigator: ObservableObject {
     /// movie/tor (zIndex 4/5/6) and close in the same order.
     @Published var ytDetail: JoeYtRoute?
     @Published var ytPlayer: JoeYtPlayRequest?
+    /// v2.0.45 (leg 3): the user-addon detail route — the
+    /// addon's own meta detail (JoeAddonDetail), opened
+    /// from the Home addon section, the search addon
+    /// group, and JoeYtDetail's backup-source row.
+    @Published var addonDetail: JoeAddonRoute?
     @Published var ytSignInOpen = false
     /// The YouTube player's Auto hand-back into the unified
     /// chain detail (JoeMovieDetail observes it and plays
@@ -172,6 +177,7 @@ final class JoeNavigator: ObservableObject {
     func closeTop() -> Bool {
         if ytSignInOpen { ytSignInOpen = false; return true }
         if ytPlayer != nil { ytPlayer = nil; return true }
+        if addonDetail != nil { addonDetail = nil; return true }
         if ytDetail != nil { ytDetail = nil; return true }
         if movie != nil { movie = nil; return true }
         if tor != nil { tor = nil; return true }
@@ -338,6 +344,7 @@ struct JoeRootView: View {
             }
             .disabled(nav.movie != nil || nav.tor != nil
                       || nav.ytDetail != nil || nav.ytPlayer != nil
+                      || nav.addonDetail != nil
                       || nav.ytSignInOpen
                       || !launchGate.finished)
             if let route = nav.movie {
@@ -379,6 +386,19 @@ struct JoeRootView: View {
                 }
                 .transition(.opacity)
                 .zIndex(4)
+            }
+            // v2.0.45 (leg 3): the user-addon detail layer —
+            // above ytDetail (JoeYtDetail's backup-source
+            // row opens it from there), below the player;
+            // its exit handler lives on its own root, like
+            // every detail layer here.
+            if let route = nav.addonDetail {
+                ZStack {
+                    theme.bg.ignoresSafeArea()
+                    JoeAddonDetail(route: route)
+                }
+                .transition(.opacity)
+                .zIndex(4.5)
             }
             if let request = nav.ytPlayer {
                 // The router paints its own surfaces (the
@@ -470,6 +490,8 @@ struct JoeRootView: View {
                 nav.ytSignInOpen = false
             } else if nav.ytPlayer != nil {
                 nav.ytPlayer = nil
+            } else if nav.addonDetail != nil {
+                nav.addonDetail = nil
             } else if nav.ytDetail != nil {
                 nav.ytDetail = nil
             } else if nav.movie != nil {

@@ -1543,6 +1543,9 @@ struct JoeYtPlayerView: View {
     @StateObject private var model: JoeYtPlayerModel
     @FocusState private var retryFocused: Bool
     @FocusState private var nextFocused: Bool
+    /// FL-353 sweep (2.0.45 gate round 6, B6-2): the
+    /// bridge-missing explanation's back button focus.
+    @FocusState private var explanationFocused: Bool
 
     init(request: JoeYtPlayRequest) {
         self.request = request
@@ -1579,7 +1582,15 @@ struct JoeYtPlayerView: View {
         // Menu closes THIS player back to the detail (the
         // house own-root construction): the bridge never
         // consumes Menu, so the press lands here.
-        .onExitCommand { nav.ytPlayer = nil }
+        .onExitCommand {
+            if model.bridgeMissing {
+                // Family logging parity (2.0.45): the
+                // explanation branch's Menu exit is named
+                // too; its button carries the nút line.
+                DiagLog.write("YT", "slate explanation — về detail (trigger=menu)")
+            }
+            nav.ytPlayer = nil
+        }
         .onAppear {
             model.registerPressConsumer()
             model.onFallThrough = { route in
@@ -1718,8 +1729,27 @@ struct JoeYtPlayerView: View {
                 .font(.system(size: 25))
                 .foregroundStyle(.white.opacity(0.75))
                 .multilineTextAlignment(.center)
+            // FL-353 same-family sweep (gate round 6,
+            // B6-2): this branch replaces the WHOLE tree —
+            // the web host leaves with it — so unlike the
+            // end/failure slates (which overlay the live
+            // host whose content view anchors focus), this
+            // notice held NO focusable element and the
+            // view's root Menu handler could never fire
+            // (the §8.1 mechanism): Menu exited the app.
+            // One focusable button, the family
+            // construction, makes the exit real.
+            Button {
+                DiagLog.write("YT", "slate explanation — về detail (trigger=nút)")
+                nav.ytPlayer = nil
+            } label: {
+                JoeSecondaryLabel(title: "Quay lại")
+            }
+            .joeCardButton()
+            .focused($explanationFocused)
         }
         .padding(.horizontal, 80)
+        .defaultFocus($explanationFocused, true)
     }
 }
 

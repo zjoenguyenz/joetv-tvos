@@ -158,6 +158,61 @@ enum TorrentSettings {
         !effectiveMfURL.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// v2.0.45 (leg 3): the owner's OWN Stremio addon link
+    /// (re TV is the first) — a general user-addon slot,
+    /// modelled exactly on MediaFusion's above: a stored
+    /// value wins, the bundled RETV_URL build secret is
+    /// the fallback (the owner's Q2 ruling — the link is
+    /// closed into the build like MF_URL, because a
+    /// reinstall wipes everything typed). The link
+    /// carries his personal account token in its path:
+    /// it is never logged and never sent anywhere but
+    /// the addon host itself (FL-073) — DiagLog records
+    /// presence + the addon's own name + counts only.
+    static let keyUserAddonURL = "user_addon_url"
+
+    static var userAddonURL: String {
+        get { UserDefaults.standard.string(forKey: keyUserAddonURL) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: keyUserAddonURL) }
+    }
+
+    /// The EFFECTIVE user-addon link: stored wins,
+    /// bundled fallback — the effectiveMfURL shape,
+    /// verbatim.
+    static var effectiveUserAddonURL: String {
+        let stored = userAddonURL.trimmingCharacters(in: .whitespaces)
+        return stored.isEmpty ? BundledTokens.retvURL : stored
+    }
+
+    /// Which source the effective link comes from, for
+    /// the ADDON presence log line (never the link
+    /// itself): "stored" / "bundled" / nil when no link
+    /// is in force at all.
+    static var userAddonSource: String? {
+        if !userAddonURL.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "stored"
+        }
+        if !BundledTokens.retvURL.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "bundled"
+        }
+        return nil
+    }
+
+    /// The user-addon base to talk to, or nil when no
+    /// link is in force or the link does not validate —
+    /// the mfBase rule, verbatim (a stray word in the
+    /// field must never become a base).
+    static var userAddonBase: String? {
+        let raw = effectiveUserAddonURL.trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty else { return nil }
+        var s = raw
+        if s.hasPrefix("stremio://") {
+            s = "https://" + String(s.dropFirst("stremio://".count))
+        }
+        let base = stripSlash(s)
+        return isValidAddonBase(base) ? base : nil
+    }
+
     /// v2.0.24: the Thể Thao Torrent tab's OWN sources (the
     /// Sony 2.3.37 port). Two stored slots beside — never
     /// instead of — the MediaFusion base above: the MF base
@@ -401,6 +456,12 @@ struct TorMeta: Identifiable, Hashable, Sendable {
     /// stamp, and the detail's builders copy it back
     /// onto the entries they mint.
     var isLive = false
+    /// v2.0.45 (leg 3): the meta's IMDb id when the
+    /// serving addon carries it as its own field rather
+    /// than in the id (the §5.6 matcher's first key reads
+    /// either). Stamped only by JoeUserAddon's meta
+    /// parse; empty everywhere else.
+    var imdbId = ""
     var posterURL: URL? { poster.isEmpty ? nil : URL(string: poster) }
 }
 
@@ -741,7 +802,9 @@ enum TorrentClient {
     /// honest when the pool comes back empty; a gateway that
     /// is not configured at all is absence, not failure.
     static func fetchPooledStreams(torrentioBase: String?, mfBase: String?,
-                                   type: String, id: String)
+                                   type: String, id: String,
+                                   userAddonBase: String? = nil,
+                                   userAddonName: String = "")
         async -> (streams: [TorStream], primaryFailed: Bool) {
         func leg(_ base: String?, _ gateway: String) async -> [TorStream]? {
             guard let base else { return nil }
@@ -750,11 +813,19 @@ enum TorrentClient {
         }
         async let tor = leg(torrentioBase, "TOR")
         async let mfRows = leg(mfBase, "MF")
+        // v2.0.45 (leg 3): the user addon's leg — a title
+        // the addon also carries gets its streams in this
+        // same pool, labelled with the addon's own name
+        // (the gateway tag), never a duplicate detail.
+        async let addonRows = leg(userAddonBase,
+                                  userAddonName.isEmpty ? "ADDON" : userAddonName)
         let torResult = await tor
         let mfResult = await mfRows
+        let addonResult = await addonRows
         var pool: [TorStream] = []
         if let torResult { pool += torResult }
         if let mfResult { pool += mfResult }
+        if let addonResult { pool += addonResult }
         return (Array(rankPool(pool).prefix(30)),
                 torrentioBase != nil && torResult == nil)
     }

@@ -3903,9 +3903,40 @@ private struct JoeCastCellLabel: View {
         } else {
             streamId = imdbId
         }
-        guard let streams = try? await TorrentClient.fetchStreams(
+        // Gate round 3 (C3-1): the primary fetch is
+        // fail-soft to an empty list — NOT a guard —
+        // because the user addon's streams below must
+        // join even when Torrentio has nothing for this
+        // title: that is precisely the case a backup
+        // link exists for. The merged list's own
+        // emptiness gate (the `usable` guard below) is
+        // the only one.
+        let primary = (try? await TorrentClient.fetchStreams(
             addonBase: base, type: isSeries ? "series" : "movie",
-            id: streamId), !streams.isEmpty else { return [] }
+            id: streamId)) ?? []
+        var streams = primary
+        // v2.0.45 (leg 3): the user addon's streams for
+        // this same title join the rung as backup
+        // candidates — the design's merge point for a
+        // matched Phim title (the addon's base joins the
+        // per-title stream fetch beside Torrentio /
+        // MediaFusion), independently of the primary's
+        // outcome. Fail-soft: an addon failure or empty
+        // answer changes nothing.
+        if let addonBase = TorrentSettings.userAddonBase {
+            // Awaited hop (gate round 6, A6-1): the
+            // store is @MainActor and this builder is a
+            // nonisolated async context (the director's
+            // fallbackCandidates closure type carries no
+            // isolation) — the name is read THROUGH the
+            // hop, never synchronously (the A3-1 rule).
+            let addonName = await JoeAddonStore.shared.addonName
+            let extra = (try? await TorrentClient.fetchStreams(
+                addonBase: addonBase,
+                type: isSeries ? "series" : "movie", id: streamId,
+                gateway: addonName.isEmpty ? "ADDON" : addonName)) ?? []
+            streams += extra
+        }
         let usable = highQualityOnly
             ? streams.filter { $0.isHighQualityRelease }
             : streams

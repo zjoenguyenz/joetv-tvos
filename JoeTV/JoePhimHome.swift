@@ -148,6 +148,15 @@ struct JoePhimHome: View {
     /// "Đang theo dõi" rail and its new-episode badges re-render
     /// the moment the followed list or its counts change.
     @ObservedObject private var followStore = FollowStore.shared
+    /// FL-352 (2.0.45, leg 5): the TVB catalogue store —
+    /// observed so the TVB Continue Watching rail below
+    /// can resolve each row's poster by pid (the YT rows
+    /// themselves carry no poster).
+    @ObservedObject private var ytStore = JoeYtStore.shared
+    /// v2.0.45 (leg 3): the user addon's library store —
+    /// observed so its section below renders the moment
+    /// the rails land.
+    @ObservedObject private var addonStore = JoeAddonStore.shared
     // v2.0.8 (Phase 1 — focus memory): these seven @FocusState
     // values are the home's focus MEMORY and nothing else. The
     // engine writes them as focus moves; the move handlers
@@ -255,6 +264,26 @@ struct JoePhimHome: View {
         .task {
             await loadTrending()
         }
+        // v2.0.45 (leg 3): offer the addon store its load
+        // until it takes — the matcher runs against the
+        // app catalogues, which may still be filling when
+        // this view first appears (the store refuses to
+        // latch on an empty movie pool). Bounded: ~40
+        // offers over ~2 minutes, then the section simply
+        // stays absent this appearance.
+        .task {
+            var tries = 0
+            while !Task.isCancelled && addonStore.hasAddon
+                    && !addonStore.loaded && tries < 40 {
+                ytStore.ensureLoaded()
+                addonStore.ensureLoaded(
+                    phim: phim,
+                    tvbSeries: ytStore.snapshot?.series ?? [])
+                if addonStore.loaded { break }
+                tries += 1
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
         // CONVERGENCE (spec item 3, 2026-11-15): no programmatic
         // focus writes on the launch path. DOWN from the pills
         // lands on the home's top element geometrically.
@@ -352,8 +381,10 @@ struct JoePhimHome: View {
                     slimHeader
                 }
                 cwRail
+                tvbCwRail
                 favRail
                 followRail
+                addonSection
                 ForEach(railSpecs) { spec in
                     if !spec.movies.isEmpty {
                         if let band = spec.bandName {
@@ -442,8 +473,10 @@ struct JoePhimHome: View {
                     slimHeader
                 }
                 cwRail
+                tvbCwRail
                 favRail
                 followRail
+                addonSection
                 ForEach(railSpecs) { spec in
                     if !spec.movies.isEmpty {
                         if let band = spec.bandName {
@@ -1478,6 +1511,21 @@ struct JoePhimHome: View {
             .prefix(WatchStore.railCap))
     }
 
+    /// FL-352 (2.0.45, leg 5): the TVB (kindYT) progress
+    /// rows. They were written by the player all along
+    /// and read by NOBODY — both Homes whitelisted only
+    /// the four movie kinds, so a half-watched TVB series
+    /// never resurfaced. The rows get their OWN rail
+    /// (below the movie rail, never folded into it): a
+    /// YT row's reopen identity is its pid, not a
+    /// provider route, and its poster lives in the TVB
+    /// catalogue, not on the row.
+    private var tvbProgress: [WatchStore.Entry] {
+        Array(WatchStore.filterKinds(watch.progress(),
+                                     [WatchStore.kindYT])
+            .prefix(WatchStore.railCap))
+    }
+
     // MARK: - Focus memory (v2.0.8, Phase 1)
 
     // The first-rail routing apparatus that lived here —
@@ -1528,6 +1576,43 @@ struct JoePhimHome: View {
                     // (see the focus-memory note above).
                 }
             }
+        }
+    }
+
+    /// FL-352 (2.0.45, leg 5): the TVB Continue Watching
+    /// rail — the read side of the YT progress rows.
+    /// Same PosterCard construction as the movie CW rail
+    /// (poster + title + epLabel + progress bar), with
+    /// the poster resolved from the TVB catalogue by pid
+    /// and the tap reopening the series' detail (which
+    /// preselects the saved episode; the player resumes
+    /// the position itself).
+    @ViewBuilder
+    private var tvbCwRail: some View {
+        if !tvbProgress.isEmpty {
+            Rail(title: "▶ TVB · Đang xem dở") {
+                ForEach(tvbProgress) { entry in
+                    Button { nav.ytDetail = JoeYtRoute(pid: entry.slug) } label: {
+                        PosterCard(
+                            title: entry.title,
+                            posterURL: ytStore.snapshot?.byPid[entry.slug]?.posterURL,
+                            meta: entry.epLabel,
+                            progress: entry.fraction,
+                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
+                            form: .rail)
+                    }
+                    .joeCardButton()
+                    .focused($focusedEntry, equals: "tvbcw|" + entry.key)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            watch.removeProgress(key: entry.key)
+                        } label: {
+                            Text("Xoá khỏi Đang xem dở")
+                        }
+                    }
+                }
+            }
+            .onAppear { ytStore.ensureLoaded() }
         }
     }
 
@@ -1587,6 +1672,55 @@ struct JoePhimHome: View {
         if !followStore.followed.isEmpty {
             movieRail("📌 Đang theo dõi", followedMovies,
                       badges: true, scope: "following")
+        }
+    }
+
+    /// v2.0.45 (leg 3): the user addon's Home section —
+    /// one rail per non-search catalogue in manifest
+    /// order, already match-filtered by the store
+    /// (matched titles carry NO duplicate poster here;
+    /// their streams join as backup links instead). The
+    /// rails' own catalogue names head them — the owner's
+    /// rails by content ("Phim Mới", "TVB", …). Renders
+    /// nothing while no addon is in force or unloaded.
+    /// The last card's appearance pages the next slice
+    /// in (the store's skip= paging).
+    @ViewBuilder
+    private var addonSection: some View {
+        ForEach(addonStore.rails) { rail in
+            if !rail.metas.isEmpty {
+                Rail(title: rail.catalog.name) {
+                    ForEach(Array(rail.metas.enumerated()),
+                            id: \.element.id) { pair in
+                        Button {
+                            if let base = addonStore.servingBase {
+                                nav.addonDetail = JoeAddonRoute(
+                                    base: base,
+                                    type: pair.element.type,
+                                    metaId: pair.element.id,
+                                    name: pair.element.name,
+                                    poster: pair.element.poster,
+                                    year: pair.element.year,
+                                    addonName: addonStore.addonName)
+                            }
+                        } label: {
+                            PosterCard(
+                                title: pair.element.name,
+                                posterURL: pair.element.posterURL,
+                                meta: pair.element.year,
+                                form: .rail)
+                        }
+                        .joeCardButton()
+                        .focused($focusedEntry,
+                                 equals: "addon|" + rail.id + "|" + pair.element.id)
+                        .onAppear {
+                            if pair.offset == rail.metas.count - 1 {
+                                addonStore.loadMore(railID: rail.id)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

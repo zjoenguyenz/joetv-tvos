@@ -20,9 +20,18 @@
 /// no bundled fallback, so its link is bundled the same
 /// way (the MF_URL secret) and TorrentSettings resolves it
 /// through effectiveMfURL, exactly like the tokens.
+/// The user-addon link (2.0.45, leg 3 — the owner's Q2
+/// ruling, 2026-11-20 23:10 CST: "Đóng thẳng vào build")
+/// joins the same way: a Stremio addon the owner chooses
+/// (re TV is the first) is bundled through the RETV_URL
+/// secret and resolved through effectiveUserAddonURL —
+/// same stored-wins rule, same never-logged discipline
+/// (the link carries his personal account token in its
+/// path; only its presence is ever recorded).
 enum BundledTokens {
     static let rdToken = ""
     static let torboxToken = ""
     static let premiumizeToken = ""
     static let mfURL = ""
+    static let retvURL = ""
 }

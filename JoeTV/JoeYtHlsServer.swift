@@ -97,6 +97,19 @@ final class JoeYtHlsServer {
         var userAgent: String
     }
 
+    /// FL-350 (2.0.45, leg 2): one subtitle rendition
+    /// carried by a session — the fetched WebVTT bytes,
+    /// kept byte-exact (no origin relay: the route below
+    /// serves this Data as-is). The display name is built
+    /// from the language code, never taken from the
+    /// track's own name (which can carry anything).
+    private struct SubtitleRendition {
+        var language: String
+        var name: String
+        var vtt: Data
+        var isDefault: Bool
+    }
+
     private struct Session {
         var video: StreamEntry
         var audio: StreamEntry
@@ -106,6 +119,14 @@ final class JoeYtHlsServer {
         var height: Int
         var bandwidth: Int
         var createdAt: Date
+        /// FL-350 (leg 2): the session's subtitle
+        /// renditions (empty = the master playlist stays
+        /// byte-identical to the pre-subtitle shape).
+        var subtitles: [SubtitleRendition] = []
+        /// Languages whose rendition has already been
+        /// served once (the first-serve log fires once
+        /// per rendition, not per request).
+        var servedSubtitleLangs: Set<String> = []
         /// Design §4.4 logging point ("segment đầu tiên
         /// được phục vụ"): flipped the first time media
         /// BYTES of this session are actually delivered
@@ -133,15 +154,27 @@ final class JoeYtHlsServer {
     // MARK: Session registration
 
     /// Register one resolved episode and return the
-    /// master-playlist URL AVPlayer should load. Starts
-    /// the listener on first use. Nil = the server could
-    /// not start (logged); the caller falls back.
-    func makeSession(playable: JoeYtPlayable, userAgent: String) async -> URL? {
+    /// master-playlist URL AVPlayer should load, with
+    /// the session's id (FL-349, leg 1: the handle the
+    /// player keeps beside the queued item so the
+    /// advance gate can ask firstMediaServed(sessionID:)).
+    /// Starts the listener on first use. Nil = the server
+    /// could not start (logged); the caller falls back.
+    func makeSession(playable: JoeYtPlayable, userAgent: String)
+        async -> (url: URL, sessionID: String)? {
         guard let videoURL = playable.videoURL, let audioURL = playable.audioURL else {
             return nil
         }
         guard await ensureStarted() else { return nil }
         let id = UUID().uuidString
+        // FL-350 (leg 2): the carried caption tracks are
+        // fetched NOW, once per episode, both concurrently
+        // — a session is born with its renditions or
+        // without them; a subtitle failure never blocks
+        // the session (the fetch logs and returns nil).
+        let renditions = await fetchRenditions(playable: playable,
+                                               sessionID: id,
+                                               userAgent: userAgent)
         let video = StreamEntry(
             origin: videoURL,
             contentLength: playable.videoContentLength,
@@ -161,7 +194,8 @@ final class JoeYtHlsServer {
             videoCodec: playable.videoCodec, audioCodec: playable.audioCodec,
             width: playable.width, height: playable.height,
             bandwidth: max(0, playable.videoBitrate) + max(0, playable.audioBitrate),
-            createdAt: Date())
+            createdAt: Date(),
+            subtitles: renditions)
         sessions[id] = session
         sessionOrder.append(id)
         // Keep at most 4 sessions (current + prefetched
@@ -173,8 +207,235 @@ final class JoeYtHlsServer {
         }
         log("session \(id.prefix(8)) — assembly itag \(playable.videoItag)+\(playable.audioItag), "
             + "\(playable.width)x\(playable.height), dur \(Int(playable.durationSeconds))s")
+        for rendition in renditions {
+            log("session \(id.prefix(8)): phụ đề vào master — \(rendition.language) (\(rendition.vtt.count) byte vtt)")
+        }
         guard let boundPort else { return nil }
-        return URL(string: "http://127.0.0.1:\(boundPort)/yt/\(id)/master.m3u8")
+        guard let url = URL(string: "http://127.0.0.1:\(boundPort)/yt/\(id)/master.m3u8")
+        else { return nil }
+        return (url, id)
+    }
+
+    /// FL-349 (2.0.45, leg 1): whether the session's
+    /// first media byte has actually been served — the
+    /// advance gate's server-side readiness signal (the
+    /// flag noteFirstMediaServed flips when the first
+    /// body bytes move). Unknown session = false.
+    func firstMediaServed(sessionID: String) -> Bool {
+        sessions[sessionID]?.firstSegmentServed ?? false
+    }
+
+    // MARK: Subtitle renditions (FL-350, leg 2)
+
+    /// The display name for a subtitle language code,
+    /// built from the code alone ("vi" → Tiếng Việt,
+    /// "en" → English, a regional variant follows its
+    /// base code, anything else shows the code itself).
+    private static func subtitleDisplayName(_ code: String) -> String {
+        if code == "vi" || code.hasPrefix("vi-") { return "Tiếng Việt" }
+        if code == "en" || code.hasPrefix("en-") { return "English" }
+        return code
+    }
+
+    /// Fetch the playable's carried caption tracks (at
+    /// most two) into renditions, concurrently. A track
+    /// that fails or yields nothing is simply absent —
+    /// the session plays without it (never blocked).
+    private func fetchRenditions(playable: JoeYtPlayable,
+                                 sessionID: String,
+                                 userAgent: String) async -> [SubtitleRendition] {
+        let tracks = playable.captions
+        guard !tracks.isEmpty else { return [] }
+        var datas: [Data?] = []
+        if tracks.count == 1 {
+            datas = [await fetchCaptionVTT(track: tracks[0],
+                                           sessionID: sessionID,
+                                           userAgent: userAgent)]
+        } else {
+            async let first = fetchCaptionVTT(track: tracks[0],
+                                              sessionID: sessionID,
+                                              userAgent: userAgent)
+            async let second = fetchCaptionVTT(track: tracks[1],
+                                               sessionID: sessionID,
+                                               userAgent: userAgent)
+            let pair = await (first, second)
+            datas = [pair.0, pair.1]
+        }
+        var out: [SubtitleRendition] = []
+        for (index, track) in tracks.enumerated() {
+            guard index < datas.count, let data = datas[index] else { continue }
+            out.append(SubtitleRendition(
+                language: track.languageCode,
+                name: Self.subtitleDisplayName(track.languageCode),
+                vtt: data,
+                isDefault: index == playable.chosenCaption))
+        }
+        return out
+    }
+
+    /// One track's timedtext, as WebVTT bytes. The
+    /// track's own baseUrl gains fmt=vtt (its existing
+    /// query items ride along untouched; the URL itself
+    /// is never logged — FL-073). V-2 discipline: the
+    /// answer must actually BE VTT (start with WEBVTT);
+    /// when it is not, the default timedtext XML is
+    /// converted syntactically (see
+    /// convertTimedTextToVTT). A track yielding 0 cues
+    /// counts as absent. Every failure is logged with
+    /// its status and returns nil — playback is never
+    /// blocked for subtitles (FL-076).
+    private func fetchCaptionVTT(track: JoeYtCaptionTrack,
+                                 sessionID: String,
+                                 userAgent: String) async -> Data? {
+        let id8 = sessionID.prefix(8)
+        guard var components = URLComponents(url: track.baseURL,
+                                             resolvingAgainstBaseURL: false)
+        else {
+            log("session \(id8): phụ đề \(track.languageCode) fetch hỏng — baseUrl không parse được (phát không phụ đề)")
+            return nil
+        }
+        var query = components.queryItems ?? []
+        query.removeAll { $0.name == "fmt" }
+        query.append(URLQueryItem(name: "fmt", value: "vtt"))
+        components.queryItems = query
+        guard let url = components.url else {
+            log("session \(id8): phụ đề \(track.languageCode) fetch hỏng — không dựng được URL timedtext (phát không phụ đề)")
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            log("session \(id8): phụ đề \(track.languageCode) fetch hỏng — \(error.localizedDescription) (phát không phụ đề)")
+            return nil
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            log("session \(id8): phụ đề \(track.languageCode) fetch hỏng — HTTP \(status) (phát không phụ đề)")
+            return nil
+        }
+        if data.starts(with: Data("WEBVTT".utf8)) {
+            guard Self.countCues(in: data) > 0 else {
+                log("session \(id8): phụ đề \(track.languageCode) 0 cue — coi như không có")
+                return nil
+            }
+            return data
+        }
+        guard let converted = Self.convertTimedTextToVTT(data),
+              Self.countCues(in: converted) > 0 else {
+            log("session \(id8): phụ đề \(track.languageCode) fetch hỏng — đáp án không phải VTT, XML cũng không chuyển được (phát không phụ đề)")
+            return nil
+        }
+        return converted
+    }
+
+    /// Cue count of a WebVTT payload (the "-->" lines).
+    private static func countCues(in data: Data) -> Int {
+        let text = String(decoding: data, as: UTF8.self)
+        return text.components(separatedBy: "-->").count - 1
+    }
+
+    /// Syntax-only conversion of a timedtext XML answer
+    /// to WebVTT: cue timings + text, tags stripped,
+    /// entities decoded — no timing or wording is
+    /// invented. Two element shapes are recognised: the
+    /// `<text start="s" dur="s">` form (seconds — the
+    /// shape the design names) and the srv3
+    /// `<p t="ms" d="ms">` form (milliseconds), so the
+    /// converter stands whichever of the two the default
+    /// format actually answers with.
+    private static func convertTimedTextToVTT(_ data: Data) -> Data? {
+        guard let xml = String(data: data, encoding: .utf8) else { return nil }
+        var cues: [(start: Double, end: Double, text: String)] = []
+        appendTimedTextCues(xml, scale: 1,
+                            pattern: "<text[^>]*?start=\"([0-9.]+)\"[^>]*?dur=\"([0-9.]+)\"[^>]*?>(.*?)</text>",
+                            into: &cues)
+        if cues.isEmpty {
+            appendTimedTextCues(xml, scale: 1,
+                                pattern: "<text[^>]*?dur=\"([0-9.]+)\"[^>]*?start=\"([0-9.]+)\"[^>]*?>(.*?)</text>",
+                                swapped: true, into: &cues)
+        }
+        if cues.isEmpty {
+            appendTimedTextCues(xml, scale: 0.001,
+                                pattern: "<p[^>]*?t=\"([0-9]+)\"[^>]*?d=\"([0-9]+)\"[^>]*?>(.*?)</p>",
+                                into: &cues)
+        }
+        if cues.isEmpty {
+            appendTimedTextCues(xml, scale: 0.001,
+                                pattern: "<p[^>]*?d=\"([0-9]+)\"[^>]*?t=\"([0-9]+)\"[^>]*?>(.*?)</p>",
+                                swapped: true, into: &cues)
+        }
+        guard !cues.isEmpty else { return nil }
+        var out = "WEBVTT\n\n"
+        for cue in cues {
+            let text = decodeTimedText(cue.text)
+            guard !text.isEmpty else { continue }
+            out += "\(vttTimestamp(cue.start)) --> \(vttTimestamp(cue.end))\n\(text)\n\n"
+        }
+        return Data(out.utf8)
+    }
+
+    private static func appendTimedTextCues(
+        _ xml: String, scale: Double, pattern: String, swapped: Bool = false,
+        into cues: inout [(start: Double, end: Double, text: String)]) {
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern, options: [.dotMatchesLineSeparators])
+        else { return }
+        let ns = xml as NSString
+        for match in regex.matches(in: xml, range: NSRange(location: 0, length: ns.length)) {
+            guard match.numberOfRanges == 4,
+                  let first = Double(ns.substring(with: match.range(at: 1))),
+                  let second = Double(ns.substring(with: match.range(at: 2)))
+            else { continue }
+            let startRaw = swapped ? second : first
+            let durRaw = swapped ? first : second
+            let start = startRaw * scale
+            cues.append((start: start, end: start + durRaw * scale,
+                         text: ns.substring(with: match.range(at: 3))))
+        }
+    }
+
+    /// Strip inner tags and decode the XML entities a
+    /// timedtext body carries (named + numeric).
+    private static func decodeTimedText(_ raw: String) -> String {
+        var text = raw.replacingOccurrences(
+            of: "<[^>]+>", with: "", options: .regularExpression)
+        if let regex = try? NSRegularExpression(pattern: "&#([0-9]+);") {
+            let ns = text as NSString
+            var out = ""
+            var cursor = 0
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                out += ns.substring(with: NSRange(location: cursor,
+                                                  length: match.range.location - cursor))
+                if let value = UInt32(ns.substring(with: match.range(at: 1))),
+                   let scalar = UnicodeScalar(value) {
+                    out += String(scalar)
+                }
+                cursor = match.range.location + match.range.length
+            }
+            out += ns.substring(from: cursor)
+            text = out
+        }
+        text = text.replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// HH:MM:SS.mmm — the WebVTT timestamp form.
+    private static func vttTimestamp(_ seconds: Double) -> String {
+        let total = max(0, seconds)
+        let hours = Int(total) / 3600
+        let minutes = (Int(total) % 3600) / 60
+        let secs = total - Double(hours * 3600 + minutes * 60)
+        return String(format: "%02d:%02d:%06.3f", hours, minutes, secs)
     }
 
     /// Start the listener if needed and wait (bounded)
@@ -459,6 +720,31 @@ final class JoeYtHlsServer {
         // and a live one were indistinguishable in the
         // diagnostic log.
         let segments = path.split(separator: "/").map(String.init)
+        // FL-350 (leg 2): the subtitle route —
+        // /yt/<session>/subs/<lang>.vtt (FOUR segments;
+        // the media routes below are three). The stored
+        // VTT bytes are served as-is; the first serve of
+        // each rendition is logged once.
+        if segments.count == 4, segments[0] == "yt", segments[2] == "subs" {
+            let file = segments[3]
+            let lang = file.hasSuffix(".vtt") ? String(file.dropLast(4)) : file
+            if var session = sessions[segments[1]],
+               let rendition = session.subtitles.first(where: { $0.language == lang }) {
+                if !session.servedSubtitleLangs.contains(lang) {
+                    session.servedSubtitleLangs.insert(lang)
+                    sessions[segments[1]] = session
+                    log("serve \(method) /yt/\(segments[1].prefix(8))/subs/\(file) → 200 (lần đầu)")
+                } else {
+                    log("serve \(method) /yt/\(segments[1].prefix(8))/subs/\(file) → 200")
+                }
+                respondData(conn, status: 200, data: rendition.vtt,
+                            contentType: "text/vtt", headOnly: headOnly)
+            } else {
+                log("serve \(method) /yt/\(segments[1].prefix(8))/subs/\(file) → 404")
+                respondText(conn, status: 404, body: "not found", headOnly: headOnly)
+            }
+            return
+        }
         guard segments.count == 3, segments[0] == "yt",
               let session = sessions[segments[1]] else {
             if segments.count == 3, segments[0] == "yt" {
@@ -506,14 +792,28 @@ final class JoeYtHlsServer {
             ? ",RESOLUTION=\(session.width)x\(session.height)" : ""
         let codecs = (session.videoCodec.isEmpty || session.audioCodec.isEmpty)
             ? "" : ",CODECS=\"\(session.videoCodec),\(session.audioCodec)\""
-        return """
-        #EXTM3U
-        #EXT-X-VERSION:6
-        #EXT-X-INDEPENDENT-SEGMENTS
-        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="AAC",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"
-        #EXT-X-STREAM-INF:BANDWIDTH=\(bandwidth)\(resolution)\(codecs),AUDIO="aud"
-        video.m3u8
-        """
+        // FL-350 (leg 2): one EXT-X-MEDIA line per
+        // subtitle rendition BEFORE the variant, and the
+        // variant names the group. No renditions → the
+        // master stays byte-identical to the pre-subtitle
+        // shape (no SUBTITLES declaration, no fake panel
+        // entry).
+        var lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:6",
+            "#EXT-X-INDEPENDENT-SEGMENTS",
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"AAC\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"",
+        ]
+        for rendition in session.subtitles {
+            lines.append("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"\(rendition.name)\",LANGUAGE=\"\(rendition.language)\",DEFAULT=\(rendition.isDefault ? "YES" : "NO"),AUTOSELECT=YES,URI=\"subs/\(rendition.language).vtt\"")
+        }
+        let subtitlesAttr = session.subtitles.isEmpty ? "" : ",SUBTITLES=\"subs\""
+        lines.append("#EXT-X-STREAM-INF:BANDWIDTH=\(bandwidth)\(resolution)\(codecs),AUDIO=\"aud\"\(subtitlesAttr)")
+        lines.append("video.m3u8")
+        // No trailing newline: with no renditions this is
+        // byte-identical to the pre-subtitle master (the
+        // old multiline literal carried none either).
+        return lines.joined(separator: "\n")
     }
 
     private func mediaPlaylist(entry: StreamEntry, file: String) -> String {
@@ -1075,6 +1375,31 @@ final class JoeYtHlsServer {
             }
             if !headOnly {
                 _ = await self.send(conn, data: bodyData)
+            }
+            self.close(conn)
+        }
+    }
+
+    /// FL-350 (leg 2): respondText's Data-bodied twin
+    /// (the subtitle route serves stored VTT bytes
+    /// byte-exact — a String round-trip could rewrite
+    /// them). Same head discipline: one immutable head
+    /// value, built before the Task reads it (FL-341).
+    private func respondData(_ conn: NWConnection, status: Int, data: Data,
+                             contentType: String,
+                             headOnly: Bool = false) {
+        let head = "HTTP/1.1 \(status) \(Self.statusText(status))\r\n"
+            + "Content-Type: \(contentType)\r\n"
+            + "Content-Length: \(data.count)\r\n"
+            + "Connection: close\r\n\r\n"
+        Task { [weak self] in
+            guard let self else { return }
+            guard await self.send(conn, data: Data(head.utf8)) else {
+                self.close(conn)
+                return
+            }
+            if !headOnly {
+                _ = await self.send(conn, data: data)
             }
             self.close(conn)
         }
