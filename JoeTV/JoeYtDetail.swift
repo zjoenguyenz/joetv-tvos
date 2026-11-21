@@ -86,6 +86,12 @@ struct JoeYtDetail: View {
     /// this series' backup-source match (sourceRow).
     @ObservedObject private var addonStore = JoeAddonStore.shared
     @State private var mode: JoeYtSourceMode = .auto
+    /// 2.0.47: this series' resolved poster (JoeYtPoster
+    /// Resolver: TMDB by tmdbId → chain-catalogue poster by
+    /// normalised title → episode-1 thumbnail). Nil until
+    /// the content's resolve task lands; the header paints
+    /// its placeholder meanwhile, never the thumbnail first.
+    @State private var resolvedPoster: JoeYtResolvedPoster?
     /// Super VIP press feedback: the honest above-tier
     /// message, promoted from a quiet line to the accented
     /// notice when an episode is actually pressed.
@@ -163,11 +169,26 @@ struct JoeYtDetail: View {
         .defaultFocus($epFocus, resumeIndex.map {
             min($0, series.eps.count - 1)
         } ?? 0)
+        // 2.0.47: resolve this series' real poster (cached
+        // per pid in the resolver, so a re-entry is a
+        // cache read, not a new TMDB call).
+        .task(id: series.pid) {
+            resolvedPoster = await JoeYtPosterResolver.resolve(series)
+        }
     }
 
     private func header(_ series: JoeYtSeries) -> some View {
         HStack(alignment: .top, spacing: 34) {
-            JoeRemoteImage(url: series.posterURL, targetPixels: 720) {
+            // 2.0.47: the resolved poster, not the raw
+            // thumbnail. A real poster (TMDB / chain legs)
+            // is FIT whole into the header frame and gated
+            // .portrait — never cropped, never letterboxed
+            // INTO the art; the thumbnail leg keeps the
+            // old fill behaviour in the .any slot.
+            JoeRemoteImage(url: resolvedPoster?.url, targetPixels: 720,
+                           fit: resolvedPoster?.isPortraitPoster ?? false,
+                           slotClass: (resolvedPoster?.isPortraitPoster ?? false)
+                               ? .portrait : .any) {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(theme.surface2)
             }
@@ -242,7 +263,7 @@ struct JoeYtDetail: View {
                         nav.addonDetail = JoeAddonRoute(
                             base: base, type: backup.type,
                             metaId: backup.id, name: series.title,
-                            poster: series.posterURL?.absoluteString ?? "",
+                            poster: resolvedPoster?.url?.absoluteString ?? series.posterURLString,
                             year: "", addonName: addonStore.addonName)
                     }
                 }

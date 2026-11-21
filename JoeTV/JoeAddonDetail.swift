@@ -58,7 +58,9 @@ struct JoeAddonDetail: View {
     private var isSeries: Bool { route.type == "series" }
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        ZStack(alignment: .topLeading) {
+            backdrop
+            ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 32) {
                 header
                 if isSeries {
@@ -107,18 +109,67 @@ struct JoeAddonDetail: View {
         // Own-root Menu handler (the house construction):
         // one press closes exactly this layer.
         .onExitCommand { nav.addonDetail = nil }
+        }
+    }
+
+    // MARK: Backdrop (FL-362)
+
+    /// The detail's backdrop layer: the meta's BACKGROUND
+    /// image in its own role — a full-screen JoeBandImage
+    /// (the chain detail's construction: top-anchored slice
+    /// under the same scrims as JoeMovieDetail.ultraBackdrop
+    /// / JoeTorrent.ultraTorBackdrop) behind the unchanged
+    /// content. Pre-fix this screen never read
+    /// head.background at all, so the fetched backdrop was
+    /// discarded and the page opened on the bare theme
+    /// background. Poster art is NEVER substituted into
+    /// this slot: a meta with no background leaves the
+    /// layer empty and the page exactly as it was.
+    @ViewBuilder
+    private var backdrop: some View {
+        if !head.background.isEmpty, let url = URL(string: head.background) {
+            ZStack {
+                JoeBandImage(url: url, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .slice)
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.85), location: 0),
+                    .init(color: .black.opacity(0.40), location: 0.5),
+                    .init(color: .black.opacity(0.05), location: 1)
+                ], startPoint: .leading, endPoint: .trailing)
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.30), location: 0),
+                    .init(color: .clear, location: 0.35),
+                    .init(color: theme.bg.opacity(0.88), location: 0.85),
+                    .init(color: theme.bg, location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+        }
     }
 
     // MARK: Header
 
     private var header: some View {
         HStack(alignment: .top, spacing: 34) {
+            // FL-362: the poster slot in its own role — an
+            // exact 2:3 portrait frame (the height is the
+            // pre-fix 330; the pre-fix 440 width made it a
+            // 4:3 landscape frame), FIT so the whole poster
+            // paints, and the portrait aspect gate so a
+            // wrong-shape bitmap is rejected to the
+            // placeholder instead of being fill-cropped
+            // into the frame (the pre-fix default fill cut
+            // the character's head off). The same
+            // construction as JoeMovieDetail.posterArt and
+            // the JoeTorrent hero.
             JoeRemoteImage(url: URL(string: head.poster.isEmpty ? route.poster : head.poster),
-                           targetPixels: 720) {
+                           targetPixels: 720, fit: true,
+                           slotClass: .portrait) {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(theme.surface2)
             }
-            .frame(width: 440, height: 330)
+            .frame(width: 220, height: 330)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 14) {
                 Text(head.name.isEmpty ? route.name : head.name)

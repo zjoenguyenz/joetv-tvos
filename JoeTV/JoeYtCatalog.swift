@@ -109,8 +109,12 @@ struct JoeYtSeries: Codable, Sendable, Identifiable {
         }
     }
 
-    /// Poster = the first episode's thumbnail, derived, never
-    /// stored (design §1.1).
+    /// Tier-3 fallback art (2.0.47): the first episode's
+    /// YouTube thumbnail, derived, never stored (design
+    /// §1.1). JoeYtPosterResolver tries a real portrait
+    /// poster first (TMDB by tmdbId, then a chain-catalogue
+    /// poster borrowed by normalised title); this thumbnail
+    /// is what a series keeps only when both legs miss.
     var posterURL: URL? {
         guard let first = eps.first, !first.isEmpty else { return nil }
         return URL(string: "https://i.ytimg.com/vi/\(first)/hqdefault.jpg")
@@ -295,6 +299,172 @@ struct JoeYtFile: Codable, Sendable {
     let series: [JoeYtSeries]
 }
 
+// MARK: - Poster resolution (2.0.47)
+//
+// The owner's order: YouTube/TVB series cards and the
+// YouTube detail must show a REAL series poster like the
+// chain-catalogue titles do, not episode 1's landscape
+// thumbnail letterboxed into a portrait card. Resolution
+// order for one series:
+//   1. TMDB poster by the series' own tmdbId (when
+//      non-zero) — JoeImagePipeline.tmdbPosterURL, which
+//      rides TMDBClient.posterPath and caches the path
+//      per identity for the session, negatives included,
+//      so this leg never re-asks TMDB for a series it has
+//      already answered.
+//   2. A chain-catalogue poster borrowed by title: the
+//      bundled TVB snapshot (TVBCatalog — the catalogue
+//      the TP → KK → VS → F4K chain resolved) is indexed
+//      by posterMatchKey, and a series whose cleaned
+//      title or matched Vi name keys equal to a snapshot
+//      title's Vi / TMDB-Vi / EN / original name borrows
+//      that title's chain poster (its provider
+//      posterFallback first, in TP → KK → VS → F4K order;
+//      the title's own posterURLString behind it).
+//   3. Episode 1's YouTube thumbnail (the pre-2.0.47
+//      behaviour, JoeYtSeries.posterURL).
+// Every resolved result is cached per pid for the
+// session (lock-guarded, the TVBSnapshotLookup idiom),
+// so rails re-rendering never re-run a leg; the bitmap
+// itself always loads through JoeImagePipeline — this
+// resolver only ever hands out URLs, never images.
+
+struct JoeYtResolvedPoster: Sendable {
+    enum Source: Sendable {
+        case tmdb
+        case chain
+        case youtubeThumbnail
+    }
+
+    let url: URL?
+    let source: Source
+
+    /// True for the two real-poster legs: their slots gate
+    /// on .portrait and fit the whole poster. The thumbnail
+    /// leg is landscape art and keeps the .any slot.
+    var isPortraitPoster: Bool { source != .youtubeThumbnail }
+}
+
+enum JoeYtPosterResolver {
+    private static let lock = NSLock()
+    // Swift 6: nonisolated(unsafe) — every access is
+    // serialized by lock; the published chain index is an
+    // immutable map of immutable bundled data.
+    private nonisolated(unsafe) static var resolvedByPid: [String: JoeYtResolvedPoster] = [:]
+    private nonisolated(unsafe) static var chainIndex: [String: TVBTitle]?
+
+    /// The poster-match key for one title: the app's one
+    /// normalisation (Providers.normalizeTitle — lowercase,
+    /// diacritics stripped, non-alphanumeric runs collapsed)
+    /// plus a trailing 4-digit year token dropped, applied
+    /// IDENTICALLY to the series side and the catalogue
+    /// side. Chain titles are stored both with and without
+    /// a year suffix across the catalogues, so the year is
+    /// not part of a poster's identity key; a title that is
+    /// ONLY a year keeps its normalised form (the drop
+    /// requires at least one other token).
+    static func posterMatchKey(_ raw: String) -> String {
+        let normalized = Providers.normalizeTitle(raw)
+        var tokens = normalized.split(separator: " ").map(String.init)
+        if tokens.count > 1, let last = tokens.last, last.count == 4,
+           last.allSatisfy({ $0.isNumber }), let year = Int(last),
+           (1950...2035).contains(year) {
+            tokens.removeLast()
+        }
+        let joined = tokens.joined(separator: " ")
+        return joined.isEmpty ? normalized : joined
+    }
+
+    /// The chain index: posterMatchKey → snapshot title.
+    /// Displayed titles are indexed first (a displayed
+    /// title's chain poster is provider-verified art), then
+    /// the rest of the spine; the first title to claim a
+    /// key keeps it — collisions never overwrite.
+    private static func chainPosterIndex() -> [String: TVBTitle] {
+        lock.lock()
+        if let chainIndex {
+            lock.unlock()
+            return chainIndex
+        }
+        lock.unlock()
+        // Built outside the lock; racing builders build
+        // identical maps from the same immutable file, and
+        // the first publisher wins (TVBSnapshotLookup.maps
+        // idiom).
+        var index: [String: TVBTitle] = [:]
+        if let catalog = TVBCatalog.loadBundled() {
+            let ordered = catalog.titles.filter { $0.isDisplayed }
+                + catalog.titles.filter { !$0.isDisplayed }
+            for title in ordered {
+                for name in [title.titleVi, title.titleViTmdb,
+                             title.titleEn, title.titleOriginal] {
+                    let key = posterMatchKey(name)
+                    if !key.isEmpty, index[key] == nil {
+                        index[key] = title
+                    }
+                }
+            }
+        }
+        lock.lock()
+        if chainIndex == nil { chainIndex = index }
+        let published = chainIndex ?? index
+        lock.unlock()
+        return published
+    }
+
+    /// Tier 2 alone (synchronous, no network): the chain
+    /// poster a series borrows by normalised title, or nil.
+    /// The borrowed art is the matched title's provider
+    /// posterFallback in TP → KK → VS → F4K priority order
+    /// (the chain's own CDN art); behind it, the title's
+    /// posterURLString (its TMDB path, when the snapshot
+    /// carries one and no provider poster exists).
+    static func chainPoster(for series: JoeYtSeries) -> URL? {
+        let index = chainPosterIndex()
+        guard !index.isEmpty else { return nil }
+        for candidate in [series.title, series.matchVi] {
+            let key = posterMatchKey(candidate)
+            guard !key.isEmpty, let title = index[key] else { continue }
+            for providerKey in TVBTitle.priorityKeys {
+                if let fallback = title.providers[providerKey]?.posterFallback,
+                   !fallback.isEmpty, let url = URL(string: fallback) {
+                    return url
+                }
+            }
+            if let url = title.posterURL { return url }
+        }
+        return nil
+    }
+
+    /// The full fallback chain for one series, cached per
+    /// pid. Tier 1 rides the pipeline's TMDB poster leg
+    /// (TMDBClient.posterPath underneath, path cached per
+    /// identity including negatives); tier 2 is the local
+    /// chain index; tier 3 is the episode-1 thumbnail.
+    static func resolve(_ series: JoeYtSeries) async -> JoeYtResolvedPoster {
+        if let hit = lock.withLock({ resolvedByPid[series.pid] }) {
+            return hit
+        }
+        let resolved: JoeYtResolvedPoster
+        if series.tmdbId > 0,
+           let tmdbURL = await JoeImagePipeline.shared.tmdbPosterURL(
+               tmdbId: String(series.tmdbId), type: "tv") {
+            resolved = JoeYtResolvedPoster(url: tmdbURL, source: .tmdb)
+        } else if let chainURL = chainPoster(for: series) {
+            resolved = JoeYtResolvedPoster(url: chainURL, source: .chain)
+        } else {
+            resolved = JoeYtResolvedPoster(url: series.posterURL,
+                                            source: .youtubeThumbnail)
+        }
+        lock.withLock {
+            if resolvedByPid[series.pid] == nil {
+                resolvedByPid[series.pid] = resolved
+            }
+        }
+        return resolved
+    }
+}
+
 // MARK: - Store
 
 /// Loads and publishes the YouTube catalogue snapshot once
@@ -332,11 +502,28 @@ final class JoeYtStore: ObservableObject {
         snapshot = built.snapshot
         DiagLog.write("YT", "catalogue loaded generatedAt=\(built.snapshot.generatedAt) series=\(built.snapshot.series.count) matched=\(built.snapshot.matchByTmdbId.count) collisions=\(built.snapshot.collisions) source=\(built.fromCache ? "cache" : "bundle")")
         // Warm the first rails' posters through the existing
-        // pipeline (the JoeTVBView launch-prefetch pattern).
-        let warm = built.snapshot.rails.prefix(2)
-            .flatMap { $0.series.prefix(30) }
-            .compactMap { $0.posterURL }
-        JoeImagePipeline.shared.prefetch(warm, targetPixels: 720)
+        // pipeline (the JoeTVBView launch-prefetch pattern),
+        // resolving each series through the 2.0.47 poster
+        // chain first (TMDB / chain / thumbnail) so the warm
+        // set is the art the cards will actually paint — and
+        // so the per-card resolves land on warm caches.
+        let warmSeries = Array(built.snapshot.rails.prefix(2)
+            .flatMap { $0.series.prefix(30) })
+        Task {
+            let warmURLs = await withTaskGroup(of: URL?.self) { group in
+                for warm in warmSeries {
+                    group.addTask {
+                        await JoeYtPosterResolver.resolve(warm).url
+                    }
+                }
+                var urls: [URL] = []
+                for await url in group {
+                    if let url { urls.append(url) }
+                }
+                return urls
+            }
+            JoeImagePipeline.shared.prefetch(warmURLs, targetPixels: 720)
+        }
         // The "living" leg (design §1.2 item 3): one
         // background refresh per process when the loaded copy
         // is over 24 h old. It writes the cache ONLY; this

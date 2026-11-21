@@ -14,9 +14,15 @@ import Network
 //        │                          relayed to the origin)
 //        └────────► audio.m3u8 ──► audio.bin
 //
-// Each media playlist is a single-segment VOD: the
-// format's init range becomes the EXT-X-MAP, the rest of
-// the file one EXTINF segment with an EXT-X-BYTERANGE.
+// Each media playlist is a VOD: the format's init
+// range becomes the EXT-X-MAP and the rest of the file
+// is declared as EXTINF segments with EXT-X-BYTERANGEs
+// — one per fMP4 fragment when the file's sidx index
+// was read at session creation (FL-358: a single
+// whole-file segment gives AVPlayer no byte-range
+// entry point for a seek, so every scrub collapsed
+// back to the segment's first byte), or the pre-FL-358
+// single whole-file segment when it was not.
 // The segment endpoints are transparent range relays:
 // whatever Range AVPlayer asks for is forwarded to the
 // deciphered origin URL and the bytes stream back
@@ -82,6 +88,16 @@ final class JoeYtHlsServer {
         case ready
     }
 
+    /// FL-358: one fMP4 fragment of a stream, as indexed
+    /// by the file's own sidx box — the byte range the
+    /// media playlist declares as one HLS segment, and
+    /// the duration AVPlayer maps seek times onto.
+    private struct MediaSegment: Sendable {
+        var offset: Int64
+        var length: Int64
+        var durationSeconds: Double
+    }
+
     /// One registered playback session: the two origin
     /// streams of one resolved episode.
     private struct StreamEntry {
@@ -95,6 +111,12 @@ final class JoeYtHlsServer {
         /// to ignore makeSession's parameter and hardcode
         /// the spec's UA).
         var userAgent: String
+        /// FL-358: the stream's sidx fragment index,
+        /// read from the origin at session creation.
+        /// Empty = the index could not be read or did
+        /// not validate, and the media playlist keeps
+        /// its single-segment shape for this stream.
+        var segments: [MediaSegment] = []
     }
 
     /// FL-350 (2.0.45, leg 2): one subtitle rendition
@@ -175,20 +197,35 @@ final class JoeYtHlsServer {
         let renditions = await fetchRenditions(playable: playable,
                                                sessionID: id,
                                                userAgent: userAgent)
-        let video = StreamEntry(
+        var video = StreamEntry(
             origin: videoURL,
             contentLength: playable.videoContentLength,
             initRange: playable.videoInitRange,
             durationSeconds: playable.durationSeconds,
             mimeType: "video/mp4",
             userAgent: userAgent)
-        let audio = StreamEntry(
+        var audio = StreamEntry(
             origin: audioURL,
             contentLength: playable.audioContentLength,
             initRange: playable.audioInitRange,
             durationSeconds: playable.durationSeconds,
             mimeType: "audio/mp4",
             userAgent: userAgent)
+        // FL-358: read each stream's sidx fragment index
+        // from the origin NOW, once per episode (two
+        // small range fetches), so the media playlists
+        // can declare per-fragment segments and a seek
+        // can enter the file at the target fragment's
+        // byte offset. A stream whose index does not
+        // read or validate simply keeps the
+        // single-segment playlist — playback is never
+        // blocked for seek support.
+        video.segments = await fetchSegmentIndex(entry: video,
+                                                  sessionID: id,
+                                                  fileLabel: "video")
+        audio.segments = await fetchSegmentIndex(entry: audio,
+                                                  sessionID: id,
+                                                  fileLabel: "audio")
         let session = Session(
             video: video, audio: audio,
             videoCodec: playable.videoCodec, audioCodec: playable.audioCodec,
@@ -825,7 +862,17 @@ final class JoeYtHlsServer {
 
     private func mediaPlaylist(entry: StreamEntry, file: String) -> String {
         let duration = entry.durationSeconds > 0 ? entry.durationSeconds : 3600
-        let target = Int(duration.rounded(.up)) + 1
+        // FL-358: with an sidx fragment index the
+        // TARGETDURATION is the longest FRAGMENT (the
+        // HLS meaning of the field); without one it
+        // stays the whole duration, as before.
+        let target: Int
+        if entry.segments.isEmpty {
+            target = Int(duration.rounded(.up)) + 1
+        } else {
+            let longest = entry.segments.map(\.durationSeconds).max() ?? duration
+            target = Int(longest.rounded(.up)) + 1
+        }
         var lines: [String] = [
             "#EXTM3U",
             "#EXT-X-VERSION:6",
@@ -838,14 +885,299 @@ final class JoeYtHlsServer {
             lines.append("#EXT-X-MAP:URI=\"\(file)\",BYTERANGE=\"\(initRange.length)@\(initRange.start)\"")
             segmentStart = initRange.end + 1
         }
-        lines.append(String(format: "#EXTINF:%.3f,", duration))
-        if entry.contentLength > segmentStart {
-            let mediaLength = entry.contentLength - segmentStart
-            lines.append("#EXT-X-BYTERANGE:\(mediaLength)@\(segmentStart)")
+        if entry.segments.isEmpty {
+            lines.append(String(format: "#EXTINF:%.3f,", duration))
+            if entry.contentLength > segmentStart {
+                let mediaLength = entry.contentLength - segmentStart
+                lines.append("#EXT-X-BYTERANGE:\(mediaLength)@\(segmentStart)")
+            }
+            lines.append(file)
+        } else {
+            // FL-358: one segment per fMP4 fragment.
+            // AVPlayer maps a seek time onto these
+            // segments by their cumulative EXTINF
+            // durations and requests ONLY the segment
+            // holding the target — the relay forwards
+            // that Range to the origin verbatim, so the
+            // origin fetch starts at exactly the target
+            // fragment's offset instead of the file's
+            // first media byte.
+            for segment in entry.segments {
+                lines.append(String(format: "#EXTINF:%.3f,", segment.durationSeconds))
+                lines.append("#EXT-X-BYTERANGE:\(segment.length)@\(segment.offset)")
+                lines.append(file)
+            }
         }
-        lines.append(file)
         lines.append("#EXT-X-ENDLIST")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    // MARK: Segment index (sidx, FL-358)
+
+    /// Read and parse the sidx box of one stream from
+    /// its origin, returning the fragment index the
+    /// media playlist declares as segments. The box is
+    /// expected to start where the init range ends (the
+    /// layout the resolver's formats carry — initRange
+    /// and indexRange are adjacent in the /player
+    /// payload); the box's own type field is the proof,
+    /// and anything that is not a well-formed sidx, or
+    /// whose entries do not tile the file inside its
+    /// content length, yields an empty result and the
+    /// stream keeps the single-segment playlist. Every
+    /// failure is logged with its reason (never a URL)
+    /// and never blocks the session.
+    private func fetchSegmentIndex(entry: StreamEntry, sessionID: String,
+                                   fileLabel: String) async -> [MediaSegment] {
+        let id8 = sessionID.prefix(8)
+        guard let initRange = entry.initRange else {
+            log("session \(id8): sidx \(fileLabel) bỏ qua — không có initRange (playlist giữ 1 segment)")
+            return []
+        }
+        // Same overflow class as the parser's cursor
+        // (gate round 1, FL-358): the additions below
+        // (end + 1, indexStart + 16 / + 39) must never
+        // trap on an out-of-range initRange — reject it
+        // here and keep the legacy playlist.
+        guard initRange.end >= 0, initRange.end <= Int64.max - 64 else {
+            log("session \(id8): sidx \(fileLabel) bỏ qua — initRange.end ngoài tầm (playlist giữ 1 segment)")
+            return []
+        }
+        let indexStart = initRange.end + 1
+        guard entry.contentLength > indexStart + 16 else {
+            log("session \(id8): sidx \(fileLabel) bỏ qua — file không còn đủ byte sau init (playlist giữ 1 segment)")
+            return []
+        }
+        // Probe: the box header (size + type) plus the
+        // fixed fields through reference_count — the
+        // version-0 header is 32 bytes, the version-1
+        // header is 40 bytes (its earliest_presentation_
+        // time and first_offset are 64-bit), so 40 bytes
+        // are probed to cover both versions.
+        let probeEnd = min(indexStart + 39, entry.contentLength - 1)
+        guard let probe = await fetchOriginRange(
+                origin: entry.origin, userAgent: entry.userAgent,
+                start: indexStart, end: probeEnd),
+              probe.count >= 16 else {
+            log("session \(id8): sidx \(fileLabel) đọc hỏng ở probe (playlist giữ 1 segment)")
+            return []
+        }
+        let probeBytes = [UInt8](probe)
+        guard Self.boxType(probeBytes) == "sidx" else {
+            log("session \(id8): sidx \(fileLabel) bỏ qua — box sau init không phải sidx (playlist giữ 1 segment)")
+            return []
+        }
+        let boxSize = Int64(Self.u32(probeBytes, at: 0))
+        // Minimum box size is version-correct: the
+        // fixed header through reference_count is 32
+        // bytes for version 0 and 40 bytes for
+        // version 1 (probe.count >= 16 above, so the
+        // version byte at offset 8 is always present).
+        let minBoxSize: Int64 = probeBytes[8] == 1 ? 40 : 32
+        // Written as a subtraction (safe: the guard
+        // above already proved contentLength >
+        // indexStart + 16) so the comparison itself can
+        // never overflow, however large indexStart is.
+        guard boxSize >= minBoxSize, boxSize <= entry.contentLength - indexStart else {
+            log("session \(id8): sidx \(fileLabel) bỏ qua — cỡ box \(boxSize) không hợp lệ (playlist giữ 1 segment)")
+            return []
+        }
+        let box: Data
+        if boxSize <= Int64(probe.count) {
+            box = probe.prefix(Int(boxSize))
+        } else {
+            guard let full = await fetchOriginRange(
+                    origin: entry.origin, userAgent: entry.userAgent,
+                    start: indexStart, end: indexStart + boxSize - 1),
+                  Int64(full.count) == boxSize else {
+                log("session \(id8): sidx \(fileLabel) đọc hỏng ở box đầy đủ (playlist giữ 1 segment)")
+                return []
+            }
+            box = full
+        }
+        guard let segments = Self.parseSidx([UInt8](box),
+                                            boxStart: indexStart,
+                                            contentLength: entry.contentLength,
+                                            durationSeconds: entry.durationSeconds)
+        else {
+            log("session \(id8): sidx \(fileLabel) parse/đối chiếu hỏng (playlist giữ 1 segment)")
+            return []
+        }
+        log("session \(id8): sidx \(fileLabel) OK — \(segments.count) đoạn fragment (seek theo đoạn khả dụng)")
+        return segments
+    }
+
+    /// One bounded range fetch against an origin URL:
+    /// the bytes of exactly [start, end] (inclusive),
+    /// or nil on any failure. The origin must answer
+    /// 206 with exactly the requested count — anything
+    /// else is not index data this parser may trust.
+    private func fetchOriginRange(origin: URL, userAgent: String,
+                                  start: Int64, end: Int64) async -> Data? {
+        guard end >= start else { return nil }
+        var request = URLRequest(url: origin)
+        request.timeoutInterval = 15
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 206,
+                  Int64(data.count) == end - start + 1 else { return nil }
+            return data
+        } catch {
+            return nil
+        }
+    }
+
+    /// The 4-character box type at bytes 4..<8.
+    private static func boxType(_ bytes: [UInt8]) -> String {
+        guard bytes.count >= 8 else { return "" }
+        return String(decoding: bytes[4..<8], as: UTF8.self)
+    }
+
+    /// Big-endian UInt16 at a byte offset (0 when the
+    /// offset is out of bounds — callers validate the
+    /// layout before trusting a parsed value).
+    private static func u16(_ bytes: [UInt8], at offset: Int) -> Int {
+        guard offset >= 0, offset + 2 <= bytes.count else { return 0 }
+        return Int(bytes[offset]) << 8 | Int(bytes[offset + 1])
+    }
+
+    /// Big-endian UInt32 at a byte offset (same
+    /// out-of-bounds contract as u16).
+    private static func u32(_ bytes: [UInt8], at offset: Int) -> Int64 {
+        guard offset >= 0, offset + 4 <= bytes.count else { return 0 }
+        return Int64(bytes[offset]) << 24
+            | Int64(bytes[offset + 1]) << 16
+            | Int64(bytes[offset + 2]) << 8
+            | Int64(bytes[offset + 3])
+    }
+
+    /// Big-endian UInt64 at a byte offset (same
+    /// out-of-bounds contract as u16). Unsigned on
+    /// purpose (gate round 1, FL-358): the sidx v1
+    /// first_offset is a 64-bit UNSIGNED field — reading
+    /// it into a signed Int64 reinterprets values
+    /// >= 2^63 as negative offsets. Callers must
+    /// range-check before converting to Int64.
+    private static func u64(_ bytes: [UInt8], at offset: Int) -> UInt64 {
+        guard offset >= 0, offset + 8 <= bytes.count else { return 0 }
+        let high = u32(bytes, at: offset)
+        let low = u32(bytes, at: offset + 4)
+        return UInt64(high) << 32 | UInt64(low)
+    }
+
+    /// Parse a complete sidx box (ISO/IEC 14496-12:
+    /// version 0 carries 32-bit first_offset, version 1
+    /// 64-bit; each reference is 12 bytes —
+    /// reference_type(1) + referenced_size(31),
+    /// subsegment_duration(32), SAP fields(32)) into
+    /// the file's fragment list. Nil on any
+    /// inconsistency: a non-media reference, a zero
+    /// size or duration, a fragment tiling that runs
+    /// past the file's content length, or a total
+    /// duration wildly off the resolver's duration —
+    /// a wrong index is worse than no index, because
+    /// AVPlayer would seek by it. The fallback contract
+    /// is total (gate round 1, FL-358): EVERY value
+    /// read from the box is range-checked BEFORE it can
+    /// influence a returned segment — the unsigned v1
+    /// first_offset must fit a non-negative Int64, the
+    /// initial tiling cursor must lie inside
+    /// [boxEnd, contentLength], and each segment's end
+    /// is validated BEFORE that segment is appended, so
+    /// no path returns a segment whose own guard has
+    /// not already passed.
+    private static func parseSidx(_ bytes: [UInt8], boxStart: Int64,
+                                  contentLength: Int64,
+                                  durationSeconds: Double) -> [MediaSegment]? {
+        guard bytes.count >= 32, boxType(bytes) == "sidx" else { return nil }
+        guard boxStart >= 0 else { return nil }
+        let version = bytes[8]
+        let timescale = u32(bytes, at: 16)
+        guard timescale > 0 else { return nil }
+        let firstOffset: Int64
+        let referenceCount: Int
+        let entriesStart: Int
+        if version == 0 {
+            // Layout (ISO/IEC 14496-12): size(4) type(4)
+            // version(1) flags(3) reference_ID(4)
+            // timescale(4) earliest_presentation_time(4)
+            // first_offset(4) reserved(2)
+            // reference_count(2) — header total 32 bytes.
+            guard bytes.count >= 32 else { return nil }
+            // u32 tops out at 0xFFFFFFFF, so this value
+            // is always a non-negative Int64.
+            firstOffset = u32(bytes, at: 24)
+            referenceCount = u16(bytes, at: 30)
+            entriesStart = 32
+        } else if version == 1 {
+            // Layout (ISO/IEC 14496-12): size(4) type(4)
+            // version(1) flags(3) reference_ID(4)
+            // timescale(4) earliest_presentation_time(8)
+            // first_offset(8) reserved(2)
+            // reference_count(2) — header total 40 bytes.
+            guard bytes.count >= 40 else { return nil }
+            // first_offset is UNSIGNED 64-bit here:
+            // reject anything that cannot be represented
+            // as a non-negative Int64 byte offset at all,
+            // before any arithmetic touches it.
+            let rawFirstOffset = u64(bytes, at: 28)
+            guard rawFirstOffset <= UInt64(Int64.max) else { return nil }
+            firstOffset = Int64(rawFirstOffset)
+            referenceCount = u16(bytes, at: 38)
+            entriesStart = 40
+        } else {
+            return nil
+        }
+        guard referenceCount >= 2, referenceCount <= 20_000,
+              entriesStart + referenceCount * 12 <= bytes.count else { return nil }
+        // Validate the initial tiling cursor BEFORE the
+        // loop and before any segment exists: the first
+        // referenced byte must lie at or after the end
+        // of this box (bytes IS the complete box, so its
+        // count is the box size) and inside the file.
+        // Both additions are overflow-checked — a sum
+        // that traps would break the fallback contract
+        // as surely as a wrong offset would.
+        let (boxEnd, boxEndOverflow) = boxStart
+            .addingReportingOverflow(Int64(bytes.count))
+        guard !boxEndOverflow, boxEnd <= contentLength else { return nil }
+        let (initialCursor, cursorOverflow) = boxEnd
+            .addingReportingOverflow(firstOffset)
+        guard !cursorOverflow, initialCursor >= boxEnd,
+              initialCursor <= contentLength else { return nil }
+        var segments: [MediaSegment] = []
+        segments.reserveCapacity(referenceCount)
+        var cursor = initialCursor
+        var totalDuration: Double = 0
+        for index in 0..<referenceCount {
+            let at = entriesStart + index * 12
+            let rawSize = u32(bytes, at: at)
+            // reference_type is the top bit: anything
+            // but 0 is an index reference, not media —
+            // this parser does not follow nested sidx.
+            guard rawSize >> 31 == 0 else { return nil }
+            let size = rawSize & 0x7FFF_FFFF
+            let durationTicks = u32(bytes, at: at + 4)
+            guard size > 0, durationTicks > 0 else { return nil }
+            // This segment's end is validated BEFORE
+            // the segment is appended (overflow-checked
+            // for the same reason as the cursor above).
+            let (segmentEnd, endOverflow) = cursor
+                .addingReportingOverflow(size)
+            guard !endOverflow, segmentEnd <= contentLength else { return nil }
+            let segmentDuration = Double(durationTicks) / Double(timescale)
+            segments.append(MediaSegment(offset: cursor, length: size,
+                                         durationSeconds: segmentDuration))
+            totalDuration += segmentDuration
+            cursor = segmentEnd
+        }
+        if durationSeconds > 0 {
+            guard totalDuration > durationSeconds * 0.5,
+                  totalDuration < durationSeconds * 1.5 else { return nil }
+        }
+        return segments
     }
 
     // MARK: Origin relay (byte ranges, streamed)

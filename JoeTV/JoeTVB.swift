@@ -775,21 +775,10 @@ struct JoeTVBView: View {
     }
 
     private func ytCard(_ series: JoeYtSeries) -> some View {
-        Button {
+        JoeYtPosterCard(series: series, form: .rail,
+                        focusID: "yt|" + series.pid, focus: $cardFocus) {
             openYouTube(series)
-        } label: {
-            PosterCard(
-                title: series.title,
-                posterURL: series.posterURL,
-                tmdbId: series.tmdbId > 0 ? String(series.tmdbId) : "",
-                tmdbType: "tv",
-                meta: "\(series.eps.count) tập · \(series.tierLabel)",
-                badge: series.isMembersTier ? "YouTube" : nil,
-                form: .rail,
-                artSlotClass: .any)
         }
-        .joeCardButton()
-        .focused($cardFocus, equals: "yt|" + series.pid)
     }
 
     /// One actor-rail card (Idea 1): the actor's most
@@ -915,6 +904,54 @@ struct JoeTVBView: View {
                 year: title.yearString, tvb: title.routeContext)
         } else {
             nav.ytDetail = JoeYtRoute(pid: series.pid)
+        }
+    }
+}
+
+// MARK: - YouTube series poster card (2.0.47)
+//
+// One YouTube/TVB series card for the rails and the in-tab
+// search grid. The card owns the series' poster resolution
+// (JoeYtPosterResolver: TMDB by tmdbId → chain-catalogue
+// poster by normalised title → episode-1 thumbnail): until
+// the resolution lands the PosterCard paints its placeholder
+// (never the landscape thumbnail first — that letterboxed
+// flash is the fault this feature removes); a resolved real
+// poster gates the slot on .portrait and a resolved
+// thumbnail keeps the .any slot it has always had, so the
+// final fallback renders exactly as before. tmdbId is
+// passed EMPTY on purpose: the resolver already ran the
+// TMDB leg (through the pipeline's cached posterPath
+// lookup), and PosterCard's own TMDB fallback would only
+// re-run the same leg behind a failed portrait load.
+private struct JoeYtPosterCard: View {
+    let series: JoeYtSeries
+    let form: PosterCard.Form
+    let focusID: String
+    var focus: FocusState<String?>.Binding
+    let onTap: () -> Void
+
+    @State private var resolved: JoeYtResolvedPoster?
+
+    var body: some View {
+        Button {
+            onTap()
+        } label: {
+            PosterCard(
+                title: series.title,
+                posterURL: resolved?.url,
+                tmdbId: "",
+                tmdbType: "tv",
+                meta: "\(series.eps.count) tập · \(series.tierLabel)",
+                badge: series.isMembersTier ? "YouTube" : nil,
+                form: form,
+                artSlotClass: (resolved?.isPortraitPoster ?? true)
+                    ? .portrait : .any)
+        }
+        .joeCardButton()
+        .focused(focus, equals: focusID)
+        .task(id: series.pid) {
+            resolved = await JoeYtPosterResolver.resolve(series)
         }
     }
 }
@@ -1064,20 +1101,11 @@ struct JoeTVBSearchView: View {
                                  count: 6),
                   alignment: .leading, spacing: 40) {
             ForEach(ytResults) { series in
-                Button {
+                JoeYtPosterCard(series: series, form: .wall,
+                                focusID: "ytsearch|" + series.pid,
+                                focus: $cardFocus) {
                     openYouTube(series)
-                } label: {
-                    PosterCard(
-                        title: series.title,
-                        posterURL: series.posterURL,
-                        tmdbId: series.tmdbId > 0 ? String(series.tmdbId) : "",
-                        tmdbType: "tv",
-                        meta: "\(series.eps.count) tập · \(series.tierLabel)",
-                        badge: series.isMembersTier ? "YouTube" : nil,
-                        artSlotClass: .any)
                 }
-                .joeCardButton()
-                .focused($cardFocus, equals: "ytsearch|" + series.pid)
             }
         }
         .padding(.vertical, 8)
