@@ -128,6 +128,13 @@ struct JoeMovieDetail: View {
     @State private var ytMode: JoeYtSourceMode = .auto
     @State private var ytChainPinned = false
 
+    /// 2.0.48: the backdrop preview's controller (Leg 3 —
+    /// see JoePreview.swift). One per detail presentation;
+    /// killed by ANY input (the onChange hooks below) and
+    /// torn down on disappear.
+    @StateObject private var preview = JoePreviewController()
+    @Environment(\.scenePhase) private var scenePhase
+
     @FocusState private var ytEpFocus: Int?
     @FocusState private var focusedEp: String?
     @FocusState private var focusedPlay: Bool
@@ -391,6 +398,19 @@ struct JoeMovieDetail: View {
             // speculative work dies on exit/switch by itself.
             await dwellPreResolve()
         }
+        .task(id: "preview|" + provider + "|" + slug
+              + "|" + (detail == nil ? "0" : "1")) {
+            // 2.0.48 (Leg 3): the backdrop preview's dwell.
+            // Keyed WITHOUT the focused episode on purpose:
+            // the preview target is fixed at open time (the
+            // episode Play would play), and a focus move is
+            // an input that KILLS the preview (rule D1) —
+            // it must never restart this task into a fresh
+            // attempt. Provider/slug changes re-key it, but
+            // the kill latch the switch's own input set
+            // keeps the new run silent.
+            await runPreview()
+        }
         .task(id: tmdb?.collectionId ?? 0) {
             // Idea 21: the franchise load — keyed on the
             // loaded TMDBInfo's collection id, so it starts
@@ -421,7 +441,66 @@ struct JoeMovieDetail: View {
         // layer, outside this view, and Menu exited the app
         // from here on device. Unconditional: it exists exactly
         // while the detail does.
-        .onExitCommand { nav.movie = nil }
+        .onExitCommand {
+            preview.kill(reason: "menu")
+            nav.movie = nil
+        }
+        // 2.0.48 (Leg 3, rule D1): ANY input kills the
+        // backdrop preview for this visit. Every focus
+        // binding on this screen reports here — a swipe
+        // or arrow press moves focus before anything
+        // else can happen — and the remaining inputs
+        // (Play presentation, provider switch, the app
+        // leaving the foreground) ride their own hooks.
+        // Focus transitions report their old/new VALUES
+        // so the controller can tell the app's own
+        // initial focus landing (the visit's first
+        // unset→set transition) from a user press; every
+        // other transition kills, dwell included (see
+        // JoePreview.swift focusInput).
+        .onChange(of: focusedEp) { old, new in
+            preview.focusInput(landingShaped: old == nil && new != nil)
+        }
+        .onChange(of: ytEpFocus) { old, new in
+            preview.focusInput(landingShaped: old == nil && new != nil)
+        }
+        .onChange(of: focusedPlay) { old, new in
+            preview.focusInput(landingShaped: !old && new)
+        }
+        .onChange(of: focusedFav) { old, new in
+            preview.focusInput(landingShaped: !old && new)
+        }
+        .onChange(of: focusedFollow) { old, new in
+            preview.focusInput(landingShaped: !old && new)
+        }
+        .onChange(of: focusedAlt) { old, new in
+            preview.focusInput(landingShaped: old == nil && new != nil)
+        }
+        .onChange(of: focusedRetry) { old, new in
+            preview.focusInput(landingShaped: !old && new)
+        }
+        .onChange(of: focusedCast) { old, new in
+            preview.focusInput(landingShaped: old == nil && new != nil)
+        }
+        .onChange(of: focusedFranchise) { old, new in
+            preview.focusInput(landingShaped: old == nil && new != nil)
+        }
+        .onChange(of: playerHolder?.id) {
+            if playerHolder != nil { preview.kill(reason: "play") }
+        }
+        .onChange(of: nav.ytPlayer?.id) {
+            // The YouTube player's presentation — the
+            // chain player's hook above does not cover
+            // it, and a TVB title's Play tap (focus
+            // already resting on Play, no focus change)
+            // reaches ONLY this hook.
+            if nav.ytPlayer != nil { preview.kill(reason: "play") }
+        }
+        .onChange(of: provider) { preview.kill(reason: "input") }
+        .onChange(of: scenePhase) {
+            if scenePhase != .active { preview.kill(reason: "inactive") }
+        }
+        .onDisappear { preview.stop() }
         // TVB YouTube feature: the catalogue + session state
         // the source-row integration reads, and the chain
         // hand-back — when the YouTube player (launched from
@@ -610,6 +689,23 @@ struct JoeMovieDetail: View {
                 JoeBandImage(url: u, targetPixels: 1920,
                              anchor: 0.16, portraitMode: .slice)
             }
+            // 2.0.48 (Leg 3): the backdrop preview's video
+            // layer — above the backdrop images, below
+            // BOTH scrims (the design's one permitted new
+            // element; nothing else in this stack moves).
+            // Present only while a preview player exists;
+            // opacity carries the 0.8 s crossfade IN at
+            // first frame (a kill cuts instantly — the
+            // teardown removes the player in the same
+            // update, per rule D1).
+            if preview.player != nil {
+                JoePreviewLayerView(controller: preview)
+                    .opacity(preview.visible ? 1 : 0)
+                    .animation(.easeInOut(duration: preview.visible ? 0.8 : 0.15),
+                               value: preview.visible)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
             LinearGradient(stops: [
                 .init(color: .black.opacity(0.85), location: 0),
                 .init(color: .black.opacity(0.40), location: 0.5),
@@ -731,6 +827,10 @@ struct JoeMovieDetail: View {
     /// (favButton's action, a circle face).
     private func ultraFavCircle(_ d: Detail) -> some View {
         Button {
+            // D1 (2.0.48): a Select press with focus
+            // already resting here changes no hooked
+            // state — the press itself kills the preview.
+            preview.kill(reason: "input")
             var e = WatchStore.Entry()
             e.kind = Providers.kindOf(provider)
             e.key = favKey
@@ -1181,7 +1281,16 @@ struct JoeMovieDetail: View {
         .overlay(RoundedRectangle(cornerRadius: theme.rField)
             .strokeBorder(theme.stroke, lineWidth: 1.5))
         if let action {
-            let button = Button(action: action) {
+            // D1 (2.0.48): EVERY row built here kills the
+            // preview in its press — several row actions
+            // (the mode rows, the torrent row's no-op
+            // states) change no hooked value, so the kill
+            // lives at this single construction point and
+            // no row action can miss it.
+            let button = Button(action: {
+                preview.kill(reason: "input")
+                action()
+            }) {
                 row.overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
             }
             .joeCardButton()
@@ -1329,6 +1438,9 @@ struct JoeMovieDetail: View {
                             .foregroundStyle(theme.meta)
                     }
                     Button {
+                        // D1 (2.0.48): the press itself
+                        // kills the preview (see castCell).
+                        preview.kill(reason: "input")
                         actorRoute = .tmdb(personId: member.id,
                                             name: member.name,
                                             photoURL: member.photoURL)
@@ -1570,6 +1682,11 @@ private struct JoeActorNameLabel: View {
     private var torrentChip: some View {
         if TorrentSettings.isConfigured {
             Button {
+                // D1 (2.0.48): the press is a no-op while
+                // the identity is .pending / .unresolved —
+                // it still counts as input, so it kills
+                // the preview itself (see sourceChip).
+                preview.kill(reason: "input")
                 openTorrentDetail()
             } label: {
                 JoeChipLabel(title: "Torrent", selected: false)
@@ -1588,6 +1705,12 @@ private struct JoeActorNameLabel: View {
         switch entry {
         case .auto:
             Button {
+                // D1 (2.0.48): these actions set only
+                // unhooked mode state — a Select with
+                // focus already resting here changes no
+                // hooked value, so the press itself kills
+                // the preview (the fav/follow rule).
+                preview.kill(reason: "input")
                 autoSource = true
                 // TVB YouTube: Tự động is the YouTube-first
                 // mode when a match exists (the owner's law);
@@ -1602,6 +1725,7 @@ private struct JoeActorNameLabel: View {
             .focused($focusedAlt, equals: "auto")
         case .youtube:
             Button {
+                preview.kill(reason: "input")
                 ytChainPinned = false
                 ytMode = .youtube
                 autoSource = false
@@ -1613,6 +1737,7 @@ private struct JoeActorNameLabel: View {
             .focused($focusedAlt, equals: "youtube")
         case .current:
             Button {
+                preview.kill(reason: "input")
                 autoSource = false
                 ytChainPinned = true
             } label: {
@@ -1623,6 +1748,7 @@ private struct JoeActorNameLabel: View {
             .focused($focusedAlt, equals: "current")
         case .alternative(let code, let altSlug):
             Button {
+                preview.kill(reason: "input")
                 switchNotice = nil
                 autoSource = false
                 ytChainPinned = true
@@ -1808,6 +1934,22 @@ private struct JoeActorNameLabel: View {
                     JoeBandImage(url: url, targetPixels: 1920,
                                  anchor: 0.16, portraitMode: .slice)
                 }
+                // 2.0.48 (Leg 3): the backdrop preview's
+                // video layer, inside the band's own stack
+                // (above the TMDB slice, below the fade) —
+                // the band's clip shape and stroke overlay
+                // apply to it exactly as to the images.
+                // Crossfade in 0.8 s; a kill cuts instantly
+                // (same rule as the Ultra layer).
+                if preview.player != nil {
+                    JoePreviewLayerView(controller: preview)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .opacity(preview.visible ? 1 : 0)
+                        .animation(.easeInOut(duration: preview.visible ? 0.8 : 0.15),
+                                   value: preview.visible)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
                 LinearGradient(stops: [
                     .init(color: theme.bg.opacity(0.45), location: 0),
                     .init(color: theme.bg.opacity(0.25), location: 0.40),
@@ -1863,6 +2005,10 @@ private struct JoeActorNameLabel: View {
 
     private func castCell(_ member: TMDBCastMember) -> some View {
         Button {
+            // D1 (2.0.48): the press itself kills the
+            // preview — presenting the actor cover must
+            // not leave it playing behind the cover.
+            preview.kill(reason: "input")
             actorRoute = .tmdb(personId: member.id, name: member.name,
                                 photoURL: member.photoURL)
         } label: {
@@ -2063,6 +2209,10 @@ private struct JoeCastCellLabel: View {
 
     private func favButton(_ d: Detail) -> some View {
         Button {
+            // D1 (2.0.48): a Select press with focus
+            // already resting here changes no hooked
+            // state — the press itself kills the preview.
+            preview.kill(reason: "input")
             var e = WatchStore.Entry()
             e.kind = Providers.kindOf(provider)
             e.key = favKey
@@ -2146,6 +2296,11 @@ private struct JoeCastCellLabel: View {
     private func followButton(_ d: Detail) -> some View {
         if isSeries(d) {
             Button {
+                // D1 (2.0.48): a Select press with focus
+                // already resting here changes no hooked
+                // state — the press itself kills the
+                // preview.
+                preview.kill(reason: "input")
                 _ = FollowStore.shared.toggle(
                     provider: provider,
                     slug: d.movie.slug,
@@ -3252,6 +3407,179 @@ private struct JoeCastCellLabel: View {
         guard !movie.tmdbId.isEmpty else { return [] }
         return await TMDBClient.fetchCast(
             tmdbId: movie.tmdbId, type: movie.tmdbType)
+    }
+
+    // MARK: - Backdrop preview (2.0.48, Leg 3)
+    //
+    // The driver for JoePreviewController (JoePreview
+    // .swift holds the rules and the player). Target =
+    // the item Play would play right now (the resume /
+    // start episode), resolved through the app's OWN
+    // playback paths: the YouTube route first when the
+    // unified YouTube mode is in force (Auto falls
+    // through to the chain on a YouTube failure, exactly
+    // as Play does; a pinned YouTube mode does not), the
+    // chain ladder otherwise. Torrent titles never
+    // reach here — this detail's torrent entry hands off
+    // to the torrent detail, whose backdrop stays static
+    // by the 2026-11-21 ruling (no cached file exists on
+    // device to clip from, and no debrid download may be
+    // triggered for a preview).
+
+    private func runPreview() async {
+        // The same ~1.5 s dwell as the pre-resolve: an
+        // owner who backs straight out costs nothing.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        guard !Task.isCancelled, let d = detail else { return }
+        guard JoePreviewSettings.enabled else {
+            DiagLog.write("PREVIEW", "preview skipped rule=settings-off")
+            return
+        }
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            DiagLog.write("PREVIEW", "preview skipped rule=reduce-motion")
+            return
+        }
+        // Only the surfaces that HAVE a backdrop layer:
+        // Ultra (full-screen) and Billboard (the band).
+        // Poster Wall / Source Board details have none —
+        // adding one would break the design freeze.
+        guard theme.id == .ultra || theme.id == .billboard else {
+            DiagLog.write("PREVIEW", "preview skipped rule=no-backdrop-surface")
+            return
+        }
+        if let yt = ytMatch, let mode = ytActiveMode {
+            if await startYtPreview(d, yt: yt) { return }
+            // Auto's own fall-through: a total YouTube
+            // failure hands the episode to the chain. A
+            // PINNED YouTube mode never falls through —
+            // Play would show the honest slate instead.
+            guard mode == .auto else { return }
+        }
+        await startChainPreview(d)
+    }
+
+    /// The YouTube leg: resolve the start episode through
+    /// JoeYtResolver (the player's own route) and play
+    /// the assembly (or the direct muxed/HLS form)
+    /// muted in the backdrop. True only when a playable
+    /// was handed to the preview player; every failure
+    /// aborts the attempt with its reason logged and
+    /// returns false so Auto can fall through.
+    private func startYtPreview(_ d: Detail, yt: JoeYtSeries) async -> Bool {
+        let names = chainEpisodeNames(d)
+        var index = 0
+        if let start = startEpisode(d),
+           let i = names.firstIndex(of: start) {
+            index = i
+        }
+        guard index < yt.eps.count else { return false }
+        guard preview.beginAttempt(kind: "youtube") else { return false }
+        let result = await JoeYtResolver.shared.resolve(
+            videoId: yt.eps[index])
+        switch result {
+        case .playable(let playable, _):
+            // Approach C discipline: the ceiling map is
+            // banked ONLY with the variant actually handed
+            // to the player, in the branch that hands it
+            // over — and only when play() ACCEPTED the
+            // hand-over (it refuses when a kill landed
+            // mid-resolve; a refused hand-over banks
+            // nothing). The assembly height after a
+            // session is really made, the muxed fallback's
+            // OWN height (playable.fallbackHeight, the
+            // native player's buildItem rule) in its
+            // branch, the direct variant's height in the
+            // direct branch. A resolve that ends in
+            // abortAttempt banks nothing: nothing was
+            // ever played.
+            switch playable.kind {
+            case .assembly:
+                if let session = await JoeYtHlsServer.shared.makeSession(
+                    playable: playable,
+                    userAgent: JoeYtClientSpec.tvSamsung.userAgent) {
+                    DiagLog.write("PREVIEW", "preview resolve kind=youtube-assembly pid=\(yt.pid)")
+                    if preview.play(url: session.url, headers: [:]) {
+                        JoeYtQualityMap.record(pid: yt.pid,
+                                               height: playable.height)
+                    }
+                    return true
+                }
+                if let direct = playable.fallbackDirectURL {
+                    DiagLog.write("PREVIEW", "preview resolve kind=youtube-muxed-fallback pid=\(yt.pid)")
+                    if preview.play(url: direct, headers: [:]) {
+                        JoeYtQualityMap.record(pid: yt.pid,
+                                               height: playable.fallbackHeight)
+                    }
+                    return true
+                }
+                preview.abortAttempt(reason: "youtube-assembly-failed")
+                return false
+            case .muxed, .hlsManifest:
+                if let direct = playable.directURL {
+                    DiagLog.write("PREVIEW", "preview resolve kind=youtube-direct pid=\(yt.pid)")
+                    if preview.play(url: direct, headers: [:]) {
+                        JoeYtQualityMap.record(pid: yt.pid,
+                                               height: playable.height)
+                    }
+                    return true
+                }
+                preview.abortAttempt(reason: "youtube-no-direct-url")
+                return false
+            }
+        case .needsIdentity:
+            preview.abortAttempt(reason: "youtube-needs-identity")
+            return false
+        case .membersRequired(let reason):
+            preview.abortAttempt(reason: "youtube-members-required \(reason)")
+            return false
+        case .unplayable(let status, let reason):
+            preview.abortAttempt(reason: "youtube-unplayable \(status) \(reason)")
+            return false
+        case .httpFailure(let status):
+            preview.abortAttempt(reason: "youtube-http-\(status)")
+            return false
+        case .transportFailure(let message):
+            preview.abortAttempt(reason: "youtube-transport \(message)")
+            return false
+        case .solverFailed(let step, let message):
+            preview.abortAttempt(reason: "youtube-solver \(step) \(message)")
+            return false
+        }
+    }
+
+    /// The chain leg: the start episode's ladder, built
+    /// by the same Providers.ladderFor the player uses
+    /// (memoised — the dwell pre-resolve usually landed
+    /// it already), first entry, through the JoeProxy
+    /// conversion when the entry is a proxy entry,
+    /// exactly as the play path builds it.
+    private func startChainPreview(_ d: Detail) async {
+        guard let epName = startEpisode(d) else {
+            DiagLog.write("PREVIEW", "preview skipped rule=no-start-episode")
+            return
+        }
+        guard preview.beginAttempt(kind: "chain-\(provider)") else { return }
+        let ladder = await Providers.ladderFor(
+            code: provider, detail: d, filmTitle: d.movie.name,
+            epName: epName, epNum: Providers.episodeNumber(epName))
+        guard let first = ladder.entries.first else {
+            preview.abortAttempt(reason: "chain-no-candidate")
+            return
+        }
+        if first.proxy {
+            guard let proxyURL = JoeProxy.shared.playlistURL(
+                for: first.url, headers: first.headers) else {
+                preview.abortAttempt(reason: "chain-proxy-unavailable")
+                return
+            }
+            preview.play(url: proxyURL, headers: first.headers)
+            return
+        }
+        guard let url = URL(string: first.url) else {
+            preview.abortAttempt(reason: "chain-bad-url")
+            return
+        }
+        preview.play(url: url, headers: first.headers)
     }
 
     /// Dwell pre-resolve (v2.0.8, Phase 2/3): after ~1.5 s

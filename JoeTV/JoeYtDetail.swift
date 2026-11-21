@@ -212,6 +212,17 @@ struct JoeYtDetail: View {
                         .font(.system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
+                // 2.0.48 (Approach C): the honest quality
+                // badge — this series' measured ceiling on
+                // THIS install (JoeYtQualityMap, fed by the
+                // player's real resolves), shown only when
+                // a measurement exists. Unmeasured = no
+                // line at all, never an assumed figure.
+                if let badge = JoeYtQualityMap.badgeText(pid: series.pid) {
+                    Text("Chất lượng cao nhất đã đo trên máy này: \(badge)")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                }
             }
             Spacer()
         }

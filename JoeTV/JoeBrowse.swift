@@ -1063,24 +1063,24 @@ struct JoeWallHomeView: View {
         if !tvbProgress.isEmpty {
             Rail(title: "▶ TVB · Đang xem dở") {
                 ForEach(tvbProgress) { entry in
-                    Button { nav.ytDetail = JoeYtRoute(pid: entry.slug) } label: {
-                        PosterCard(
-                            title: entry.title,
-                            posterURL: ytStore.snapshot?.byPid[entry.slug]?.posterURL,
-                            meta: entry.epLabel,
-                            progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
-                            form: .rail)
-                    }
-                    .joeCardButton()
-                    .focused($entryFocus, equals: "tvbcw|" + entry.key)
-                    .contextMenu {
-                        Button(role: .destructive) {
+                    // FL-374 (2.0.48): the shared CW card —
+                    // same construction as JoePhimHome's
+                    // rail (see JoeYtCwPosterCard): the
+                    // poster resolves through
+                    // JoeYtPosterResolver instead of the
+                    // raw thumbnail behind the .portrait
+                    // gate that placeholdered every card.
+                    JoeYtCwPosterCard(
+                        entry: entry,
+                        series: ytStore.snapshot?.byPid[entry.slug],
+                        focusID: "tvbcw|" + entry.key,
+                        focus: $entryFocus,
+                        onTap: {
+                            nav.ytDetail = JoeYtRoute(pid: entry.slug)
+                        },
+                        onRemove: {
                             watch.removeProgress(key: entry.key)
-                        } label: {
-                            Text("Xoá khỏi Đang xem dở")
-                        }
-                    }
+                        })
                 }
             }
             .onAppear { ytStore.ensureLoaded() }

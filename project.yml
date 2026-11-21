@@ -100,6 +100,10 @@ targets:
       # resolved WebKit surface.
       - JoeTV/tvb-yt.json
       - JoeTV/JoeYtCatalog.swift
+      # v2.0.48: the backdrop preview (Leg 3) and the
+      # per-series measured quality map (Leg 4).
+      - JoeTV/JoePreview.swift
+      - JoeTV/JoeYtQuality.swift
       - JoeTV/JoeYtDetail.swift
       - JoeTV/JoeYtWeb.swift
       - JoeTV/JoeWebBridge.h
@@ -143,15 +147,15 @@ targets:
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: JoeTV/JoeTV-Bridging-Header.h
-        MARKETING_VERSION: "2.0.47"
-        CURRENT_PROJECT_VERSION: "60"
+        MARKETING_VERSION: "2.0.48"
+        CURRENT_PROJECT_VERSION: "61"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.0.47"
-        CFBundleVersion: "60"
+        CFBundleShortVersionString: "2.0.48"
+        CFBundleVersion: "61"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:

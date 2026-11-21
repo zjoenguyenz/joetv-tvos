@@ -379,11 +379,24 @@ enum DiagLog {
 // MARK: - LAN export server (v2.0.33)
 
 /// The tiny HTTP server behind Settings → "Gửi log chẩn
-/// đoán": while the export screen is open it serves
-/// DiagLog's file at http://<Apple-TV-LAN-IP>:18080/log, as a
-/// download named joetv-diag.txt. It exists only for the
-/// export screen's lifetime (the view starts it on appear
-/// and stops it on disappear) and serves nothing else.
+/// đoán": it serves DiagLog's file at
+/// http://<Apple-TV-LAN-IP>:18080/log, as a download named
+/// joetv-diag.txt, and serves nothing else.
+///
+/// v2.0.48 (FL-378): the server is ONE app-lifetime
+/// instance (DiagLogServer.shared), started ONCE at app
+/// launch and never stopped by any screen; the export
+/// screen only DISPLAYS its state. The pre-2.0.48 shape —
+/// a fresh instance per screen opening, owned by the
+/// view's @State, stopped fire-and-forget on disappear —
+/// is what killed the channel: NWListener.cancel() is
+/// asynchronous, so a reopened screen's new listener
+/// bound port 18080 while the previous listener still
+/// held it, and the bind died with NWError 48 ("Address
+/// already in use") — force-quitting could not be
+/// relied on to clear it. With exactly one instance
+/// whose start() is idempotent, a second bind is
+/// impossible in normal flow.
 ///
 /// v2.0.40 (audit P0.2 / H-1): the request must carry a
 /// ONE-TIME PIN — a random 4-digit code minted at every
@@ -411,6 +424,12 @@ enum DiagLog {
 @MainActor
 final class DiagLogServer {
 
+    /// The ONE app-lifetime instance (v2.0.48, FL-378):
+    /// started once from the root view at launch; the
+    /// export screen reads its state through
+    /// onStateChange and never creates or stops a server.
+    static let shared = DiagLogServer()
+
     enum State {
         case starting
         case serving(url: String)
@@ -425,6 +444,12 @@ final class DiagLogServer {
     private let queue = DispatchQueue(label: "joetv.diaglog.server")
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    /// The URL the live listener serves, remembered so a
+    /// start() that finds the server already running can
+    /// re-report the CURRENT state to a screen that just
+    /// opened (v2.0.48, FL-378) instead of leaving it on
+    /// its .starting face forever.
+    private var servingURL: String?
 
     /// The one-time PIN for this serving session (v2.0.40,
     /// P0.2): minted fresh by every start() that creates a
@@ -435,27 +460,60 @@ final class DiagLogServer {
     private var failedAttempts = 0
     /// After 3 consecutive wrong PINs the server refuses to
     /// start until this instant (the 60-second lockout).
-    /// STATIC on purpose (review round 3, R3-1): this server
-    /// instance is owned by LogExportView's @State, and the
-    /// full-screen cover destroys that state on dismiss — an
-    /// instance lockout would die with the screen, and the
-    /// failure message itself tells the owner to close and
-    /// reopen it. The deadline must live at class level so
-    /// the promised 60-second pause survives the only
-    /// restart path that exists; reopening inside the window
-    /// reports .failed, reopening after it serves with a
-    /// fresh PIN. Main-actor isolation comes from the class.
+    /// STATIC on purpose (review round 3, R3-1): the
+    /// failure message tells the owner to close and reopen
+    /// the screen, so the deadline must live at class level
+    /// and survive any screen restart; reopening inside the
+    /// window reports .failed, reopening after it serves
+    /// with a fresh PIN. (v2.0.48: the server itself is now
+    /// the app-lifetime shared instance — the static
+    /// deadline stays, belt and braces, and its semantics
+    /// are unchanged.) Main-actor isolation comes from the
+    /// class.
     private static var lockoutUntil: Date?
 
     /// Start serving on port 18080. Idempotent while a
-    /// listener is alive. Reports .starting immediately, then
-    /// .serving / .failed from the listener's own state.
+    /// listener is alive: a start() that finds the
+    /// app-lifetime server already running NEVER binds
+    /// again (v2.0.48, FL-378) — it re-reports the
+    /// current state, so a screen opening onto a live
+    /// server lands straight on its address. A start()
+    /// after a failure (listener nil) is the one retry
+    /// path, exactly as the lockout flow below assumes.
     func start() {
         if let until = Self.lockoutUntil, until > Date() {
             emit(.failed("Kênh gửi log đang tạm dừng sau 3 lần nhập sai mã PIN — chờ khoảng 1 phút rồi mở lại màn hình này."))
             return
         }
-        guard listener == nil else { return }
+        guard listener == nil else {
+            if let servingURL {
+                emit(.serving(url: servingURL))
+            } else if let listener, listener.state == .ready {
+                // The listener IS bound and accepting, but
+                // its .ready callback found no LAN address
+                // (the network was not up yet at launch),
+                // so no serving URL was ever built. Never
+                // wedge on .starting for the app's lifetime:
+                // recompute the address here — a screen
+                // opening onto the server exercises exactly
+                // this path — and report the honest state.
+                if let ip = Self.lanIPAddress(), let port = listener.port {
+                    let url = "http://\(ip):\(port.rawValue)/log?pin=\(pin)"
+                    servingURL = url
+                    emit(.serving(url: url))
+                } else {
+                    emit(.failed("Không tìm thấy địa chỉ mạng nội bộ"))
+                }
+            } else {
+                emit(.starting)
+            }
+            return
+        }
+        // No URL can be current before this listener reports
+        // ready — drop any stale one before minting the new
+        // PIN (defence in depth beside the lockout teardown's
+        // own clear; review round 3, D-1).
+        servingURL = nil
         pin = String(format: "%04d", Int.random(in: 0...9999))
         failedAttempts = 0
         emit(.starting)
@@ -484,10 +542,14 @@ final class DiagLogServer {
         created.start(queue: queue)
     }
 
-    /// Cancel the listener and every live connection. The
-    /// export view calls this on disappear/dismiss, so the
-    /// server never outlives its screen.
+    /// Cancel the listener and every live connection.
+    /// v2.0.48 (FL-378): no screen calls this any more —
+    /// the app-lifetime server is never stopped by the
+    /// UI. It remains as the class's own teardown
+    /// primitive (the PIN lockout path cancels the
+    /// listener directly, for its own reasons).
     func stop() {
+        servingURL = nil
         listener?.cancel()
         listener = nil
         for conn in connections.values { conn.cancel() }
@@ -504,12 +566,18 @@ final class DiagLogServer {
                 emit(.failed("Không tìm thấy địa chỉ mạng nội bộ"))
                 return
             }
-            emit(.serving(url: "http://\(ip):\(port.rawValue)/log?pin=\(pin)"))
+            let url = "http://\(ip):\(port.rawValue)/log?pin=\(pin)"
+            servingURL = url
+            emit(.serving(url: url))
         case .failed(let error):
-            if self.listener === listener { self.listener = nil }
+            // Clear the URL only when THIS listener is the
+            // live one — a stale listener's terminal state
+            // must not erase a successor's URL (review
+            // round 3, observation 1).
+            if self.listener === listener { self.listener = nil; servingURL = nil }
             emit(.failed("Kênh gửi log lỗi: \(error.localizedDescription)"))
         case .cancelled:
-            if self.listener === listener { self.listener = nil }
+            if self.listener === listener { self.listener = nil; servingURL = nil }
         default:
             break
         }
@@ -564,6 +632,12 @@ final class DiagLogServer {
             guard let self, locking else { return }
             self.listener?.cancel()
             self.listener = nil
+            // The URL this server was reachable at is dead
+            // with the listener — clear it here too, or a
+            // later start() re-report could hand out the
+            // pre-lockout URL carrying the OLD PIN (review
+            // round 3, D-1).
+            self.servingURL = nil
             for other in self.connections.values { other.cancel() }
             self.connections.removeAll()
             self.emit(.failed("Quá 3 lần nhập sai mã PIN — kênh gửi log đã tạm dừng 60 giây. Đóng màn hình này, chờ một chút rồi mở lại."))

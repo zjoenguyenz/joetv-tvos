@@ -351,6 +351,11 @@ final class JoeYtNativePlayerModel: ObservableObject {
             let item = built.item
             self.currentPlayable = self.firstPlayable
             self.currentItemHeight = built.height
+            // 2.0.48 (Approach C): a real measurement —
+            // the variant this item actually plays feeds
+            // the per-series ceiling map (JoeYtQualityMap).
+            JoeYtQualityMap.record(pid: self.request.pid,
+                                   height: built.height)
             self.currentItemFramed = false
             self.player.replaceCurrentItem(with: item)
             self.observeCurrentItem(item)
@@ -611,6 +616,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
             // becomes the playing variant's height.
             currentItemHeight = queuedItemHeight
             queuedItemHeight = 0
+            // 2.0.48 (Approach C): the advanced-to variant
+            // is really playing now — record its height.
+            JoeYtQualityMap.record(pid: request.pid,
+                                   height: currentItemHeight)
             // An arm the natural advance just satisfied is
             // spent (review round 2, BLOCKER 1).
             advancePending = false
@@ -956,6 +965,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
                     // it (and restart its startup window).
                     self.currentPlayable = playable
                     self.currentItemHeight = built.height
+                    // 2.0.48 (Approach C): the recovered
+                    // variant is a real measurement too.
+                    JoeYtQualityMap.record(pid: self.request.pid,
+                                           height: built.height)
                     self.currentItemFramed = false
                     self.player.replaceCurrentItem(with: item)
                     self.observeCurrentItem(item)
@@ -1080,6 +1093,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
         // FL-351 (leg 4): the item now playing is the
         // muxed variant — the spoken height follows it.
         currentItemHeight = playable.fallbackHeight
+        // 2.0.48 (Approach C): the muxed variant really
+        // obtained is a measurement like any other.
+        JoeYtQualityMap.record(pid: request.pid,
+                               height: playable.fallbackHeight)
         let item = AVPlayerItem(url: muxedURL)
         player.replaceCurrentItem(with: item)
         observeCurrentItem(item)

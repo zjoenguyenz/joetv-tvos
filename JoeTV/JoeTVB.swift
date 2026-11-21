@@ -944,6 +944,12 @@ private struct JoeYtPosterCard: View {
                 tmdbType: "tv",
                 meta: "\(series.eps.count) tập · \(series.tierLabel)",
                 badge: series.isMembersTier ? "YouTube" : nil,
+                // 2.0.48 (Approach C): the honest quality
+                // badge — the measured ceiling from
+                // JoeYtQualityMap, or NO badge at all when
+                // this install has never measured the
+                // series (never an assumed figure).
+                quality: JoeYtQualityMap.badgeText(pid: series.pid) ?? "",
                 form: form,
                 artSlotClass: (resolved?.isPortraitPoster ?? true)
                     ? .portrait : .any)
@@ -953,6 +959,101 @@ private struct JoeYtPosterCard: View {
         .task(id: series.pid) {
             resolved = await JoeYtPosterResolver.resolve(series)
         }
+    }
+}
+
+/// FL-374 (2.0.48): the TVB Continue Watching card —
+/// JoeYtPosterCard's construction carried onto the CW
+/// rails of BOTH homes (JoePhimHome.tvbCwRail and
+/// JoeBrowse.tvbCwWallRail, which now share this one
+/// view, so the two surfaces can never drift apart
+/// again).
+///
+/// The fault it fixes, convicted from code: both rails
+/// built their PosterCard SYNCHRONOUSLY from
+/// `series.posterURL` — the raw episode-1 YouTube
+/// thumbnail (480×360, 4:3) — and passed NEITHER
+/// `artSlotClass: .any` NOR a tmdbId. PosterCard's art
+/// slot defaults to the .portrait gate, which rejects a
+/// 4:3 bitmap by construction (the FL-343 mechanism),
+/// and with no TMDB identity at the call site the
+/// fallback ladder behind the gate was empty — so every
+/// CW card was the bare placeholder BY CONSTRUCTION,
+/// even though the history row itself was healthy (it
+/// stores slug = pid and the series' tmdbId). This card
+/// instead resolves through the shared JoeYtPoster
+/// Resolver exactly like every other TVB surface
+/// (TMDB by tmdbId → chain poster by normalised title
+/// → episode thumbnail in the .any slot). A series the
+/// catalogue no longer carries still resolves from the
+/// ROW's own keys: the stored tmdbId runs the TMDB leg,
+/// and the row's stored poster (empty for YouTube rows)
+/// is the last resort before the honest placeholder.
+struct JoeYtCwPosterCard: View {
+    let entry: WatchStore.Entry
+    let series: JoeYtSeries?
+    let focusID: String
+    var focus: FocusState<String?>.Binding
+    let onTap: () -> Void
+    let onRemove: () -> Void
+
+    @State private var resolved: JoeYtResolvedPoster?
+
+    var body: some View {
+        Button {
+            onTap()
+        } label: {
+            PosterCard(
+                title: entry.title,
+                posterURL: resolved?.url,
+                // The resolver already ran the TMDB leg;
+                // PosterCard's own fallback would only
+                // re-run it (JoeYtPosterCard's rule).
+                tmdbId: "",
+                tmdbType: "tv",
+                meta: entry.epLabel,
+                progress: entry.fraction,
+                subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
+                form: .rail,
+                artSlotClass: (resolved?.isPortraitPoster ?? true)
+                    ? .portrait : .any)
+        }
+        .joeCardButton()
+        .focused(focus, equals: focusID)
+        .contextMenu {
+            Button(role: .destructive) {
+                onRemove()
+            } label: {
+                Text("Xoá khỏi Đang xem dở")
+            }
+        }
+        // Keyed on the entry AND the series' arrival:
+        // the catalogue snapshot can land after the rail
+        // first paints, and the card must re-resolve
+        // through the full chain once it does.
+        .task(id: entry.key + "|" + (series?.pid ?? "")) {
+            resolved = await Self.resolve(entry: entry,
+                                          series: series)
+        }
+    }
+
+    private static func resolve(
+        entry: WatchStore.Entry, series: JoeYtSeries?
+    ) async -> JoeYtResolvedPoster {
+        if let series {
+            return await JoeYtPosterResolver.resolve(series)
+        }
+        // The series is gone from the catalogue (or the
+        // snapshot has not landed): the row's own stored
+        // keys still resolve — TMDB by the stored tmdbId
+        // first, then the row's stored poster.
+        if !entry.tmdbId.isEmpty,
+           let url = await JoeImagePipeline.shared.tmdbPosterURL(
+               tmdbId: entry.tmdbId, type: "tv") {
+            return JoeYtResolvedPoster(url: url, source: .tmdb)
+        }
+        return JoeYtResolvedPoster(url: entry.posterURL,
+                                   source: .youtubeThumbnail)
     }
 }
 

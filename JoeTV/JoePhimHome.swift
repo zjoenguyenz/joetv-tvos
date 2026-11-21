@@ -1592,24 +1592,25 @@ struct JoePhimHome: View {
         if !tvbProgress.isEmpty {
             Rail(title: "▶ TVB · Đang xem dở") {
                 ForEach(tvbProgress) { entry in
-                    Button { nav.ytDetail = JoeYtRoute(pid: entry.slug) } label: {
-                        PosterCard(
-                            title: entry.title,
-                            posterURL: ytStore.snapshot?.byPid[entry.slug]?.posterURL,
-                            meta: entry.epLabel,
-                            progress: entry.fraction,
-                            subline: "Còn \(WatchStore.fmtClock(entry.dur - entry.pos))",
-                            form: .rail)
-                    }
-                    .joeCardButton()
-                    .focused($focusedEntry, equals: "tvbcw|" + entry.key)
-                    .contextMenu {
-                        Button(role: .destructive) {
+                    // FL-374 (2.0.48): the shared CW card —
+                    // the poster resolves through
+                    // JoeYtPosterResolver like every other
+                    // TVB surface; the pre-fix construction
+                    // fed PosterCard the raw 4:3 thumbnail
+                    // behind its .portrait gate with no
+                    // TMDB fallback, so every card was the
+                    // placeholder by construction.
+                    JoeYtCwPosterCard(
+                        entry: entry,
+                        series: ytStore.snapshot?.byPid[entry.slug],
+                        focusID: "tvbcw|" + entry.key,
+                        focus: $focusedEntry,
+                        onTap: {
+                            nav.ytDetail = JoeYtRoute(pid: entry.slug)
+                        },
+                        onRemove: {
                             watch.removeProgress(key: entry.key)
-                        } label: {
-                            Text("Xoá khỏi Đang xem dở")
-                        }
-                    }
+                        })
                 }
             }
             .onAppear { ytStore.ensureLoaded() }

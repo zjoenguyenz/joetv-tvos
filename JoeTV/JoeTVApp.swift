@@ -53,6 +53,14 @@ struct JoeTVApp: App {
     var body: some Scene {
         WindowGroup {
             JoeRootView()
+                // v2.0.48 (FL-378): the diagnostic-log
+                // server is ONE app-lifetime instance —
+                // started exactly once, here at launch,
+                // and never re-created or stopped by any
+                // screen. start() is idempotent, so this
+                // firing again on a root re-appearance is
+                // a state re-report, never a second bind.
+                .task { DiagLogServer.shared.start() }
                 .environmentObject(tvStore)
                 .environmentObject(watchStore)
                 .environmentObject(phimStore)

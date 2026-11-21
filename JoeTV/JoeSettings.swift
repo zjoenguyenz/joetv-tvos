@@ -55,6 +55,13 @@ struct JoeSettingsView: View {
     @FocusState private var themeChipFocused: String?
     @FocusState private var cwResetFocused: Bool
     @FocusState private var mfToggleFocused: Bool
+    /// v2.0.48: the backdrop-preview toggle's state +
+    /// focus (previewToggleBlock; storage is
+    /// JoePreviewSettings, written on toggle, not via
+    /// save() — the toggle is a display preference, not
+    /// a credential).
+    @State private var previewEnabled: Bool = JoePreviewSettings.enabled
+    @FocusState private var previewToggleFocused: Bool
     /// v2.0.33: focus for the "Gửi log chẩn đoán" button
     /// (logExportBlock) and the cover it presents.
     @FocusState private var logExportFocused: Bool
@@ -283,6 +290,12 @@ struct JoeSettingsView: View {
                 signpostBlock
                 }
                 .focusSection()
+
+                // v2.0.48: the backdrop-preview toggle —
+                // its own focus section, above the
+                // log-export block.
+                previewToggleBlock
+                    .focusSection()
 
                 // v2.0.33: the log-export block — its own
                 // focus section, below the diagnostics group,
@@ -851,6 +864,34 @@ struct JoeSettingsView: View {
     /// not supported on tvOS — so LAN + QR is the route, not a
     /// preference). The block itself is deliberately plain:
     /// one heading, one honest explanation, one button.
+    /// v2.0.48 (D4): the backdrop-preview toggle — the
+    /// MediaFusion toggle's exact shape (one Button, one
+    /// JoeSecondaryLabel naming the state). Default ON
+    /// (JoePreviewSettings); the write lands on toggle,
+    /// so no save() round-trip is involved.
+    @ViewBuilder
+    private var previewToggleBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Xem trước trên ảnh nền")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+            Text("Khi mở một phim, ảnh nền của màn chi tiết tự chạy một đoạn ngắn của chính phim đó (tắt tiếng). Bấm phím bất kỳ là dừng ngay.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1200, alignment: .leading)
+            Button {
+                previewEnabled.toggle()
+                JoePreviewSettings.enabled = previewEnabled
+            } label: {
+                JoeSecondaryLabel(title: previewEnabled
+                                  ? "Xem trước video trên ảnh nền: đang bật ✓"
+                                  : "Xem trước video trên ảnh nền: đang tắt")
+            }
+            .joeCardButton()
+            .focused($previewToggleFocused)
+        }
+    }
+
     @ViewBuilder
     private var logExportBlock: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -933,10 +974,15 @@ private struct JoeTVBGoldRowLabel: View {
 // MARK: - Log export screen (v2.0.33)
 //
 // The full-screen cover behind "Gửi log chẩn đoán" (see
-// logExportBlock above). It owns ONE DiagLogServer for its
-// own lifetime only: started when the screen appears,
-// stopped when it disappears, so the log is reachable on
-// the LAN only while the owner is standing on this screen.
+// logExportBlock above). v2.0.48 (FL-378): it owns NO
+// server — it displays the state of the ONE app-lifetime
+// DiagLogServer.shared, which was started once at app
+// launch and is never stopped by any screen. (The old
+// shape — a per-screen instance started on appear and
+// stopped fire-and-forget on disappear — is the FL-378
+// fault: a reopened screen re-bound port 18080 while the
+// previous listener's asynchronous cancel still held
+// it, and the channel died with NWError 48.)
 //
 // tvOS constraint that shapes the whole screen: there is NO
 // share sheet on tvOS (Apple's HIG: activity views are not
@@ -955,7 +1001,9 @@ private struct JoeTVBGoldRowLabel: View {
 private struct LogExportView: View {
     @Environment(\.joeTheme) private var theme
     @Environment(\.dismiss) private var dismiss
-    @State private var server = DiagLogServer()
+    /// The app-lifetime server (v2.0.48, FL-378) — this
+    /// screen displays its state; it creates nothing.
+    private var server: DiagLogServer { DiagLogServer.shared }
     @State private var serverState: DiagLogServer.State = .starting
     @FocusState private var closeFocused: Bool
 
@@ -983,9 +1031,10 @@ private struct LogExportView: View {
                     // already carries the one-time PIN; it is
                     // also shown on its own line so the owner
                     // can type it separately if he opened the
-                    // bare address. The code changes every
-                    // time this screen opens, and 3 wrong tries
-                    // pause the channel for 60 seconds.
+                    // bare address. The code is minted when
+                    // the app-lifetime server starts (once
+                    // per app launch, v2.0.48), and 3 wrong
+                    // tries pause the channel for 60 seconds.
                     if !server.pin.isEmpty {
                         Text("Mã PIN một lần: \(server.pin)")
                             .font(.system(size: 36, weight: .semibold))
@@ -1003,7 +1052,7 @@ private struct LogExportView: View {
                             .background(RoundedRectangle(cornerRadius: 28)
                                 .fill(Color.white))
                     }
-                    Text("Trên iPhone, mở Safari và nhập đúng địa chỉ trên (địa chỉ đã gồm mã PIN một lần) — file log sẽ tải về máy. Hoặc dùng Camera của iPhone quét mã QR. Địa chỉ chỉ mở được khi màn hình này đang hiện. Lấy xong, gửi file vào cuộc trò chuyện với em.")
+                    Text("Trên iPhone, mở Safari và nhập đúng địa chỉ trên (địa chỉ đã gồm mã PIN một lần) — file log sẽ tải về máy. Hoặc dùng Camera của iPhone quét mã QR. Kênh gửi log mở sẵn từ khi app khởi động và mở trong suốt lúc app đang chạy. Lấy xong, gửi file vào cuộc trò chuyện với em.")
                         .font(.system(size: 25))
                         .foregroundStyle(theme.meta)
                         .multilineTextAlignment(.center)
@@ -1031,10 +1080,18 @@ private struct LogExportView: View {
             server.onStateChange = { state in
                 serverState = state
             }
+            // v2.0.48 (FL-378): start() on the shared
+            // server is a state re-report when it is
+            // already serving (the normal case — it was
+            // started at app launch), never a second
+            // bind; after a failure it is the one retry.
             server.start()
         }
         .onDisappear {
-            server.stop()
+            // v2.0.48 (FL-378): detach this screen's
+            // callback ONLY — the app-lifetime server
+            // keeps serving after the screen closes.
+            server.onStateChange = nil
         }
     }
 
