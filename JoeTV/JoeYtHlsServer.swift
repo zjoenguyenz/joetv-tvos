@@ -479,7 +479,7 @@ final class JoeYtHlsServer {
         // bytes are never dropped, and the header's
         // "never buffered whole" claim is structural,
         // not a hope about relative speeds.
-        let events = AsyncStream<RelayEvent>(bufferingPolicy: .bounded(8)) { continuation in
+        let events = AsyncStream<RelayEvent>(bufferingPolicy: .bufferingOldest(8)) { continuation in
             let producer = Task.detached(priority: .userInitiated) {
                 // Returns false when the consumer is
                 // gone (terminated / cancelled).

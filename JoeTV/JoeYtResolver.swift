@@ -186,7 +186,7 @@ actor JoeYtResolver {
     // MARK: Entry point
 
     func resolve(videoId: String) async -> JoeYtResolveResult {
-        let identity = JoeYtIdentity.shared
+        let identity = await JoeYtIdentity.shared
         guard let initial = await identity.validAccessToken() else {
             log("resolve vid=\(videoId): không có access token dùng được → needsIdentity")
             return .needsIdentity
