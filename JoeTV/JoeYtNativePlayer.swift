@@ -35,9 +35,12 @@ import AVKit
 //   sides (currentItem identity + timeControlStatus).
 // - A stalled or failed item gets ONE re-resolve of the
 //   same episode (fresh signed URLs), seeking back to
-//   the last vouched checkpoint; a second failure is
-//   terminal and hands back through the same Auto
-//   fall-through wiring the page player uses.
+//   the last vouched checkpoint; behind the re-resolve
+//   stands the FL-347 muxed tier — ONE swap to the
+//   current playable's muxed fallback — and only a
+//   failure past both tiers is terminal and hands back
+//   through the same Auto fall-through wiring the page
+//   player uses.
 
 @MainActor
 final class JoeYtNativePlayerModel: ObservableObject {
@@ -82,6 +85,44 @@ final class JoeYtNativePlayerModel: ObservableObject {
     /// re-resolve recovery has been spent on it.
     private var waitingSince: Date?
     private var recoverySpent = false
+    /// FL-347: the playable the CURRENT item was built
+    /// from, retained so the terminal doors can still
+    /// reach its muxed fallback after the assembly item
+    /// exists. buildItem consumes the playable it is
+    /// handed, and the pre-fix model kept only
+    /// firstPlayable — by the time an item stalled
+    /// terminally, the muxed URL was held nowhere and
+    /// the muxed tier was unreachable by construction.
+    /// Assigned wherever an item becomes current:
+    /// start(), the recovery completion, and the
+    /// supervisor's transition block (promoted from
+    /// queuedPlayable). Prefetch alone never writes it.
+    private var currentPlayable: JoeYtPlayable?
+    /// The playable behind the prefetched queue entry,
+    /// promoted to currentPlayable only when the
+    /// supervisor's transition bookkeeping confirms the
+    /// queued item actually became current.
+    private var queuedPlayable: JoeYtPlayable?
+    /// FL-347: the muxed swap tier's spent flag — ONE
+    /// muxed attempt per episode, reset exactly where
+    /// recoverySpent resets (the transition block and
+    /// retry()).
+    private var muxedSpent = false
+    /// 2.0.44 watchdog: whether the CURRENT item has
+    /// ever been observed playing — its startup window
+    /// is over. Reset wherever a new item becomes
+    /// current; the waiting leg's threshold keys on it
+    /// (45 s while starting up, 20 s mid-episode).
+    private var currentItemFramed = false
+    /// 2.0.44 watchdog: the waiting leg's progress
+    /// baselines. While the playhead or the loaded
+    /// buffer end keeps moving, the waiting deadline
+    /// re-baselines — an item that is still loading is
+    /// never condemned (the 2.0.43 incident: the flat
+    /// 20 s leg fired at 20 s; the item framed at
+    /// 22.9 s).
+    private var waitingProgressPosition: Double = 0
+    private var waitingProgressBuffer: Double = 0
     private var firstFrameLogged = false
     private var playStartedAt = Date()
     /// The last position the supervisor itself vouched
@@ -214,6 +255,8 @@ final class JoeYtNativePlayerModel: ObservableObject {
                 self.handOverToPageFallback(reason: "không dựng được item đầu tiên — assembly chết và không có muxed dự phòng")
                 return
             }
+            self.currentPlayable = self.firstPlayable
+            self.currentItemFramed = false
             self.player.replaceCurrentItem(with: item)
             self.observeCurrentItem(item)
             self.playStartedAt = Date()
@@ -447,6 +490,15 @@ final class JoeYtNativePlayerModel: ObservableObject {
             // spent (review round 2, BLOCKER 1).
             advancePending = false
             recoverySpent = false
+            // FL-347: the new episode gets its own muxed
+            // budget, and the prefetched playable is
+            // promoted to current — only NOW, at the
+            // supervisor's identity confirmation, never
+            // at prefetch time (spec §4.3.1).
+            muxedSpent = false
+            currentPlayable = queuedPlayable
+            queuedPlayable = nil
+            currentItemFramed = false
             firstFrameLogged = false
             waitingSince = nil
             // The advance the stamp waited on HAS landed
@@ -476,6 +528,11 @@ final class JoeYtNativePlayerModel: ObservableObject {
         let status = player.timeControlStatus
         if status == .playing {
             waitingSince = nil
+            // The current item has framed and is
+            // playing: its startup window is over, and
+            // any later wait is a mid-episode wait
+            // (2.0.44 watchdog).
+            currentItemFramed = true
             // Playback is moving: any paused-limbo
             // bookkeeping is spent.
             advanceUnconfirmedSince = nil
@@ -505,16 +562,61 @@ final class JoeYtNativePlayerModel: ObservableObject {
                 saveProgressSnapshot()
             }
         } else if status == .waitingToPlayAtSpecifiedRate {
-            if waitingSince == nil { waitingSince = Date() }
+            // 2.0.44 watchdog (spec §5.2): TWO thresholds
+            // plus a PROGRESS condition. An item that has
+            // never framed is in its startup window —
+            // 45 s; an item that has played and is
+            // re-buffering mid-episode gets 20 s. And
+            // while the playhead or the loaded buffer
+            // end keeps moving, the deadline re-baselines
+            // instead of counting down: an item that is
+            // still loading is never condemned. The
+            // pre-fix leg was a flat 20 s with no progress
+            // condition — in the 2.0.43 session it fired
+            // at 20 s on an item that framed at 22.9 s,
+            // and the identical re-resolve repeated the
+            // slow startup into a second condemnation.
+            let position = player.currentTime().seconds
+            let bufferEnd = player.currentItem
+                .map { loadedBufferEndSeconds($0) } ?? 0
+            if waitingSince == nil {
+                waitingSince = Date()
+                waitingProgressPosition = position.isFinite ? position : 0
+                waitingProgressBuffer = bufferEnd
+            } else {
+                let moved = (position.isFinite
+                                && abs(position - waitingProgressPosition) >= 0.5)
+                    || bufferEnd >= waitingProgressBuffer + 1.0
+                if moved {
+                    waitingSince = Date()
+                    if position.isFinite {
+                        waitingProgressPosition = position
+                    }
+                    waitingProgressBuffer = bufferEnd
+                }
+            }
+            let limit: TimeInterval = currentItemFramed ? 20 : 45
             if let since = waitingSince,
-               Date().timeIntervalSince(since) > 20, !opInFlight {
-                log("stall — waiting 20s ở ep=\(currentIndex + 1) tại \(Int(checkpointSeconds))s")
-                recoverOrFail(reason: "stall 20s")
+               Date().timeIntervalSince(since) > limit, !opInFlight {
+                log("stall — waiting \(Int(limit))s ở ep=\(currentIndex + 1) tại \(Int(checkpointSeconds))s (khung: \(currentItemFramed ? "giữa tập" : "khởi động"), không tiến triển)")
+                recoverOrFail(reason: "stall waiting \(Int(limit))s")
             }
         } else {
             waitingSince = nil
             tickPausedLimbo()
         }
+    }
+
+    /// The end of the item's loaded buffer, in
+    /// seconds: the waiting leg's progress signal.
+    /// While origin bytes keep arriving, this end
+    /// keeps moving even when the playhead cannot yet
+    /// move — the difference between a slow item and a
+    /// dead one.
+    private func loadedBufferEndSeconds(_ item: AVPlayerItem) -> Double {
+        guard let last = item.loadedTimeRanges.last else { return 0 }
+        let end = last.timeRangeValue.end.seconds
+        return end.isFinite ? end : 0
     }
 
     /// FL-343 (A), second leg: recovery watches PROGRESS,
@@ -595,6 +697,12 @@ final class JoeYtNativePlayerModel: ObservableObject {
     private func recoverOrFail(reason: String) {
         guard !terminal, !opInFlight else { return }
         if recoverySpent {
+            // FL-347: the muxed tier stands in front of
+            // the terminal door — a spent recovery is
+            // not yet a dead episode while the current
+            // playable still holds an untried muxed
+            // fallback.
+            if tryMuxedSwap(reason: reason) { return }
             terminalFailure(reason: reason)
             return
         }
@@ -632,6 +740,11 @@ final class JoeYtNativePlayerModel: ObservableObject {
                         self.log("recovery: tập hiện tại đã đổi trong lúc resolve (item tự hết stall và queue đã qua tập) — bỏ replace")
                         return
                     }
+                    // FL-347: the recovered item becomes
+                    // current from THIS playable — retain
+                    // it (and restart its startup window).
+                    self.currentPlayable = playable
+                    self.currentItemFramed = false
                     self.player.replaceCurrentItem(with: item)
                     self.observeCurrentItem(item)
                     // Reconcile the prefetched queue entry
@@ -649,6 +762,7 @@ final class JoeYtNativePlayerModel: ObservableObject {
                        !self.player.items().contains(where: { $0 === queued }) {
                         self.queuedItem = nil
                         self.queuedIndex = nil
+                        self.queuedPlayable = nil
                         self.log("recovery: item prefetch không còn trong hàng đợi sau replace — dọn sổ, prefetch lại")
                         self.startPrefetch()
                     }
@@ -703,9 +817,78 @@ final class JoeYtNativePlayerModel: ObservableObject {
                 self.handOverToPageFallback(reason: "recovery: re-resolve không còn format nào dùng được — \(reason)")
             default:
                 self.opInFlight = false
-                self.terminalFailure(reason: reason)
+                // FL-347: the second terminal door gets
+                // the same muxed check as the first — a
+                // re-resolve that comes back unplayable
+                // must not slate the episode while the
+                // CURRENT playable's muxed fallback is
+                // still untried.
+                if !self.tryMuxedSwap(reason: reason) {
+                    self.terminalFailure(reason: reason)
+                }
             }
         }
+    }
+
+    /// FL-347: the muxed swap — the second recovery
+    /// tier, checked at BOTH doors into terminalFailure
+    /// (recovery already spent; re-resolve came back
+    /// unplayable). The design contract (§4.4: "hỏng →
+    /// muxed 18 có tên", and its failure-class table's
+    /// "no class is silent") gives the assembly leg a
+    /// named fallback: the SAME episode as one muxed
+    /// file, played directly — the construction Probe
+    /// 16 proved on the owner's TV. The pre-fix model
+    /// never reached it: the muxed URL existed only
+    /// inside buildItem's server-failure branch, and
+    /// the playable was discarded once the assembly
+    /// item existed (see currentPlayable).
+    ///
+    /// The swap mirrors the recovery replace's
+    /// discipline: observe the new item, reconcile the
+    /// prefetched queue entry, seek back to the
+    /// vouched checkpoint (FL-041), clear the stall
+    /// bookkeeping, play. The swapped item then lives
+    /// under the same supervisor — if IT fails or
+    /// stalls, recoverOrFail finds both tiers spent
+    /// and the failure is truly terminal. Returns
+    /// false (nothing done) when the tier does not
+    /// apply: already spent, no retained playable, the
+    /// playable is not an assembly, or it carries no
+    /// muxed fallback.
+    private func tryMuxedSwap(reason: String) -> Bool {
+        guard !muxedSpent,
+              let playable = currentPlayable,
+              playable.kind == .assembly,
+              let muxedURL = playable.fallbackDirectURL else { return false }
+        muxedSpent = true
+        log("lùi muxed 18 — lý do: \(reason)")
+        let item = AVPlayerItem(url: muxedURL)
+        player.replaceCurrentItem(with: item)
+        observeCurrentItem(item)
+        // The same queue reconciliation as the recovery
+        // replace: if the swap dropped the prefetched
+        // item, its bookkeeping must not go stale.
+        if let queued = queuedItem,
+           !player.items().contains(where: { $0 === queued }) {
+            queuedItem = nil
+            queuedIndex = nil
+            queuedPlayable = nil
+            log("muxed swap: item prefetch không còn trong hàng đợi sau replace — dọn sổ, prefetch lại")
+            startPrefetch()
+        }
+        let seekTo = checkpointSeconds
+        waitingSince = nil
+        advanceUnconfirmedSince = nil
+        pausedStallSince = nil
+        currentItemFramed = false
+        playStartedAt = Date()
+        if seekTo > 2 {
+            player.seek(to: CMTime(seconds: seekTo, preferredTimescale: 600))
+        }
+        player.play()
+        log("muxed swap xong — phát bản muxed ep=\(currentIndex + 1) từ \(Int(seekTo))s")
+        return true
     }
 
     /// The §4.6 hand-over for a dead native
@@ -807,6 +990,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
         guard !terminal else { return }
         phase = .starting
         recoverySpent = false
+        // FL-347: the owner's retry restores BOTH
+        // recovery budgets (same reset points as
+        // recoverySpent, spec §4.3.2).
+        muxedSpent = false
         checkpointSeconds = 0
         recoverOrFail(reason: "owner retry")
     }
@@ -876,6 +1063,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
             self.player.insert(item, after: nil)
             self.queuedItem = item
             self.queuedIndex = nextIndex
+            // FL-347: retained for the promotion at the
+            // supervisor's transition confirmation —
+            // prefetch alone never touches currentPlayable.
+            self.queuedPlayable = playable
             self.log("prefetch ep=\(nextIndex + 1) đã vào hàng đợi (solver \(metrics.solverMs)ms)")
             // Consume an armed advance — UNLESS a
             // recovery chain holds the gate (review round
@@ -997,6 +1188,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
                         self.player.insert(item, after: nil)
                         self.queuedItem = item
                         self.queuedIndex = nextIndex
+                        // FL-347: same retention as the
+                        // prefetch insert — promoted at
+                        // the transition confirmation.
+                        self.queuedPlayable = playable
                         self.opInFlight = false
                         self.performAdvance()
                     }

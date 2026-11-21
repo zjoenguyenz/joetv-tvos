@@ -21,8 +21,10 @@ import Network
 // whatever Range AVPlayer asks for is forwarded to the
 // deciphered origin URL and the bytes stream back
 // through a bounded, back-pressured channel (8 events
-// of ~256 KB in flight at most) — the whole file is
-// never buffered in memory, by construction.
+// in flight at most; the producer emits its first
+// chunk at 32 KB and ~256 KB chunks after that —
+// 2.0.44) — the whole file is never buffered in
+// memory, by construction.
 //
 // Port discipline (FL-252 + design §4.4): a fixed port
 // is a DEVICE-wide resource, so this server owns NO
@@ -105,10 +107,13 @@ final class JoeYtHlsServer {
         var bandwidth: Int
         var createdAt: Date
         /// Design §4.4 logging point ("segment đầu tiên
-        /// được phục vụ"): flipped the first time a media
-        /// segment of this session is served successfully,
+        /// được phục vụ"): flipped the first time media
+        /// BYTES of this session are actually delivered
+        /// to the client (2.0.44 correction — the pre-fix
+        /// flag flipped at head-send, before a single
+        /// body byte had moved; see noteFirstMediaServed),
         /// so that moment is logged exactly once per
-        /// session; later segments stay silent.
+        /// session; later chunks stay silent.
         var firstSegmentServed = false
     }
 
@@ -564,6 +569,27 @@ final class JoeYtHlsServer {
     /// header's "never buffered whole" claim
     /// structural, not a hope about relative speeds.
     ///
+    /// 2.0.44 — WHERE the bytes come from changed; the
+    /// stream above did not. The pre-fix producer
+    /// iterated URLSession.AsyncBytes element by
+    /// element (one async hop per byte) and emitted
+    /// nothing until 256 KB had accumulated: the
+    /// 2.0.43 diagnosis convicted that as the
+    /// pathological startup (first chunk at 12–23 s,
+    /// position pinned at 0, the 20 s stall watchdog
+    /// condemning a live item). The producer now
+    /// drains JoeYtOriginFetch — a data task whose
+    /// URLSessionDataDelegate hands over network-sized
+    /// Data BLOCKS as they arrive — and emits its
+    /// FIRST chunk at 32 KB (the init segment plus the
+    /// first GOPs are all AVPlayer needs to frame),
+    /// then ~256 KB chunks. The producer also counts
+    /// the bytes it has taken from the origin and logs
+    /// a flow line per 1 MB (spec §5.3): paired with
+    /// the relay's consumer-side flow lines, the next
+    /// log separates "origin stopped feeding" from
+    /// "client stopped draining" without a new round.
+    ///
     /// Static and parameter-fed on purpose (FL-341): the
     /// detached producer below captures ONLY the immutable
     /// Sendable parameters and the stream continuation,
@@ -575,7 +601,8 @@ final class JoeYtHlsServer {
     private static func originEvents(originURL: URL, userAgent: String,
                                      fallbackType: String,
                                      rangeHeader: String?,
-                                     headOnly: Bool) -> AsyncStream<RelayEvent> {
+                                     headOnly: Bool,
+                                     flowPath: String) -> AsyncStream<RelayEvent> {
         AsyncStream<RelayEvent>(bufferingPolicy: .bufferingOldest(8)) { continuation in
             let producer = Task.detached(priority: .userInitiated) {
                 // Returns false when the consumer is
@@ -607,32 +634,67 @@ final class JoeYtHlsServer {
                 if let rangeHeader {
                     request.setValue(rangeHeader, forHTTPHeaderField: "Range")
                 }
-                do {
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
-                    let http = response as? HTTPURLResponse
-                    guard await emit(.head(
-                        status: http?.statusCode ?? 200,
-                        contentType: http?.value(forHTTPHeaderField: "Content-Type") ?? fallbackType,
-                        contentLength: http?.value(forHTTPHeaderField: "Content-Length"),
-                        contentRange: http?.value(forHTTPHeaderField: "Content-Range"))) else {
-                        continuation.finish()
-                        return
-                    }
-                    var buffer = Data()
-                    buffer.reserveCapacity(256 * 1024)
-                    for try await byte in bytes {
-                        if Task.isCancelled { break }
-                        buffer.append(byte)
-                        if buffer.count >= 256 * 1024 {
-                            guard await emit(.chunk(buffer)) else { break }
-                            buffer.removeAll(keepingCapacity: true)
+                let fetch = JoeYtOriginFetch(fallbackType: fallbackType)
+                fetch.start(request: request)
+                // Any exit below — normal end, consumer
+                // gone, cancellation — releases the data
+                // task; after a normal completion this is
+                // a no-op (the fetch already invalidated
+                // its session).
+                defer { fetch.cancel() }
+                var buffer = Data()
+                buffer.reserveCapacity(256 * 1024)
+                var firstChunkPending = true
+                var producedBytes: Int64 = 0
+                var nextFlowMark: Int64 = 1_048_576
+                var failureMessage: String?
+                var consumerGone = false
+                drain: for await block in fetch.blocks {
+                    switch block {
+                    case .head(let status, let contentType,
+                               let contentLength, let contentRange):
+                        guard await emit(.head(
+                            status: status, contentType: contentType,
+                            contentLength: contentLength,
+                            contentRange: contentRange)) else {
+                            consumerGone = true
+                            break drain
                         }
+                    case .data(let data):
+                        fetch.consumed(bytes: data.count)
+                        producedBytes += Int64(data.count)
+                        buffer.append(data)
+                        // First chunk at 32 KB so the
+                        // init segment + first frames
+                        // reach AVPlayer immediately;
+                        // ~256 KB chunks after that keep
+                        // the event rate low (2.0.44).
+                        let threshold = firstChunkPending
+                            ? 32 * 1024 : 256 * 1024
+                        if buffer.count >= threshold {
+                            guard await emit(.chunk(buffer)) else {
+                                consumerGone = true
+                                break drain
+                            }
+                            buffer.removeAll(keepingCapacity: true)
+                            firstChunkPending = false
+                        }
+                        if producedBytes >= nextFlowMark {
+                            DiagLog.write("YT-HLS",
+                                "flow producer \(flowPath): đã nhận \(producedBytes) byte từ origin")
+                            nextFlowMark += 1_048_576
+                        }
+                    case .failed(let message):
+                        failureMessage = message
                     }
+                }
+                if !consumerGone {
                     if !buffer.isEmpty {
                         _ = await emit(.chunk(buffer))
                     }
-                } catch {
-                    _ = await emit(.failed(error.localizedDescription))
+                    if let failureMessage {
+                        _ = await emit(.failed(failureMessage))
+                    }
                 }
                 continuation.finish()
             }
@@ -681,8 +743,11 @@ final class JoeYtHlsServer {
     /// actor (review round 1, MINOR: iterating
     /// URLSession.AsyncBytes byte-by-byte inside this
     /// @MainActor function resumed the actor once per
-    /// byte — the known-slowest consumption pattern).
-    /// Only chunk-sized events cross back here.
+    /// byte — the known-slowest consumption pattern;
+    /// 2.0.44 removed the per-byte iteration itself —
+    /// the producer now drains delegate-delivered Data
+    /// blocks, see originEvents). Only chunk-sized
+    /// events cross back here.
     ///
     /// FL-343 (A): a mid-stream origin cut no longer
     /// closes the connection on first failure. The head
@@ -708,6 +773,12 @@ final class JoeYtHlsServer {
         let fallbackType = entry.mimeType
         let servePath = "/yt/\(sessionID.prefix(8))/\(file)"
         let resumeDelays: [UInt64] = [500_000_000, 1_500_000_000, 1_500_000_000]
+        /// 2.0.44 instrumentation anchors (spec §5.3):
+        /// the serve-done line measures from here, and
+        /// the consumer flow lines fire per 1 MB handed
+        /// to AVPlayer.
+        let relayStartedAt = Date()
+        var nextConsumerMark: Int64 = 1_048_576
 
         var headSent = false
         var bytesSent: Int64 = 0
@@ -715,6 +786,10 @@ final class JoeYtHlsServer {
         /// holds): resumes are armed only for a 2xx head
         /// (review round 1, Lens C F-C5).
         var headStatus: Int?
+        /// Whether the FIRST head was 2xx — the first-
+        /// media-bytes milestone only counts behind a
+        /// good head (2.0.44).
+        var headWas2xx = false
         /// The body byte count the FIRST head promised
         /// AVPlayer; resumes stream against this same
         /// promise, so completeness is judged against it.
@@ -723,6 +798,14 @@ final class JoeYtHlsServer {
         var effectiveRange = rangeHeader
         var expectedResumeStart: Int64 = 0
 
+        // 2.0.44 instrumentation (spec §5.3): the Range
+        // AVPlayer asked for opens this request's serve
+        // record — byte offsets only, never an origin
+        // URL. (The pre-fix log's first word about a
+        // media request was the head-status line, which
+        // read as a completed serve; see the head case.)
+        log("serve \(method) \(servePath) — range AVPlayer xin: \(rangeHeader ?? "(không có — cả file)")")
+
         while true {
             var failure: String?
             var clientGone = false
@@ -730,7 +813,8 @@ final class JoeYtHlsServer {
             let events = Self.originEvents(
                 originURL: originURL, userAgent: userAgent,
                 fallbackType: fallbackType,
-                rangeHeader: effectiveRange, headOnly: headOnly)
+                rangeHeader: effectiveRange, headOnly: headOnly,
+                flowPath: servePath)
             stream: for await event in events {
                 switch event {
                 case .head(let status, let contentType, let contentLength, let contentRange):
@@ -779,26 +863,55 @@ final class JoeYtHlsServer {
                     }
                     headSent = true
                     headStatus = status
-                    log("serve \(method) \(servePath) → \(status)")
+                    headWas2xx = (200..<300).contains(status)
+                    // 2.0.44 (spec §2.3): this line is
+                    // written when the HEAD is sent, and
+                    // it must SAY that — the pre-fix text
+                    // ("serve … → 206") read as if media
+                    // had been delivered, when it proved
+                    // only that headers had flowed. The
+                    // origin head itself (status + the
+                    // length/range it promised) is part
+                    // of the same line; the first media
+                    // bytes get their own milestone at
+                    // the first chunk below.
+                    log("serve-head \(method) \(servePath) → \(status) — origin head: len=\(contentLength ?? "-") range=\(contentRange ?? "-") (mốc head — chưa giao byte media nào)")
                     if headOnly {
                         finished = true
                         break stream
-                    }
-                    if (200..<300).contains(status) {
-                        noteFirstSegmentServed(sessionID: sessionID)
                     }
                 case .chunk(let data):
                     guard await send(conn, data: data) else {
                         clientGone = true
                         break stream
                     }
+                    let firstMedia = bytesSent == 0
                     bytesSent += Int64(data.count)
+                    // The first-segment milestone fires
+                    // HERE now (2.0.44, spec §2.3): the
+                    // first body bytes have actually been
+                    // handed to AVPlayer — at head-send
+                    // (the pre-fix call site) it certified
+                    // a delivery that had not happened.
+                    if firstMedia, headWas2xx {
+                        noteFirstMediaServed(sessionID: sessionID)
+                    }
+                    if bytesSent >= nextConsumerMark {
+                        log("flow consumer \(servePath): đã giao \(bytesSent) byte cho AVPlayer")
+                        nextConsumerMark += 1_048_576
+                    }
                 case .failed(let message):
                     failure = message
                     break stream
                 }
             }
             if clientGone || finished {
+                logServeDone(method: method, path: servePath,
+                             bytes: bytesSent, expected: expectedBytes,
+                             startedAt: relayStartedAt,
+                             outcome: clientGone
+                                ? "client đóng kết nối"
+                                : "xong (HEAD — không body)")
                 close(conn)
                 return
             }
@@ -820,12 +933,20 @@ final class JoeYtHlsServer {
             guard let failure = failureMessage else {
                 // No failure, and every promised byte
                 // delivered: the body is complete.
+                logServeDone(method: method, path: servePath,
+                             bytes: bytesSent, expected: expectedBytes,
+                             startedAt: relayStartedAt,
+                             outcome: "đủ byte — hoàn tất")
                 close(conn)
                 return
             }
             if !headSent {
                 log("relay: origin lỗi mạng — \(failure)")
                 log("serve \(method) \(servePath) → 502")
+                logServeDone(method: method, path: servePath,
+                             bytes: bytesSent, expected: expectedBytes,
+                             startedAt: relayStartedAt,
+                             outcome: "origin lỗi trước head — trả 502")
                 respondText(conn, status: 502, body: "origin error", headOnly: headOnly)
                 return
             }
@@ -835,6 +956,10 @@ final class JoeYtHlsServer {
             // flush), there is nothing to resume.
             if let expectedBytes, bytesSent >= expectedBytes {
                 log("relay: origin đứt ở cuối — đã đủ \(bytesSent) byte theo head, đóng bình thường")
+                logServeDone(method: method, path: servePath,
+                             bytes: bytesSent, expected: expectedBytes,
+                             startedAt: relayStartedAt,
+                             outcome: "đủ byte — origin đứt ở lần flush cuối")
                 close(conn)
                 return
             }
@@ -849,6 +974,10 @@ final class JoeYtHlsServer {
                   let resume = Self.resumeRange(originalRange: rangeHeader,
                                                 bytesSent: bytesSent) else {
                 log("relay: origin đứt giữa chừng — \(failure); không nối tiếp được nữa — đóng kết nối")
+                logServeDone(method: method, path: servePath,
+                             bytes: bytesSent, expected: expectedBytes,
+                             startedAt: relayStartedAt,
+                             outcome: "origin đứt giữa chừng — đóng kết nối")
                 close(conn)
                 return
             }
@@ -872,7 +1001,7 @@ final class JoeYtHlsServer {
     }
 
     /// Design §4.4 logging point: the first media
-    /// segment served successfully in a session,
+    /// bytes of a session DELIVERED to the client,
     /// logged once (the session's flag latches). The
     /// millisecond figure is measured from
     /// Session.createdAt — the moment makeSession
@@ -880,14 +1009,35 @@ final class JoeYtHlsServer {
     /// milestone this file already keeps. A HEAD probe
     /// never reaches here (it returns at the head), so
     /// only a real GET relay with a 2xx upstream head
-    /// counts as "served". No URL is logged.
-    private func noteFirstSegmentServed(sessionID: String) {
+    /// counts. No URL is logged.
+    ///
+    /// 2.0.44 (spec §2.3): the pre-fix milestone
+    /// (noteFirstSegmentServed) was noted at HEAD-send
+    /// and its text claimed a served segment — in the
+    /// 2.0.43 session log, "484 ms" certified headers,
+    /// not media. The call site is now the first chunk
+    /// actually sent, and the text says bytes.
+    private func noteFirstMediaServed(sessionID: String) {
         guard var session = sessions[sessionID],
               !session.firstSegmentServed else { return }
         session.firstSegmentServed = true
         sessions[sessionID] = session
         let ms = Int(Date().timeIntervalSince(session.createdAt) * 1000)
-        log("session \(sessionID.prefix(8)) — segment đầu tiên được phục vụ sau \(ms) ms (mốc: createdAt của session)")
+        log("session \(sessionID.prefix(8)) — byte media đầu tiên đã giao cho AVPlayer sau \(ms) ms (mốc: createdAt của session)")
+    }
+
+    /// 2.0.44 (spec §5.3): the uniform close-out line
+    /// of every media relay — bytes actually delivered
+    /// against the first head's promise, wall time,
+    /// and how the serve ended. Written at EVERY relay
+    /// exit, so a request's record always ends with
+    /// numbers, never with the head line alone.
+    private func logServeDone(method: String, path: String, bytes: Int64,
+                              expected: Int64?, startedAt: Date,
+                              outcome: String) {
+        let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+        let expectedText = expected.map { "\($0)" } ?? "-"
+        log("serve-done \(method) \(path) — bytes=\(bytes) expected=\(expectedText) ms=\(ms) outcome=\(outcome)")
     }
 
     private static func statusText(_ status: Int) -> String {
@@ -938,5 +1088,193 @@ final class JoeYtHlsServer {
                 cont.resume(returning: error == nil)
             })
         }
+    }
+}
+
+// MARK: - Origin fetch (block delivery, 2.0.44)
+
+/// One origin fetch's block source: a URLSession data
+/// task whose delegate (URLSessionDataDelegate,
+/// Foundation) hands over network-sized Data BLOCKS
+/// as they arrive, bridged into an AsyncStream the
+/// relay producer drains. This replaces the pre-2.0.44
+/// consumption pattern — iterating URLSession.AsyncBytes
+/// one element per async hop — which the 2.0.43
+/// diagnosis convicted as the pathological startup
+/// cost: the first 256 KB chunk took 12–23 s to
+/// assemble while AVPlayer sat at position 0.
+///
+/// Flow control is real, not hopeful. The delegate
+/// counts bytes handed to the stream but not yet taken
+/// by the producer; past the high-water mark it
+/// SUSPENDS the task (URLSessionTask.suspend), and the
+/// producer resumes it (consumed(bytes:)) once the
+/// backlog drains below the low-water mark. The
+/// stream's policy is .unbounded because dropping an
+/// origin block is never an option (a dropped block is
+/// a hole in the media) — the suspend/resume pair is
+/// what bounds the depth in practice.
+///
+/// Threading: delegate callbacks arrive on the
+/// session's serial delegate queue; the producer side
+/// runs in the relay's detached task. Every mutable
+/// slot sits behind `lock`, the continuation is only
+/// ever yielded to (AsyncStream continuations are
+/// thread-safe), and NOTHING here is captured by a
+/// closure — the object owns its state, so there is
+/// no FL-341 capture surface. @unchecked Sendable on
+/// exactly that basis.
+private final class JoeYtOriginFetch: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+
+    enum Block: Sendable {
+        case head(status: Int, contentType: String,
+                  contentLength: String?, contentRange: String?)
+        case data(Data)
+        case failed(String)
+    }
+
+    let blocks: AsyncStream<Block>
+    private let continuation: AsyncStream<Block>.Continuation
+    private let fallbackType: String
+
+    private let lock = NSLock()
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var handedOutBytes: Int64 = 0
+    private var takenBytes: Int64 = 0
+    private var taskSuspended = false
+    private var terminated = false
+
+    private static let highWater: Int64 = 4 * 1024 * 1024
+    private static let lowWater: Int64 = 1 * 1024 * 1024
+
+    init(fallbackType: String) {
+        self.fallbackType = fallbackType
+        var captured: AsyncStream<Block>.Continuation?
+        blocks = AsyncStream<Block>(bufferingPolicy: .unbounded) { captured = $0 }
+        continuation = captured!
+        super.init()
+        continuation.onTermination = { [weak self] _ in
+            self?.cancel()
+        }
+    }
+
+    func start(request: URLRequest) {
+        let delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        delegateQueue.name = "joetv.yt.originfetch"
+        let created = URLSession(configuration: .default,
+                                 delegate: self,
+                                 delegateQueue: delegateQueue)
+        let dataTask = created.dataTask(with: request)
+        lock.lock()
+        session = created
+        task = dataTask
+        lock.unlock()
+        dataTask.resume()
+    }
+
+    /// Producer side: one block has been taken from
+    /// the stream. If the task is suspended and the
+    /// backlog has drained below the low-water mark,
+    /// resume it.
+    func consumed(bytes: Int) {
+        lock.lock()
+        takenBytes += Int64(bytes)
+        let shouldResume = taskSuspended
+            && (handedOutBytes - takenBytes) < Self.lowWater
+        if shouldResume {
+            taskSuspended = false
+            // resume() is issued WHILE HOLDING the lock, so
+            // the flag can never diverge from the task's real
+            // state. suspend()/resume() are synchronous
+            // URLSessionTask calls that never synchronously
+            // invoke delegate methods, so holding the NSLock
+            // across the call cannot deadlock against the
+            // delegate queue.
+            task?.resume()
+        }
+        lock.unlock()
+    }
+
+    /// Release the fetch (consumer gone, producer
+    /// finished, or stream terminated). Idempotent;
+    /// a no-op after normal completion.
+    func cancel() {
+        lock.lock()
+        if terminated {
+            lock.unlock()
+            return
+        }
+        terminated = true
+        let liveTask = task
+        let liveSession = session
+        task = nil
+        session = nil
+        lock.unlock()
+        liveTask?.cancel()
+        liveSession?.invalidateAndCancel()
+    }
+
+    // MARK: URLSessionDataDelegate
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let http = response as? HTTPURLResponse
+        continuation.yield(.head(
+            status: http?.statusCode ?? 200,
+            contentType: http?.value(forHTTPHeaderField: "Content-Type") ?? fallbackType,
+            contentLength: http?.value(forHTTPHeaderField: "Content-Length"),
+            contentRange: http?.value(forHTTPHeaderField: "Content-Range")))
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive data: Data) {
+        continuation.yield(.data(data))
+        lock.lock()
+        handedOutBytes += Int64(data.count)
+        let shouldSuspend = !taskSuspended
+            && (handedOutBytes - takenBytes) > Self.highWater
+        if shouldSuspend {
+            taskSuspended = true
+            // suspend() is issued WHILE HOLDING the lock, so
+            // the flag can never diverge from the task's real
+            // state. suspend()/resume() are synchronous
+            // URLSessionTask calls that never synchronously
+            // invoke delegate methods, so holding the NSLock
+            // across the call cannot deadlock against the
+            // delegate queue.
+            dataTask.suspend()
+        }
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        if let error {
+            // A cancel WE issued (the consumer went
+            // away; the producer is finishing) is not
+            // an origin failure — the pre-fix shape
+            // surfaced it as .failed into a stream
+            // whose consumer had already left, so
+            // silence here is equivalent, and a client
+            // abort is never misread downstream as an
+            // origin fault.
+            let nsError = error as NSError
+            let selfCancelled = nsError.domain == NSURLErrorDomain
+                && nsError.code == NSURLErrorCancelled
+            if !selfCancelled {
+                continuation.yield(.failed(error.localizedDescription))
+            }
+        }
+        continuation.finish()
+        lock.lock()
+        let liveSession = self.session
+        session = nil
+        task = nil
+        lock.unlock()
+        liveSession?.finishTasksAndInvalidate()
     }
 }
