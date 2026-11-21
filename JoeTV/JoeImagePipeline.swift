@@ -247,11 +247,16 @@ final class JoeImagePipeline: @unchecked Sendable {
     /// that); or a TRANSIENT failure (a thrown error/timeout,
     /// 429, 5xx, or an undecodable body — the truncated-
     /// transfer class), which the bounded retry may still
-    /// heal.
+    /// heal. Failures carry a short diagnostic string
+    /// (status, or error domain/code) so a load that dies
+    /// outright can be logged with its cause (FL-343
+    /// instrumentation) — the pre-fix classification
+    /// discarded the reason, and a dead poster left no
+    /// trace in any log.
     private enum LoadOutcome {
         case image(UIImage)
-        case permanent
-        case transient
+        case permanent(String)
+        case transient(String)
     }
 
     private static func attempt(url: URL, bucket: Int,
@@ -263,24 +268,25 @@ final class JoeImagePipeline: @unchecked Sendable {
         do {
             fetched = try await session.data(for: request)
         } catch {
-            return .transient
+            let e = error as NSError
+            return .transient("lỗi mạng \(e.domain) \(e.code)")
         }
         let (data, response) = fetched
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 429 || http.statusCode >= 500 {
-                return .transient
+                return .transient("HTTP \(http.statusCode)")
             }
             guard (200..<300).contains(http.statusCode) else {
-                return .permanent
+                return .permanent("HTTP \(http.statusCode)")
             }
         } else {
             // Pre-P1 behaviour for a non-HTTP response was an
             // outright failure; keep it, classified permanent
             // so the retry never spins on it.
-            return .permanent
+            return .permanent("response không phải HTTP")
         }
         guard let image = decode(data, maxPixel: bucket) else {
-            return .transient
+            return .transient("decode thất bại")
         }
         return .image(image)
     }
@@ -305,11 +311,22 @@ final class JoeImagePipeline: @unchecked Sendable {
                 let cost = image.cgImage.map { $0.width * $0.height * 4 } ?? 0
                 decoded.setObject(image, forKey: "\(url.absoluteString)|\(bucket)" as NSString, cost: cost)
                 return image
-            case .permanent:
+            case .permanent(let why):
+                // FL-343 instrumentation: a load that dies
+                // outright leaves ONE line in the exported
+                // diagnostic log — host + cause only, never
+                // the URL (poster URLs carry no secrets,
+                // but the house rule is uniform). Loads are
+                // deduped by (URL, bucket) in-flight key, so
+                // this fires once per dead load, not per
+                // waiting view.
+                DiagLog.write("IMG", "load chết hẳn host=\(url.host ?? "?") — \(why)")
                 return nil
-            case .transient:
+            case .transient(let why):
                 if i < backoffs.count {
                     try? await Task.sleep(nanoseconds: backoffs[i])
+                } else {
+                    DiagLog.write("IMG", "load chết hẳn host=\(url.host ?? "?") — \(why) (đã thử \(backoffs.count + 1) lần)")
                 }
             }
         }

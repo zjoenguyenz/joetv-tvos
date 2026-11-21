@@ -694,6 +694,21 @@ struct PosterCard: View {
         case wall
     }
 
+    /// The aspect class the art slot gates on. Default
+    /// .portrait — the standing rule for true posters
+    /// (a landscape still hiding in a poster field is
+    /// rejected and the TMDB leg runs). A call site
+    /// whose art is BY CONSTRUCTION not a portrait
+    /// poster — the YouTube rail, whose poster is the
+    /// first episode's 4:3 thumbnail (design §1.1) —
+    /// passes .any: the .portrait gate rejected that
+    /// thumbnail on every card (480×360 has w/h 1.33 >
+    /// 0.85) and, with no TMDB identity at that call
+    /// site, the fallback ladder was empty too, so
+    /// every YouTube card was placeholder by
+    /// construction (FL-343, convicted from code).
+    var artSlotClass: JoeImageSlotClass = .portrait
+
     // v2.0.5 (N4): ONE focus source of truth — the card reads
     // its own focus from the environment, exactly like every
     // other label in the theme system (PillLabel, JoeChipLabel,
@@ -790,7 +805,7 @@ struct PosterCard: View {
                 Color.black.opacity(0.35)
             }
             JoeRemoteImage(url: posterURL, targetPixels: 720, fit: true,
-                           slotClass: .portrait,
+                           slotClass: artSlotClass,
                            fallbackProvider: tmdbFallback) {
                 if theme.id == .ultra {
                     // The Sony Ultra placeholder: the red

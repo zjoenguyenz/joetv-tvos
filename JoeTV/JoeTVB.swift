@@ -781,9 +781,12 @@ struct JoeTVBView: View {
             PosterCard(
                 title: series.title,
                 posterURL: series.posterURL,
+                tmdbId: series.tmdbId > 0 ? String(series.tmdbId) : "",
+                tmdbType: "tv",
                 meta: "\(series.eps.count) tập · \(series.tierLabel)",
                 badge: series.isMembersTier ? "YouTube" : nil,
-                form: .rail)
+                form: .rail,
+                artSlotClass: .any)
         }
         .joeCardButton()
         .focused($cardFocus, equals: "yt|" + series.pid)
@@ -1067,8 +1070,11 @@ struct JoeTVBSearchView: View {
                     PosterCard(
                         title: series.title,
                         posterURL: series.posterURL,
+                        tmdbId: series.tmdbId > 0 ? String(series.tmdbId) : "",
+                        tmdbType: "tv",
                         meta: "\(series.eps.count) tập · \(series.tierLabel)",
-                        badge: series.isMembersTier ? "YouTube" : nil)
+                        badge: series.isMembersTier ? "YouTube" : nil,
+                        artSlotClass: .any)
                 }
                 .joeCardButton()
                 .focused($cardFocus, equals: "ytsearch|" + series.pid)

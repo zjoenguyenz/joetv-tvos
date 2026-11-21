@@ -96,6 +96,32 @@ final class JoeYtNativePlayerModel: ObservableObject {
     private var manualSelections: [AVMediaCharacteristic: AVMediaSelectionOption?] = [:]
     private var itemStatusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
+    private var stallObserver: NSObjectProtocol?
+    /// FL-343 (A) paused-limbo bookkeeping. The leg's
+    /// precondition is POSITIVE evidence the pause is
+    /// not the owner's: performAdvance() stamps the
+    /// moment (and playhead) of a model-issued
+    /// advanceToNextItem, and the stamp lives until the
+    /// supervisor's transition bookkeeping confirms the
+    /// queue actually moved. A pause the OWNER commands
+    /// can never create that stamp — the native player's
+    /// transport is not routed through this model — so
+    /// the leg cannot fire on a user pause BY
+    /// CONSTRUCTION (review round 1, Lens C F-C2/F-C3:
+    /// the earlier buffer/waiting classifier both
+    /// swallowed a user pause issued mid-rebuffer and
+    /// latched a real stall as a user pause when its
+    /// buffer had not drained yet; a one-shot classifier
+    /// cannot separate the two, so the leg keys on the
+    /// model's own unconfirmed advance instead — the
+    /// exact FL-343 incident shape. A mid-item stall
+    /// with no advance in flight is the
+    /// AVPlayerItemPlaybackStalled observer's leg, and
+    /// a .waiting park is the waiting leg's.)
+    private var advanceUnconfirmedSince: Date?
+    private var advanceUnconfirmedPosition: Double = 0
+    private var pausedStallSince: Date?
+    private var pausedStallPosition: Double = 0
 
     var onFallThrough: ((MovieRoute) -> Void)?
     var onDetailFallThrough: ((JoeYtChainPlay) -> Void)?
@@ -222,6 +248,9 @@ final class JoeYtNativePlayerModel: ObservableObject {
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
         }
+        if let stallObserver {
+            NotificationCenter.default.removeObserver(stallObserver)
+        }
         player.pause()
         player.removeAllItems()
     }
@@ -264,6 +293,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil
         }
+        if let stallObserver {
+            NotificationCenter.default.removeObserver(stallObserver)
+            self.stallObserver = nil
+        }
         guard let item else { return }
         // [.new, .initial] (review round 2, MINOR): the
         // supervisor installs this observation up to
@@ -272,11 +305,26 @@ final class JoeYtNativePlayerModel: ObservableObject {
         // fires a .new-only callback and recovery would
         // wait for the 20 s stall leg instead of failing
         // over at once.
+        //
+        // The error text is read from the OBSERVED item
+        // inside the callback (FL-343): the pre-fix
+        // handler read player.currentItem?.error on the
+        // main actor, which during an advance/replace is
+        // a DIFFERENT item than the one that failed — its
+        // error is nil, so real failures reached the log
+        // (and the recovery reason) as the textless
+        // "item failed (không có error text)". The read
+        // itself mirrors the .status read directly above
+        // it — same delivery context, property reads
+        // only; the AVPlayerItem reference never crosses
+        // the hop, only the two Sendable values do
+        // (review round 1, Lens A F-A2).
         itemStatusObservation = item.observe(\.status, options: [.new, .initial]) {
             [weak self] observed, _ in
             let status = observed.status
+            let errorText = observed.error?.localizedDescription
             Task { @MainActor in
-                self?.handleItemStatus(status)
+                self?.handleItemStatus(status, errorText: errorText)
             }
         }
         endObserver = NotificationCenter.default.addObserver(
@@ -286,21 +334,41 @@ final class JoeYtNativePlayerModel: ObservableObject {
                 self?.handleItemEnded()
             }
         }
+        // FL-343 (A): AVPlayer's own stall signal. The
+        // incident item never failed and never ended —
+        // it sat cut mid-stream while no status changed;
+        // this notification is the one signal AVFoundation
+        // raises for exactly that shape, and the pre-fix
+        // model never subscribed to it.
+        stallObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled,
+            object: item, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.handlePlaybackStalled()
+            }
+        }
     }
 
-    private func handleItemStatus(_ status: AVPlayerItem.Status) {
+    private func handleItemStatus(_ status: AVPlayerItem.Status,
+                                  errorText: String?) {
         guard !terminal else { return }
         switch status {
         case .readyToPlay:
             applyMediaSelections(to: player.currentItem)
         case .failed:
-            let message = player.currentItem?.error?.localizedDescription
+            let message = errorText
                 ?? "item failed (không có error text)"
             log("item FAILED ep=\(currentIndex + 1) — \(message)")
             recoverOrFail(reason: message)
         default:
             break
         }
+    }
+
+    private func handlePlaybackStalled() {
+        guard !terminal else { return }
+        log("playback stalled ep=\(currentIndex + 1) tại \(Int(checkpointSeconds))s — AVPlayer báo item đứng giữa chừng")
+        recoverOrFail(reason: "playback stalled")
     }
 
     private func handleItemEnded() {
@@ -381,6 +449,12 @@ final class JoeYtNativePlayerModel: ObservableObject {
             recoverySpent = false
             firstFrameLogged = false
             waitingSince = nil
+            // The advance the stamp waited on HAS landed
+            // (this block IS the supervisor's identity
+            // confirmation) — the limbo leg's precondition
+            // is spent.
+            advanceUnconfirmedSince = nil
+            pausedStallSince = nil
             checkpointSeconds = 0
             playStartedAt = Date()
             observeCurrentItem(player.currentItem)
@@ -402,6 +476,10 @@ final class JoeYtNativePlayerModel: ObservableObject {
         let status = player.timeControlStatus
         if status == .playing {
             waitingSince = nil
+            // Playback is moving: any paused-limbo
+            // bookkeeping is spent.
+            advanceUnconfirmedSince = nil
+            pausedStallSince = nil
             if !firstFrameLogged,
                let item = player.currentItem, item.status == .readyToPlay {
                 firstFrameLogged = true
@@ -435,6 +513,80 @@ final class JoeYtNativePlayerModel: ObservableObject {
             }
         } else {
             waitingSince = nil
+            tickPausedLimbo()
+        }
+    }
+
+    /// FL-343 (A), second leg: recovery watches PROGRESS,
+    /// not only the player's nominal state. In the
+    /// incident the queue was told to advance over an
+    /// item whose origin had been cut mid-stream; the
+    /// item neither failed nor ended, and the player
+    /// parked at .paused awaiting a supervisor
+    /// confirmation that could never come — the pre-fix
+    /// supervisor only watched .waiting, so nothing ever
+    /// fired.
+    ///
+    /// The leg's precondition is the model's OWN
+    /// unconfirmed advance (see the stamp's declaration):
+    /// performAdvance() issued advanceToNextItem and the
+    /// transition bookkeeping never confirmed it. That
+    /// stamp is something a user pause can never
+    /// produce, so the leg is safe for the owner's pause
+    /// BY CONSTRUCTION — it never has to guess intent
+    /// from buffer or waiting signals (review round 1,
+    /// Lens C F-C2/F-C3: those signals misclassify in
+    /// both directions). The fire condition: phase
+    /// .playing, the stamp live, the player parked at
+    /// .paused (this leg only runs on .paused ticks),
+    /// the playhead frozen within 0.5 s of where the
+    /// stretch found it, for over 20 s. A playhead that
+    /// moves again spends the stamp — the advance (or
+    /// playback) is alive after all. A player parked at
+    /// the item's END is excluded: the end-of-item paths
+    /// own that state.
+    private func tickPausedLimbo() {
+        guard phase == .playing, !opInFlight,
+              advanceUnconfirmedSince != nil,
+              let item = player.currentItem else {
+            pausedStallSince = nil
+            return
+        }
+        let position = player.currentTime().seconds
+        let duration = item.duration.seconds
+        if duration.isFinite, duration > 0, position.isFinite,
+           position >= duration - 0.5 {
+            pausedStallSince = nil
+            return
+        }
+        if position.isFinite,
+           abs(position - advanceUnconfirmedPosition) >= 0.5 {
+            // The playhead moved well past the point the
+            // advance was issued from — playback is
+            // alive; the stamp is spent.
+            advanceUnconfirmedSince = nil
+            pausedStallSince = nil
+            return
+        }
+        if pausedStallSince == nil {
+            pausedStallSince = Date()
+            pausedStallPosition = position
+            return
+        }
+        if position.isFinite,
+           abs(position - pausedStallPosition) >= 0.5 {
+            // Still creeping — re-baseline instead of
+            // firing on a slow-but-alive item.
+            pausedStallSince = Date()
+            pausedStallPosition = position
+            return
+        }
+        if let since = pausedStallSince,
+           Date().timeIntervalSince(since) > 20 {
+            log("stall — paused-limbo 20s ở ep=\(currentIndex + 1) tại \(Int(checkpointSeconds))s (advance không được supervisor xác nhận, vị trí đứng yên)")
+            advanceUnconfirmedSince = nil
+            pausedStallSince = nil
+            recoverOrFail(reason: "stall paused-limbo")
         }
     }
 
@@ -505,6 +657,8 @@ final class JoeYtNativePlayerModel: ObservableObject {
                             to: CMTime(seconds: seekTo, preferredTimescale: 600))
                     }
                     self.waitingSince = nil
+                    self.advanceUnconfirmedSince = nil
+                    self.pausedStallSince = nil
                     self.playStartedAt = Date()
                     self.player.play()
                     self.opInFlight = false
@@ -919,6 +1073,15 @@ final class JoeYtNativePlayerModel: ObservableObject {
         // explicitly; while already playing this is a
         // no-op.
         player.play()
+        // FL-343 (A): stamp the expectation. The
+        // supervisor's transition bookkeeping clears it
+        // when the queue's current item actually becomes
+        // the queued one; if 20 s pass with the player
+        // parked .paused and the playhead frozen, the
+        // advance never landed — the paused-limbo leg.
+        advanceUnconfirmedSince = Date()
+        advanceUnconfirmedPosition = player.currentTime().seconds
+        pausedStallSince = nil
         log("advanceToNextItem — chờ supervisor xác nhận bằng item identity")
     }
 

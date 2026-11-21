@@ -252,10 +252,19 @@ actor JoeYtResolver {
         let all = muxed + adaptive
         metrics.formatCount = all.count
         let cipheredCount = all.filter { $0.cipher != nil }.count
+        // The full itag census of this response (FL-343
+        // instrumentation): the OK lines below name the
+        // CHOSEN pair, and without the census beside it a
+        // device log cannot distinguish "the response
+        // never offered a higher rung" from "the ladder
+        // skipped one" — the 2.0.42 session resolved
+        // 135+140 with no way to tell which.
+        let censusList = all.map { $0.itag }.sorted()
+            .map { String($0) }.joined(separator: ",")
         log("resolve vid=\(videoId): /player \(call.ms)ms playability=OK formats=\(all.count) ciphered=\(cipheredCount)")
 
         if let hls = streaming?["hlsManifestUrl"] as? String, let hlsURL = URL(string: hls) {
-            log("resolve vid=\(videoId): response có HLS manifest — dùng thẳng")
+            log("resolve vid=\(videoId): response có HLS manifest — dùng thẳng, census=[\(censusList)]")
             var playable = JoeYtPlayable(kind: .hlsManifest)
             playable.directURL = hlsURL
             return .playable(playable, metrics)
@@ -440,7 +449,7 @@ actor JoeYtResolver {
             }
             playable.durationSeconds = max(video.approxDurationMs, audio.approxDurationMs) / 1000.0
             log("resolve vid=\(videoId): OK — cặp adaptive itag \(video.itag)+\(audio.itag) "
-                + "(\(video.width)x\(video.height)) cho assembly, solver \(metrics.solverMs)ms")
+                + "(\(video.width)x\(video.height)) cho assembly, solver \(metrics.solverMs)ms, census=[\(censusList)]")
             return .playable(playable, metrics)
         }
         if let muxedFallback, let url = solvedURLs[muxedFallback.itag] {
@@ -451,7 +460,7 @@ actor JoeYtResolver {
             playable.height = muxedFallback.height
             playable.videoBitrate = muxedFallback.bitrate
             playable.durationSeconds = muxedFallback.approxDurationMs / 1000.0
-            log("resolve vid=\(videoId): OK — bản muxed itag \(muxedFallback.itag) (không đủ cặp adaptive)")
+            log("resolve vid=\(videoId): OK — bản muxed itag \(muxedFallback.itag) (không đủ cặp adaptive), census=[\(censusList)]")
             return .playable(playable, metrics)
         }
         log("resolve vid=\(videoId): không dựng được playable nào từ các target đã giải")

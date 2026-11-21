@@ -174,21 +174,60 @@ final class JoeYtHlsServer {
 
     /// Start the listener if needed and wait (bounded)
     /// until it reports ready. Returns false on failure.
+    ///
+    /// FL-343 (B): the wait is no longer a single passive
+    /// watch from .idle. A listener that DIES mid-start
+    /// (its state handler drops the machine back to .idle
+    /// inside the wait) is started over within the same
+    /// call, and a listener still wedged in .starting
+    /// after a full bounded wait is torn down and started
+    /// once more — the pre-fix shape returned false and
+    /// left the wedge for the NEXT makeSession to inherit,
+    /// which is how one silent listener death stranded
+    /// every later session of the process on a dead port.
     func ensureStarted() async -> Bool {
-        switch state {
-        case .ready: return true
-        case .idle, .starting: break
-        }
-        if case .idle = state { startListener() }
-        for _ in 0..<30 {
-            switch state {
-            case .ready: return true
-            default: break
+        if state == .ready { return true }
+        for _ in 0..<2 {
+            if state == .idle { startListener() }
+            // The instance THIS round is waiting on
+            // (review round 1, Lens A F-A1): the sleeps
+            // below suspend, and a concurrent makeSession
+            // may tear down and replace the listener
+            // meanwhile — the stuck-.starting teardown
+            // after the wait must only ever lower the
+            // instance this round actually waited on,
+            // never a healthy successor.
+            let waited = listener
+            for _ in 0..<30 {
+                if state == .ready { return true }
+                // Died mid-start: the state handler has
+                // already reset the machine to .idle —
+                // break to the outer loop and start over.
+                if state == .idle { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            if state == .ready { return true }
+            if state == .starting, listener === waited {
+                log("listener kẹt ở .starting quá hạn chờ — hạ và mở lại")
+                teardownListener()
+            }
         }
-        log("listener chưa ready sau 3s — assembly không khả dụng lượt này")
+        log("listener chưa ready sau các lần thử — assembly không khả dụng lượt này")
         return false
+    }
+
+    /// Bring the listener down and reset the machine to
+    /// .idle (FL-343 B): reference and port are cleared
+    /// BEFORE the cancel, so the dead listener's own late
+    /// .cancelled event fails the identity guard in the
+    /// state handler and can never write over a successor
+    /// listener's state.
+    private func teardownListener() {
+        let dead = listener
+        listener = nil
+        boundPort = nil
+        state = .idle
+        dead?.cancel()
     }
 
     private func startListener() {
@@ -235,6 +274,26 @@ final class JoeYtHlsServer {
     private func listenerStateChanged(_ newState: NWListener.State,
                                       listener: NWListener) {
         switch newState {
+        case .setup:
+            // FL-343 (B) + fault-library rule: EVERY state
+            // of the listener is handled and logged — a
+            // state that falls through silently is a state
+            // the server can die in without a trace (the
+            // pre-fix default branch swallowed .waiting,
+            // and the .cancelled branch never logged).
+            guard self.listener === listener else { return }
+            log("listener setup — đang khởi động")
+        case .waiting(let error):
+            // .waiting = the listener exists but has no
+            // usable path right now (interface down /
+            // not ready). It is NOT a serving state: left
+            // latched, makeSession keeps handing out URLs
+            // on a port nothing accepts on — the FL-343
+            // device shape. Tear down to .idle so the next
+            // makeSession starts a fresh listener.
+            guard self.listener === listener else { return }
+            log("listener WAITING: \(error.localizedDescription) — hạ listener, session sau sẽ mở lại")
+            teardownListener()
         case .ready:
             // Identity check FIRST (review count round
             // 1, Lens A F-1): a STALE event from a
@@ -254,37 +313,58 @@ final class JoeYtHlsServer {
             // usable port. The log records only that the
             // port is ephemeral (design §4.4's logging
             // point) — never the number.
-            boundPort = listener.port?.rawValue
+            //
+            // A .ready with NO readable port is not a
+            // serving state (review round 1, Lens C
+            // F-C7): latched, ensureStarted would answer
+            // true while makeSession's boundPort guard
+            // fails every session — the FL-343 silent-
+            // death shape behind a green-looking state.
+            // Treat it as a failed start.
+            guard let port = listener.port?.rawValue else {
+                log("listener ready nhưng không đọc được cổng — hạ listener, session sau sẽ mở lại")
+                teardownListener()
+                return
+            }
+            boundPort = port
             state = .ready
             log("listener ready trên 127.0.0.1 (ephemeral)")
         case .failed(let error):
             guard self.listener === listener else { return }
-            self.listener = nil
-            boundPort = nil
             // Reset to .idle so the next makeSession
             // retries (review round 1, MINOR — the .failed
             // latch made one transient bind failure
             // permanent for the process).
-            state = .idle
             log("listener FAILED: \(error.localizedDescription) — lần mở session sau sẽ thử mở lại")
+            teardownListener()
         case .cancelled:
             if self.listener === listener {
-                self.listener = nil
-                boundPort = nil
-                // Back to .idle UNCONDITIONALLY (review
-                // round 7, MINOR): a listener cancelled
-                // while still .starting previously left
-                // the state latched at .starting forever —
-                // ensureStarted only starts from .idle, so
-                // assembly would have been dead for the
-                // process lifetime, the exact latch the
-                // round-1 fix removed from the .failed
-                // branch. No code cancels the listener
-                // today; this is the latent path closed.
-                state = .idle
+                // Logged (FL-343 B: this branch was silent
+                // — a cancelled listener left no trace at
+                // all). Back to .idle UNCONDITIONALLY
+                // (review round 7, MINOR): a listener
+                // cancelled while still .starting previously
+                // left the state latched at .starting
+                // forever — ensureStarted only starts from
+                // .idle, so assembly would have been dead
+                // for the process lifetime, the exact latch
+                // the round-1 fix removed from the .failed
+                // branch.
+                log("listener CANCELLED — hạ listener, session sau sẽ mở lại")
+                teardownListener()
             }
-        default:
-            break
+        @unknown default:
+            // A state a future OS adds (review round 1,
+            // Lens B F-1): NWListener.State is an imported
+            // enum and this switch must keep a door for
+            // cases the current SDK does not declare —
+            // and per the FL-343 rule the door is LOGGED,
+            // never silent. The state itself is left
+            // untouched: an unknown state is not evidence
+            // the listener stopped serving.
+            if self.listener === listener {
+                log("listener state lạ (\(newState)) — giữ nguyên, không suy đoán")
+            }
         }
     }
 
@@ -339,6 +419,7 @@ final class JoeYtHlsServer {
         guard let requestLine = lines.first else { close(conn); return }
         let parts = requestLine.split(separator: " ")
         guard parts.count >= 2 else {
+            log("serve (request line không hợp lệ) → 400")
             respondText(conn, status: 400, body: "bad request",
                         headOnly: requestLine.hasPrefix("HEAD "))
             return
@@ -358,23 +439,44 @@ final class JoeYtHlsServer {
                     .trimmingCharacters(in: .whitespaces)
             }
         }
+        // Freeze the parsed value into an immutable let
+        // before any closure captures it (FL-341): the
+        // relay Task below captures this let, never the
+        // mutated var above.
+        let parsedRangeHeader = rangeHeader
         // /yt/<session>/<file>
+        // Serve logging (FL-343 PHÒNG NGỪA 3): every
+        // request this server answers is recorded with
+        // its method, its INTERNAL path (session prefix +
+        // file — never an origin URL) and the status
+        // returned, 404s included. The pre-fix server
+        // logged nothing per request, so a dead listener
+        // and a live one were indistinguishable in the
+        // diagnostic log.
         let segments = path.split(separator: "/").map(String.init)
         guard segments.count == 3, segments[0] == "yt",
               let session = sessions[segments[1]] else {
+            if segments.count == 3, segments[0] == "yt" {
+                log("serve \(method) /yt/\(segments[1].prefix(8))/\(segments[2]) → 404")
+            } else {
+                log("serve \(method) (path không thuộc /yt/) → 404")
+            }
             respondText(conn, status: 404, body: "not found", headOnly: headOnly)
             return
         }
         let file = segments[2]
         switch file {
         case "master.m3u8":
+            log("serve \(method) /yt/\(segments[1].prefix(8))/master.m3u8 → 200")
             respondText(conn, status: 200, body: masterPlaylist(session),
                         contentType: "application/vnd.apple.mpegurl", headOnly: headOnly)
         case "video.m3u8":
+            log("serve \(method) /yt/\(segments[1].prefix(8))/video.m3u8 → 200")
             respondText(conn, status: 200,
                         body: mediaPlaylist(entry: session.video, file: "video.bin"),
                         contentType: "application/vnd.apple.mpegurl", headOnly: headOnly)
         case "audio.m3u8":
+            log("serve \(method) /yt/\(segments[1].prefix(8))/audio.m3u8 → 200")
             respondText(conn, status: 200,
                         body: mediaPlaylist(entry: session.audio, file: "audio.bin"),
                         contentType: "application/vnd.apple.mpegurl", headOnly: headOnly)
@@ -382,9 +484,11 @@ final class JoeYtHlsServer {
             let entry = (file == "video.bin") ? session.video : session.audio
             Task { [weak self] in
                 await self?.relay(conn, sessionID: segments[1], entry: entry,
-                                  rangeHeader: rangeHeader, headOnly: headOnly)
+                                  rangeHeader: parsedRangeHeader, headOnly: headOnly,
+                                  method: method, file: file)
             }
         default:
+            log("serve \(method) /yt/\(segments[1].prefix(8))/\(file) → 404")
             respondText(conn, status: 404, body: "not found", headOnly: headOnly)
         }
     }
@@ -445,41 +549,34 @@ final class JoeYtHlsServer {
         case failed(String)
     }
 
-    /// Forward the request (with AVPlayer's Range, if
-    /// any) to the deciphered origin and stream the reply
-    /// back in ~256 KB chunks. The origin's status and
-    /// range headers are relayed verbatim — AVPlayer's
-    /// byte-range bookkeeping depends on them.
+    /// Build ONE origin fetch as a bounded, back-
+    /// pressured event stream (buffer of 8 events ≈
+    /// 2 MB of chunks). The policy is .bufferingOldest
+    /// on purpose: per the stdlib doc, when the buffer
+    /// is full this policy "discard[s] the newly
+    /// received element", "keeping at most the
+    /// specified number of oldest values" — so a yield
+    /// returns .dropped carrying the very event that
+    /// was NOT buffered, and events already buffered
+    /// are never evicted. The producer therefore WAITS
+    /// and retries that same event, and bytes are
+    /// neither lost nor duplicated. That makes the
+    /// header's "never buffered whole" claim
+    /// structural, not a hope about relative speeds.
     ///
-    /// The fetch itself runs in a DETACHED producer task
-    /// that accumulates bytes into chunks off the main
-    /// actor (review round 1, MINOR: iterating
-    /// URLSession.AsyncBytes byte-by-byte inside this
-    /// @MainActor function resumed the actor once per
-    /// byte — the known-slowest consumption pattern).
-    /// Only chunk-sized events cross back here.
-    private func relay(_ conn: NWConnection, sessionID: String, entry: StreamEntry,
-                       rangeHeader: String?, headOnly: Bool) async {
-        // Only immutable Sendable values cross into the
-        // detached producer below (FL-341): the
-        // URLRequest is built INSIDE the detached task
-        // from these lets. Building and mutating it here
-        // — inside this @MainActor function — made the
-        // request a main actor-region value, and Swift 6
-        // rejected capturing it into the producer's
-        // `sending` closure (CI run #21 error at the
-        // Task.detached line).
-        let originURL = entry.origin
-        let userAgent = entry.userAgent
-        let fallbackType = entry.mimeType
-        // Bounded stream WITH back-pressure (review
-        // round 7, MINOR): the buffer holds at most 8
-        // events (~2 MB of chunks); when it is full the
-        // producer WAITS and retries the same event —
-        // bytes are never dropped, and the header's
-        // "never buffered whole" claim is structural,
-        // not a hope about relative speeds.
-        let events = AsyncStream<RelayEvent>(bufferingPolicy: .bufferingOldest(8)) { continuation in
+    /// Static and parameter-fed on purpose (FL-341): the
+    /// detached producer below captures ONLY the immutable
+    /// Sendable parameters and the stream continuation,
+    /// and the URLRequest is assembled INSIDE the detached
+    /// task from them. Building and mutating the request
+    /// in the @MainActor caller made it a main-actor-region
+    /// value, and Swift 6 rejected capturing it into the
+    /// producer's `sending` closure (CI run #21).
+    private static func originEvents(originURL: URL, userAgent: String,
+                                     fallbackType: String,
+                                     rangeHeader: String?,
+                                     headOnly: Bool) -> AsyncStream<RelayEvent> {
+        AsyncStream<RelayEvent>(bufferingPolicy: .bufferingOldest(8)) { continuation in
             let producer = Task.detached(priority: .userInitiated) {
                 // Returns false when the consumer is
                 // gone (terminated / cancelled).
@@ -497,7 +594,7 @@ final class JoeYtHlsServer {
                 }
                 // The request is assembled here, inside
                 // the detached task (FL-341 — see the
-                // note at the top of relay()).
+                // note above).
                 var request = URLRequest(url: originURL)
                 request.timeoutInterval = 30
                 // A HEAD probe is answered with a HEAD to
@@ -541,67 +638,237 @@ final class JoeYtHlsServer {
             }
             continuation.onTermination = { _ in producer.cancel() }
         }
+    }
+
+    /// The Range header for a resume fetch, computed
+    /// from AVPlayer's ORIGINAL range and the bytes
+    /// already delivered against it (FL-343 A): the
+    /// resume asks for exactly the undelivered remainder
+    /// of the original window. Nil when the original
+    /// range cannot be continued (suffix form, multi-
+    /// range, unparseable) — the caller then closes
+    /// instead of guessing at byte offsets.
+    private static func resumeRange(originalRange: String?,
+                                    bytesSent: Int64) -> (header: String, start: Int64)? {
+        guard let originalRange else {
+            // No range was requested: the response is the
+            // whole file from byte 0, so the remainder
+            // starts exactly at the delivered count.
+            return ("bytes=\(bytesSent)-", bytesSent)
+        }
+        let trimmed = originalRange.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("bytes=") else { return nil }
+        let spec = trimmed.dropFirst("bytes=".count)
+        let parts = spec.split(separator: "-", maxSplits: 1,
+                               omittingEmptySubsequences: false)
+        guard parts.count == 2, let start = Int64(parts[0]) else { return nil }
+        let resumeStart = start + bytesSent
+        if parts[1].isEmpty {
+            return ("bytes=\(resumeStart)-", resumeStart)
+        }
+        guard let end = Int64(parts[1]), resumeStart <= end else { return nil }
+        return ("bytes=\(resumeStart)-\(end)", resumeStart)
+    }
+
+    /// Forward the request (with AVPlayer's Range, if
+    /// any) to the deciphered origin and stream the reply
+    /// back in ~256 KB chunks. The origin's status and
+    /// range headers are relayed verbatim — AVPlayer's
+    /// byte-range bookkeeping depends on them.
+    ///
+    /// The fetch itself runs in a DETACHED producer task
+    /// that accumulates bytes into chunks off the main
+    /// actor (review round 1, MINOR: iterating
+    /// URLSession.AsyncBytes byte-by-byte inside this
+    /// @MainActor function resumed the actor once per
+    /// byte — the known-slowest consumption pattern).
+    /// Only chunk-sized events cross back here.
+    ///
+    /// FL-343 (A): a mid-stream origin cut no longer
+    /// closes the connection on first failure. The head
+    /// AVPlayer already holds promises a fixed byte
+    /// count; when the origin drops part-way, the relay
+    /// re-issues the fetch for the UNDELIVERED remainder
+    /// of the original range (up to 3 resumes, backoff
+    /// 0.5 s / 1.5 s / 1.5 s) and keeps streaming against
+    /// the SAME head — AVPlayer sees one slow response,
+    /// not a truncated file. The resume head is never
+    /// re-sent, and a resume response is trusted only
+    /// when it is a 206 whose Content-Range starts at
+    /// exactly the requested resume offset.
+    private func relay(_ conn: NWConnection, sessionID: String, entry: StreamEntry,
+                       rangeHeader: String?, headOnly: Bool,
+                       method: String, file: String) async {
+        // Only immutable Sendable values cross into the
+        // detached producers built below (FL-341): each
+        // fetch's URLRequest is assembled inside its own
+        // detached task from these lets.
+        let originURL = entry.origin
+        let userAgent = entry.userAgent
+        let fallbackType = entry.mimeType
+        let servePath = "/yt/\(sessionID.prefix(8))/\(file)"
+        let resumeDelays: [UInt64] = [500_000_000, 1_500_000_000, 1_500_000_000]
+
         var headSent = false
-        for await event in events {
-            switch event {
-            case .head(let status, let contentType, let contentLength, let contentRange):
-                if status >= 400 {
-                    // Design §4.4's logging point: an
-                    // upstream failure is recorded with
-                    // its STATUS at the layer that sees
-                    // it (FL-076) — never the URL. The
-                    // status still relays verbatim to
-                    // AVPlayer; recovery from a dead
-                    // origin is the player model's
-                    // item-level re-resolve leg.
-                    log("relay: upstream trả status \(status) cho một segment")
+        var bytesSent: Int64 = 0
+        /// The status of the FIRST head (the one AVPlayer
+        /// holds): resumes are armed only for a 2xx head
+        /// (review round 1, Lens C F-C5).
+        var headStatus: Int?
+        /// The body byte count the FIRST head promised
+        /// AVPlayer; resumes stream against this same
+        /// promise, so completeness is judged against it.
+        var expectedBytes: Int64?
+        var attempt = 0                    // 0 = original fetch; 1...3 = resumes
+        var effectiveRange = rangeHeader
+        var expectedResumeStart: Int64 = 0
+
+        while true {
+            var failure: String?
+            var clientGone = false
+            var finished = false
+            let events = Self.originEvents(
+                originURL: originURL, userAgent: userAgent,
+                fallbackType: fallbackType,
+                rangeHeader: effectiveRange, headOnly: headOnly)
+            stream: for await event in events {
+                switch event {
+                case .head(let status, let contentType, let contentLength, let contentRange):
+                    if attempt > 0 {
+                        // A resume's head is NEVER relayed
+                        // (AVPlayer already holds the first
+                        // one). Trust the resume only when
+                        // the origin answered 206 starting
+                        // at exactly the byte we asked for;
+                        // anything else would corrupt the
+                        // byte accounting, so it counts as
+                        // a failed attempt.
+                        let rangeStart = contentRange
+                            .flatMap { Self.contentRangeStart($0) }
+                        if status != 206 || rangeStart != expectedResumeStart {
+                            failure = "origin trả status \(status) cho lần nối tiếp (cần 206 từ byte \(expectedResumeStart))"
+                            break stream
+                        }
+                        continue stream
+                    }
+                    if status >= 400 {
+                        // Design §4.4's logging point: an
+                        // upstream failure is recorded with
+                        // its STATUS at the layer that sees
+                        // it (FL-076) — never the URL. The
+                        // status still relays verbatim to
+                        // AVPlayer; recovery from a dead
+                        // origin is the player model's
+                        // item-level re-resolve leg.
+                        log("relay: upstream trả status \(status) cho một segment")
+                    }
+                    var head = "HTTP/1.1 \(status) \(Self.statusText(status))\r\n"
+                    head += "Content-Type: \(contentType)\r\n"
+                    head += "Accept-Ranges: bytes\r\n"
+                    if let contentLength {
+                        head += "Content-Length: \(contentLength)\r\n"
+                        expectedBytes = Int64(contentLength)
+                    }
+                    if let contentRange {
+                        head += "Content-Range: \(contentRange)\r\n"
+                    }
+                    head += "Connection: close\r\n\r\n"
+                    guard await send(conn, data: Data(head.utf8)) else {
+                        clientGone = true
+                        break stream
+                    }
+                    headSent = true
+                    headStatus = status
+                    log("serve \(method) \(servePath) → \(status)")
+                    if headOnly {
+                        finished = true
+                        break stream
+                    }
+                    if (200..<300).contains(status) {
+                        noteFirstSegmentServed(sessionID: sessionID)
+                    }
+                case .chunk(let data):
+                    guard await send(conn, data: data) else {
+                        clientGone = true
+                        break stream
+                    }
+                    bytesSent += Int64(data.count)
+                case .failed(let message):
+                    failure = message
+                    break stream
                 }
-                var head = "HTTP/1.1 \(status) \(Self.statusText(status))\r\n"
-                head += "Content-Type: \(contentType)\r\n"
-                head += "Accept-Ranges: bytes\r\n"
-                if let contentLength {
-                    head += "Content-Length: \(contentLength)\r\n"
-                }
-                if let contentRange {
-                    head += "Content-Range: \(contentRange)\r\n"
-                }
-                head += "Connection: close\r\n\r\n"
-                guard await send(conn, data: Data(head.utf8)) else {
-                    close(conn)
-                    return
-                }
-                headSent = true
-                if headOnly {
-                    close(conn)
-                    return
-                }
-                if (200..<300).contains(status) {
-                    noteFirstSegmentServed(sessionID: sessionID)
-                }
-            case .chunk(let data):
-                guard await send(conn, data: data) else {
-                    close(conn)
-                    return
-                }
-            case .failed(let message):
-                if headSent {
-                    // A cut stream after a 2xx head cannot
-                    // be repaired at this layer — closing
-                    // tells the player the segment is
-                    // incomplete and its own retry/stall
-                    // machinery takes over (the player
-                    // model's re-resolve leg covers dead
-                    // origins).
-                    log("relay: origin đứt giữa chừng — \(message)")
-                    close(conn)
-                } else {
-                    log("relay: origin lỗi mạng — \(message)")
-                    respondText(conn, status: 502, body: "origin error", headOnly: headOnly)
-                }
+            }
+            if clientGone || finished {
+                close(conn)
                 return
             }
+            // A stream that ended WITHOUT a failure event
+            // is complete only if it delivered every byte
+            // the first head promised (review round 1,
+            // Lens C F-C4): an origin that closes early
+            // but politely — including a resume whose own
+            // Content-Range ends short — is short exactly
+            // like one that errors, so the shortfall is
+            // judged here, against the FIRST head's
+            // promise, and flows into the same resume
+            // machinery below.
+            var failureMessage = failure
+            if failureMessage == nil, let expectedBytes,
+               bytesSent < expectedBytes {
+                failureMessage = "origin đóng sớm — mới chuyển \(bytesSent)/\(expectedBytes) byte"
+            }
+            guard let failure = failureMessage else {
+                // No failure, and every promised byte
+                // delivered: the body is complete.
+                close(conn)
+                return
+            }
+            if !headSent {
+                log("relay: origin lỗi mạng — \(failure)")
+                log("serve \(method) \(servePath) → 502")
+                respondText(conn, status: 502, body: "origin error", headOnly: headOnly)
+                return
+            }
+            // The head is already with AVPlayer. If every
+            // promised byte was in fact delivered (the
+            // origin cut the connection on its final
+            // flush), there is nothing to resume.
+            if let expectedBytes, bytesSent >= expectedBytes {
+                log("relay: origin đứt ở cuối — đã đủ \(bytesSent) byte theo head, đóng bình thường")
+                close(conn)
+                return
+            }
+            // No resumes behind an error head (review
+            // round 1, Lens C F-C5): AVPlayer has already
+            // rejected a ≥400 response, and a resume would
+            // demand a 206 the origin will not give —
+            // three attempts and their backoffs would
+            // only delay the close.
+            guard !headOnly, attempt < resumeDelays.count,
+                  let headStatus, (200..<300).contains(headStatus),
+                  let resume = Self.resumeRange(originalRange: rangeHeader,
+                                                bytesSent: bytesSent) else {
+                log("relay: origin đứt giữa chừng — \(failure); không nối tiếp được nữa — đóng kết nối")
+                close(conn)
+                return
+            }
+            attempt += 1
+            effectiveRange = resume.header
+            expectedResumeStart = resume.start
+            log("relay: origin đứt giữa chừng — \(failure); nối tiếp lần \(attempt) từ byte \(resume.start) (đã chuyển \(bytesSent) byte)")
+            try? await Task.sleep(nanoseconds: resumeDelays[attempt - 1])
         }
-        close(conn)
+    }
+
+    /// The start offset of a Content-Range header value
+    /// ("bytes 200-399/1234" → 200); nil for any other
+    /// shape (including the "*" total form).
+    private static func contentRangeStart(_ value: String) -> Int64? {
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("bytes ") else { return nil }
+        let rangePart = trimmed.dropFirst("bytes ".count)
+        guard let dash = rangePart.firstIndex(of: "-") else { return nil }
+        return Int64(rangePart[..<dash])
     }
 
     /// Design §4.4 logging point: the first media
@@ -642,10 +909,14 @@ final class JoeYtHlsServer {
                              contentType: String = "text/plain; charset=utf-8",
                              headOnly: Bool = false) {
         let bodyData = Data(body.utf8)
-        var head = "HTTP/1.1 \(status) \(Self.statusText(status))\r\n"
-        head += "Content-Type: \(contentType)\r\n"
-        head += "Content-Length: \(bodyData.count)\r\n"
-        head += "Connection: close\r\n\r\n"
+        // The whole head is ONE immutable let, built in a
+        // single expression before the Task below reads
+        // it (FL-341): no += mutation of a value a
+        // closure captures.
+        let head = "HTTP/1.1 \(status) \(Self.statusText(status))\r\n"
+            + "Content-Type: \(contentType)\r\n"
+            + "Content-Length: \(bodyData.count)\r\n"
+            + "Connection: close\r\n\r\n"
         Task { [weak self] in
             guard let self else { return }
             guard await self.send(conn, data: Data(head.utf8)) else {
