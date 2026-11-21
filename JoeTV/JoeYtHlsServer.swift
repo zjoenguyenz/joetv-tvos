@@ -1272,8 +1272,8 @@ private final class JoeYtOriginFetch: NSObject, URLSessionDataDelegate, @uncheck
         continuation.finish()
         lock.lock()
         let liveSession = self.session
-        session = nil
-        task = nil
+        self.session = nil
+        self.task = nil
         lock.unlock()
         liveSession?.finishTasksAndInvalidate()
     }
