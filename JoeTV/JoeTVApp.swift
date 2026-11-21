@@ -381,9 +381,14 @@ struct JoeRootView: View {
                 .zIndex(4)
             }
             if let request = nav.ytPlayer {
-                // The player paints its own black (and its
+                // The router paints its own surfaces (the
+                // native player paints its own black and
                 // veil); no theme background under it.
-                JoeYtPlayerView(request: request)
+                // v2.0.42: the slot presents the ROUTER —
+                // the single routing point that picks the
+                // native route, the device-code sign-in
+                // surface, or the door+page fallback.
+                JoeYtPlayRouter(request: request)
                     .transition(.opacity)
                     .zIndex(5)
             }

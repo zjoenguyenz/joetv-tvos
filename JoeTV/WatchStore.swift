@@ -64,6 +64,14 @@ final class WatchStore: ObservableObject {
     nonisolated static let kindVS = "vsmov"
     nonisolated static let kindTP = "tp"
     nonisolated static let kindTor = "torrent"
+    /// v2.0.42 (design §3.4): rows written by the
+    /// native YouTube player. The movie rails whitelist
+    /// the four provider kinds, so these rows never
+    /// render as movie tiles; they exist so a YouTube
+    /// episode's progress canonical-matches the same
+    /// title's chain rows (FL-058) and the detail
+    /// preselect can find it.
+    nonisolated static let kindYT = "yt"
 
     private static let fileName = "watch-state.json"
     private static let maxProgress = 40
@@ -212,6 +220,11 @@ final class WatchStore: ObservableObject {
     nonisolated static func vsProgressKey(slug: String, epName: String) -> String { "vs|\(slug)|\(epName)" }
     nonisolated static func tpProgressKey(slug: String, epName: String) -> String { "tp|\(slug)|\(epName)" }
     nonisolated static func torProgressKey(streamId: String) -> String { "tor|\(streamId)" }
+    /// One row per YouTube SERIES (design §3.4): the
+    /// row carries the latest episode + position, so a
+    /// 400-episode series costs exactly one of the 40
+    /// progress slots, never one per episode.
+    nonisolated static func ytProgressKey(pid: String) -> String { "yt|\(pid)" }
 
     nonisolated static func movieFavKey(provider: String, slug: String) -> String {
         switch provider {
@@ -447,8 +460,26 @@ final class WatchStore: ObservableObject {
         // is inserted once, under the surviving identity
         // (see mergedEntry).
         var merged = e
+        // kindYT rows are EXEMPT from the canonical
+        // folds (review count round 1, Lens B F1): a
+        // YouTube row carries no provider reopen
+        // identity (no poster, no provider slug), and
+        // mergedEntry counts it as a "provider"
+        // (kind != kindTor) — folding a yt save into a
+        // KK/F4K/VS/TP twin would DELETE the provider
+        // row and leave the series' Continue Watching
+        // card vanished from every rail (no rail
+        // renders kindYT), and the sameSeries sweep
+        // below would delete it for a different-episode
+        // yt save. A yt save therefore replaces ONLY
+        // its own yt|<pid> row; provider saves likewise
+        // never fold a yt row away. Canonical READS
+        // (progressFor / progressForTitle) are
+        // unaffected — resume and preselect still see
+        // across families.
         let twins = progressEntries.filter {
-            $0.key == e.key || Self.canonicalMatch($0, e)
+            ($0.key == e.key || Self.canonicalMatch($0, e))
+                && !(($0.kind == Self.kindYT) != (e.kind == Self.kindYT))
         }
         for old in twins {
             merged = Self.mergedEntry(incoming: merged, old: old)
@@ -470,6 +501,7 @@ final class WatchStore: ObservableObject {
         // episodes.
         progressEntries.removeAll {
             $0.key != merged.key && Self.sameSeries($0, merged)
+                && !(($0.kind == Self.kindYT) != (merged.kind == Self.kindYT))
         }
         progressEntries.insert(merged, at: 0)
         progressEntries.sort { $0.ts > $1.ts }

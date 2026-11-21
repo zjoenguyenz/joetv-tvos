@@ -27,6 +27,12 @@ struct JoeYtPlayRequest: Identifiable, Sendable {
     let mode: JoeYtSourceMode
     let tier: String
     let seriesTitle: String
+    /// The matched title's TMDB id (0 = YouTube-only or
+    /// the match never passed the in-app check). Carried
+    /// so the native player's WatchStore rows stamp the
+    /// stable title identity (design §3.4 / FL-058) —
+    /// never used to gate or route playback.
+    let tmdbId: Int
     /// The matched 803 title's primary chain route, minted by
     /// the detail at tap time; consumed ONLY by Auto's
     /// fall-through when every YouTube surface fails
@@ -79,7 +85,7 @@ struct JoeYtDetail: View {
     /// Super VIP press feedback: the honest above-tier
     /// message, promoted from a quiet line to the accented
     /// notice when an episode is actually pressed.
-    @State private var vipFlash = false
+
     @FocusState private var epFocus: Int?
     @FocusState private var chipFocus: String?
 
@@ -122,8 +128,6 @@ struct JoeYtDetail: View {
                 sourceRow(series)
                 if series.isSuperVIP {
                     vipNotice
-                } else if series.isMembersTier && !session.signedIn {
-                    gateRow
                 }
                 episodes(series)
             }
@@ -214,37 +218,27 @@ struct JoeYtDetail: View {
         .focused($chipFocus, equals: id)
     }
 
-    // MARK: Gold gate + Super VIP notice
+    // MARK: Super VIP notice
 
-    /// Members tier + signed out (design §1.5): the reason,
-    /// and the door, on one row. Tapping an episode routes
-    /// here too — the door opens, never a dead player
-    /// (owner decision Q2).
-    private var gateRow: some View {
-        HStack(spacing: 18) {
-            Text("Cần đăng nhập TVB Gold để xem mục này.")
-                .font(.system(size: 27))
-                .foregroundStyle(theme.text)
-            Button {
-                nav.ytSignInOpen = true
-            } label: {
-                JoeSecondaryLabel(title: "Đăng nhập TVB Gold")
-            }
-            .joeCardButton()
-            .focused($chipFocus, equals: "gate")
-        }
-        .focusSection()
-    }
+    // The 2.0.41 Gold gate row (a standing "sign into
+    // the web door" button for signed-out members
+    // series) is GONE: under the single-route design
+    // (§4.1) identity is the device-code flow, opened
+    // by the router at tap time — the door survives
+    // only as the router's degraded fallback (§4.6),
+    // never as a detail-level sign-in prompt.
 
-    /// Super VIP sits ABOVE the owner's Level-2 Gold
-    /// (his ruling, 2026-11-19): the tier is badged and an
-    /// episode press shows this honest message — never a
-    /// silent dead press, never a playback attempt.
+    /// Super VIP sits ABOVE the owner's Level-2 Gold:
+    /// the notice states the tier FACT only. Whether an
+    /// episode plays is decided at tap time by the live
+    /// /player signal through the router (§4.1's
+    /// live-signal law) — this label-driven verdict
+    /// ("chưa xem được") and the tap flash that used to
+    /// accompany it were the 2.0.41 law and are removed.
     private var vipNotice: some View {
-        Text("Mục Super VIP — đây là gói cao hơn gói Gold hiện tại của anh, nên chưa xem được trong app.")
-            .font(.system(size: vipFlash ? 29 : 25,
-                          weight: vipFlash ? .semibold : .regular))
-            .foregroundStyle(vipFlash ? .orange : theme.meta)
+        Text("Mục Super VIP — hạng cao nhất của TVB trên YouTube.")
+            .font(.system(size: 25))
+            .foregroundStyle(theme.meta)
             .frame(maxWidth: 1250, alignment: .leading)
     }
 
@@ -277,18 +271,20 @@ struct JoeYtDetail: View {
     // MARK: Actions
 
     private func tapEpisode(_ index: Int, series: JoeYtSeries) {
-        if series.isSuperVIP {
-            vipFlash = true
-            DiagLog.write("YT", "super-vip episode tap — above-tier message shown")
-            return
-        }
-        if series.isMembersTier && !session.signedIn {
-            // Owner decision Q2: the door, never a quiet
-            // chain fallback and never a dead player.
-            nav.ytSignInOpen = true
-            DiagLog.write("YT", "members episode tap while signed out — door opened")
-            return
-        }
+        // EVERY tier mints the request (design §4.1 —
+        // the single-route ruling superseded the 2.0.41
+        // label gates that used to live here): the
+        // ROUTER decides from the live signal — no
+        // identity → the device-code surface; a tier
+        // above the account → the honest slate from
+        // /player's own UNPLAYABLE reason; playable →
+        // the native player. Nothing is blocked or
+        // diverted by the catalogue label at tap time,
+        // and a members tap with no identity opens the
+        // activation flow through the router — never a
+        // quiet chain fallback, never a dead player
+        // (the owner's Q2 discipline, kept; the surface
+        // that serves it changed).
         nav.ytPlayer = JoeYtPlayRequest(
             pid: series.pid,
             videoIds: series.eps,
@@ -296,6 +292,7 @@ struct JoeYtDetail: View {
             mode: mode,
             tier: series.tier,
             seriesTitle: series.title,
+            tmdbId: matchedTitle != nil ? series.tmdbId : 0,
             chainRoute: primaryChainRoute(),
             chainPlay: nil)
     }

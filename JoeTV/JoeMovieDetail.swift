@@ -127,7 +127,7 @@ struct JoeMovieDetail: View {
     @ObservedObject private var ytSession = JoeYtSession.shared
     @State private var ytMode: JoeYtSourceMode = .auto
     @State private var ytChainPinned = false
-    @State private var ytVipFlash = false
+
     @FocusState private var ytEpFocus: Int?
     @FocusState private var focusedEp: String?
     @FocusState private var focusedPlay: Bool
@@ -2271,7 +2271,6 @@ private struct JoeCastCellLabel: View {
             // chain source pinned) the groups render exactly
             // as before.
             if let yt = ytMatch, ytActiveMode != nil {
-                ytNotices(yt)
                 ytUnifiedGroup(d, yt: yt, centered: centered)
             } else {
             ForEach(Array(d.servers.enumerated()), id: \.offset) { serverIndex, server in
@@ -2361,24 +2360,16 @@ private struct JoeCastCellLabel: View {
 
     // MARK: - TVB YouTube shared grid
 
-    /// The YouTube notices at the top of the shared grid —
-    /// the tvbNoPlayableSource notice's placement pattern
-    /// (focusable text, no chrome): the Gold gate line while
-    /// signed out; the Super VIP message after a press.
-    @ViewBuilder
-    private func ytNotices(_ yt: JoeYtSeries) -> some View {
-        if yt.isSuperVIP && ytVipFlash {
-            Text("Mục Super VIP — gói cao hơn gói Gold hiện tại của anh, nên các tập YouTube chưa xem được. Các tập có ở nguồn TVB vẫn xem bình thường trong lưới này.")
-                .font(.system(size: 25, weight: .semibold))
-                .foregroundStyle(.orange)
-                .focusable(true)
-        } else if yt.isMembersTier && !ytSession.signedIn {
-            Text("Xem qua YouTube cần đăng nhập TVB Gold — bấm một tập, app sẽ mở trang đăng nhập nếu anh chưa đăng nhập.")
-                .font(.system(size: 25))
-                .foregroundStyle(theme.meta)
-                .focusable(true)
-        }
-    }
+    /// The 2.0.41 gate notices that used to head this
+    /// grid (a Super VIP verdict shown after a blocked
+    /// press; a "sign into the web door" line keyed on
+    /// the WEB session) are REMOVED with the gates
+    /// themselves (design §4.1): entitlement is read
+    /// from the live /player signal by the router, whose
+    /// surfaces (device-code activation, the honest
+    /// above-tier slate) carry both messages now. A
+    /// label-driven notice here would assert an
+    /// entitlement this screen has not measured.
 
     /// The ONE shared episode grid (owner ruling,
     /// 2026-11-19): the union of both sources in the chain
@@ -2448,9 +2439,14 @@ private struct JoeCastCellLabel: View {
     /// coverage):
     /// - an index YouTube lacks → the chain plays it, via
     ///   the chain's own play() exactly;
-    /// - Super VIP → the above-tier message, never a player;
-    /// - members tier signed out → the sign-in door;
-    /// - otherwise the YouTube player, carrying the chain
+    /// - any index YouTube has → the YouTube ROUTER,
+    ///   whatever the tier (design §4.1 — the single-route
+    ///   ruling superseded the 2.0.41 label gates that used
+    ///   to sit here): the router reads the LIVE signal —
+    ///   no identity → the device-code surface; a tier
+    ///   above the account → the honest slate from
+    ///   /player's own UNPLAYABLE reason; playable → the
+    ///   native player. The request carries the chain
     ///   hand-back for Auto (total YouTube failure returns
     ///   THIS episode to this detail, which plays it via
     ///   the chain — the "always ready" standard).
@@ -2458,16 +2454,6 @@ private struct JoeCastCellLabel: View {
                                names: [String], index: Int) {
         if index >= yt.eps.count {
             play(d, epName: names[index])
-            return
-        }
-        if yt.isSuperVIP {
-            ytVipFlash = true
-            DiagLog.write("YT", "detail: super-vip episode tap — above-tier message shown")
-            return
-        }
-        if yt.isMembersTier && !ytSession.signedIn {
-            nav.ytSignInOpen = true
-            DiagLog.write("YT", "detail: members episode tap while signed out — door opened")
             return
         }
         let mode = ytActiveMode ?? .auto
@@ -2478,6 +2464,7 @@ private struct JoeCastCellLabel: View {
             mode: mode,
             tier: yt.tier,
             seriesTitle: d.movie.name,
+            tmdbId: yt.tmdbId,
             chainRoute: nil,
             chainPlay: (mode == .auto && index < names.count)
                 ? JoeYtChainPlay(route: route, epName: names[index],

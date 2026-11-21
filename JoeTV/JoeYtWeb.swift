@@ -187,8 +187,12 @@ enum JoeYtJS {
     // observes. The values travel inside the evaluated script
     // only; they are never logged (no evaluate payload is).
 
-    /// Which credential field the door page is showing:
-    /// 'email' | 'password' | 'none'.
+    /// Which step the door page is on: 'email' |
+    /// 'password' | 'challenge' | 'none'. v2.0.42: the
+    /// 'challenge' step (Probe 4's D-2, device-proven) —
+    /// a visible "Try another way" control with no
+    /// credential field up IS the passkey / verification
+    /// challenge shape.
     static let doorProbe = """
         (function(){
           function vis(el) {
@@ -200,9 +204,387 @@ enum JoeYtJS {
           if (vis(pw)) { return 'password'; }
           var idn = document.querySelector('input[name="identifier"], input[type="email"]');
           if (vis(idn)) { return 'email'; }
+          var cands = document.querySelectorAll('a, button, [role="button"], div[role="link"]');
+          for (var i = 0; i < cands.length; i++) {
+            var t = (cands[i].innerText || cands[i].textContent || '').trim().toLowerCase();
+            if ((t === 'try another way' || t === 'thử cách khác') && vis(cands[i])) {
+              return 'challenge';
+            }
+          }
           return 'none';
         })()
         """
+
+    /// Capability masking (Probe 4, device-proven 3×):
+    /// installed at document start in the DOOR's web view
+    /// only, so Google feature-detects NO WebAuthn
+    /// support and stays on the password path — the
+    /// re-signed build cannot hold the Associated Domains
+    /// entitlement a passkey ceremony needs (FL-031).
+    /// Removes the WebAuthn globals; everything else on
+    /// the page is untouched.
+    static let doorMasking = """
+        (function(){
+          try { delete window.PublicKeyCredential; } catch (e) {}
+          try {
+            Object.defineProperty(window, 'PublicKeyCredential',
+              { value: undefined, configurable: true });
+          } catch (e) {}
+          if (navigator.credentials) {
+            try {
+              var reject = function() {
+                return Promise.reject(new DOMException('masked', 'NotAllowedError'));
+              };
+              Object.defineProperty(navigator, 'credentials', {
+                value: { get: reject, create: reject },
+                configurable: true
+              });
+            } catch (e) {}
+          }
+          window.__joeMasked = true;
+        })()
+        """
+
+    /// JS-click the page's "Try another way" control
+    /// (Probe 4's D-3 — the steer around the passkey
+    /// wall; the click does not depend on page focus,
+    /// FL-067). Returns 'clicked' or 'notfound'.
+    static let clickTryAnotherWay = """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          var cands = document.querySelectorAll('a, button, [role="button"], div[role="link"]');
+          for (var i = 0; i < cands.length; i++) {
+            var t = (cands[i].innerText || cands[i].textContent || '').trim().toLowerCase();
+            if ((t === 'try another way' || t === 'thử cách khác') && vis(cands[i])) {
+              cands[i].click();
+              return 'clicked';
+            }
+          }
+          return 'notfound';
+        })()
+        """
+
+    /// After "Try another way", Google lists sign-in
+    /// methods; click the password one so the door lands
+    /// back on the password step. Text-matched, fail-soft.
+    /// (Probe 4's legacy leg — silenced once a chooser
+    /// inventory has been captured.)
+    static let clickPasswordMethod = """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          var wanted = ['use your password', 'enter your password',
+                        'dùng mật khẩu', 'sử dụng mật khẩu', 'nhập mật khẩu'];
+          var cands = document.querySelectorAll('a, button, [role="button"], div[role="link"], li, div');
+          for (var i = 0; i < cands.length; i++) {
+            var t = (cands[i].innerText || cands[i].textContent || '').trim().toLowerCase();
+            if (t.length > 60) { continue; }
+            for (var j = 0; j < wanted.length; j++) {
+              if (t === wanted[j] && vis(cands[i])) {
+                cands[i].click();
+                return 'clicked';
+              }
+            }
+          }
+          return 'notfound';
+        })()
+        """
+
+    /// The challenge page's candidate-control inventory —
+    /// VALUES-FREE by construction: input TYPES and the
+    /// visible label text of clickable controls only
+    /// (never an input's value). Logged when the
+    /// challenge step appears, so a future page-shape
+    /// change is diagnosable from one log (Probe 4's
+    /// audit requirement).
+    static let doorDomInventory = """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          var out = [];
+          var inputs = document.querySelectorAll('input');
+          for (var i = 0; i < inputs.length && out.length < 40; i++) {
+            if (vis(inputs[i])) {
+              out.push('input[type=' + (inputs[i].type || '?')
+                + ',name=' + (inputs[i].name || '?') + ']');
+            }
+          }
+          var cands = document.querySelectorAll('a, button, [role="button"], div[role="link"], li');
+          for (var j = 0; j < cands.length && out.length < 40; j++) {
+            var t = (cands[j].innerText || cands[j].textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 60);
+            if (t && vis(cands[j])) {
+              out.push(cands[j].tagName.toLowerCase() + ':' + t);
+            }
+          }
+          return JSON.stringify(out);
+        })()
+        """
+
+    // MARK: 2SV chooser payloads (Probe 4, click v2)
+    //
+    // After 'Try another way', the account's chooser has
+    // NO password row (device-proven 2026-11-20) — it
+    // lists Tap Yes / authenticator / SMS. These payloads
+    // inventory the rows, click one by visible text,
+    // classify the follow-up step, and fill a
+    // verification code. Page VALUES are never returned:
+    // the code goes in one-way, and only its length is
+    // logged (Swift side).
+    //
+    // Click v2: a bare .click() lands on the shortest
+    // text-matching element — the text shell, not the
+    // node Google's handler listens on (the 0.1.3 device
+    // run logged 'clicked' on every row yet the page
+    // never moved). V2 walks UP from the match to the
+    // first ancestor carrying jsaction / role link|button
+    // / a data-challengeid|data-method|data-value
+    // attribute (an A or BUTTON qualifies too), then
+    // fires a full press sequence (pointerdown → mousedown
+    // → pointerup → mouseup → click) at the target's
+    // centre. The payload reports the chosen target
+    // values-free (tag, role, jsaction presence,
+    // qualifier) as JSON.
+
+    /// FRESH inventory of the clickable rows only: visible
+    /// text, whitespace-collapsed, deduplicated, capped.
+    /// No values — labels are public page UI.
+    static let chooserRows = """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          var out = [];
+          var seen = {};
+          var cands = document.querySelectorAll('a, button, [role="button"], [role="link"], [role="listitem"], li');
+          for (var i = 0; i < cands.length && out.length < 30; i++) {
+            var t = (cands[i].innerText || cands[i].textContent || '').trim().replace(/\\s+/g, ' ');
+            if (t && t.length <= 120 && vis(cands[i]) && !seen[t]) {
+              seen[t] = 1;
+              out.push(t);
+            }
+          }
+          return JSON.stringify(out);
+        })()
+        """
+
+    /// Click v2 (see the section note). Returns a
+    /// values-free JSON report:
+    /// {"outcome":"clicked","tag":…,"role":…,
+    ///  "jsaction":…,"qual":…} / {"outcome":"notfound"}.
+    static func clickChooserRow(needle: String, avoid: String) -> String {
+        """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          var needle = \(jsLiteral(needle)).toLowerCase();
+          var avoid = \(jsLiteral(avoid)).toLowerCase();
+          var cands = document.querySelectorAll('a, button, [role="button"], [role="link"], [role="listitem"], li, div');
+          var best = null;
+          var bestLen = 100000;
+          for (var i = 0; i < cands.length; i++) {
+            var t = (cands[i].innerText || cands[i].textContent || '').trim().replace(/\\s+/g, ' ');
+            if (!t || t.length > 300) { continue; }
+            var low = t.toLowerCase();
+            if (low.indexOf(needle) < 0) { continue; }
+            if (avoid && low.indexOf(avoid) >= 0) { continue; }
+            if (!vis(cands[i])) { continue; }
+            if (t.length < bestLen) { best = cands[i]; bestLen = t.length; }
+          }
+          if (!best) { return JSON.stringify({outcome: 'notfound'}); }
+          function qualifier(el) {
+            if (el.hasAttribute && el.hasAttribute('jsaction')) { return 'jsaction'; }
+            var role = el.getAttribute ? (el.getAttribute('role') || '') : '';
+            if (role === 'link' || role === 'button') { return 'role'; }
+            if (el.hasAttribute && (el.hasAttribute('data-challengeid')
+                || el.hasAttribute('data-method')
+                || el.hasAttribute('data-value'))) { return 'data'; }
+            if (el.tagName === 'A' || el.tagName === 'BUTTON') { return 'tag'; }
+            return '';
+          }
+          var target = null;
+          var qual = '';
+          var el = best;
+          for (var level = 0; el && level <= 6; level++) {
+            var q = qualifier(el);
+            if (q) { target = el; qual = q; break; }
+            el = el.parentElement;
+          }
+          if (!target) { target = best; qual = 'self'; }
+          target.scrollIntoView({block: 'center'});
+          var rect = target.getBoundingClientRect();
+          var cx = rect.left + rect.width / 2;
+          var cy = rect.top + rect.height / 2;
+          function fire(type) {
+            var Ctor = (type.indexOf('pointer') === 0 && window.PointerEvent)
+              ? window.PointerEvent : window.MouseEvent;
+            target.dispatchEvent(new Ctor(type,
+              {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+          }
+          fire('pointerdown');
+          fire('mousedown');
+          fire('pointerup');
+          fire('mouseup');
+          fire('click');
+          var role = target.getAttribute ? (target.getAttribute('role') || '-') : '-';
+          return JSON.stringify({outcome: 'clicked',
+            tag: target.tagName || '?', role: role,
+            jsaction: !!(target.hasAttribute && target.hasAttribute('jsaction')),
+            qual: qual});
+        })()
+        """
+    }
+
+    /// Retry leg for click v2: re-locate the row (same
+    /// matching), then fire the same full press sequence
+    /// on the row's FIRST interactive descendant.
+    /// Outcomes: 'clicked' / 'nodesc' / 'norow'.
+    static func clickChooserRowRetry(needle: String, avoid: String) -> String {
+        """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          var needle = \(jsLiteral(needle)).toLowerCase();
+          var avoid = \(jsLiteral(avoid)).toLowerCase();
+          var cands = document.querySelectorAll('a, button, [role="button"], [role="link"], [role="listitem"], li, div');
+          var best = null;
+          var bestLen = 100000;
+          for (var i = 0; i < cands.length; i++) {
+            var t = (cands[i].innerText || cands[i].textContent || '').trim().replace(/\\s+/g, ' ');
+            if (!t || t.length > 300) { continue; }
+            var low = t.toLowerCase();
+            if (low.indexOf(needle) < 0) { continue; }
+            if (avoid && low.indexOf(avoid) >= 0) { continue; }
+            if (!vis(cands[i])) { continue; }
+            if (t.length < bestLen) { best = cands[i]; bestLen = t.length; }
+          }
+          if (!best) { return JSON.stringify({outcome: 'norow'}); }
+          var desc = best.querySelectorAll('a, button, [role="link"], [role="button"]');
+          if (!desc.length) { return JSON.stringify({outcome: 'nodesc'}); }
+          var target = desc[0];
+          target.scrollIntoView({block: 'center'});
+          var rect = target.getBoundingClientRect();
+          var cx = rect.left + rect.width / 2;
+          var cy = rect.top + rect.height / 2;
+          function fire(type) {
+            var Ctor = (type.indexOf('pointer') === 0 && window.PointerEvent)
+              ? window.PointerEvent : window.MouseEvent;
+            target.dispatchEvent(new Ctor(type,
+              {bubbles: true, cancelable: true, clientX: cx, clientY: cy}));
+          }
+          fire('pointerdown');
+          fire('mousedown');
+          fire('pointerup');
+          fire('mouseup');
+          fire('click');
+          var role = target.getAttribute ? (target.getAttribute('role') || '-') : '-';
+          return JSON.stringify({outcome: 'clicked',
+            tag: target.tagName || '?', role: role,
+            jsaction: !!(target.hasAttribute && target.hasAttribute('jsaction')),
+            qual: 'descendant'});
+        })()
+        """
+    }
+
+    /// The post-click step classifier for the chooser
+    /// watch: 'signed-in' (the page left
+    /// accounts.google.com) / 'error:<ui text>' /
+    /// 'code-input' / 'prompt' (the Tap Yes phone prompt)
+    /// / 'other'. Error text is public UI text, never a
+    /// field value.
+    static let chooserStep = """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          if (location.href.indexOf('accounts.google.com') < 0) { return 'signed-in'; }
+          var alerts = document.querySelectorAll('[role="alert"], .o6cuMc');
+          for (var i = 0; i < alerts.length; i++) {
+            var at = (alerts[i].innerText || alerts[i].textContent || '').trim().replace(/\\s+/g, ' ');
+            if (at && vis(alerts[i])) { return 'error:' + at.slice(0, 80); }
+          }
+          var code = document.querySelector('input[type="tel"], input[autocomplete="one-time-code"], input[name="idvPin"], input[name="code"], input[inputmode="numeric"]');
+          if (vis(code)) { return 'code-input'; }
+          var txt = ((document.body && document.body.innerText) || '').toLowerCase();
+          if (txt.indexOf('check your phone') >= 0
+              || txt.indexOf('kiểm tra điện thoại') >= 0) { return 'prompt'; }
+          return 'other';
+        })()
+        """
+
+    /// Fill the 2SV code input (native value setter +
+    /// input/change events, the fillField pattern). The
+    /// code is interpolated one-way; the payload returns
+    /// only 'filled' / 'nofield'.
+    static func fillCodeValue(_ code: String) -> String {
+        fillFieldValue(selector: "input[type=\"tel\"], input[autocomplete=\"one-time-code\"], input[name=\"idvPin\"], input[name=\"code\"], input[inputmode=\"numeric\"]",
+                       value: code)
+    }
+
+    /// Click the code page's Next/Verify button, matched
+    /// by visible text first (the matched label rides back
+    /// in the result), then the known 2SV Next container
+    /// ids. Returns 'clicked:<label>' / 'clicked:#idvNext'
+    /// / 'notfound'.
+    static let clickNextVerify = """
+        (function(){
+          function vis(el) {
+            if (!el) { return false; }
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          var wanted = ['next', 'verify', 'continue', 'tiếp theo', 'xác minh', 'tiếp tục'];
+          var cands = document.querySelectorAll('button, [role="button"]');
+          for (var i = 0; i < cands.length; i++) {
+            var t = (cands[i].innerText || cands[i].textContent || '').trim().replace(/\\s+/g, ' ').toLowerCase();
+            if (wanted.indexOf(t) >= 0 && vis(cands[i])) {
+              cands[i].click();
+              return 'clicked:' + t;
+            }
+          }
+          var box = document.querySelector('#idvPrnNext button, #idvNext button, #idvPrnNext, #idvNext');
+          if (box && vis(box)) { box.click(); return 'clicked:#idvNext'; }
+          return 'notfound';
+        })()
+        """
+
+    /// fillField without the follow-up Next click (the
+    /// code page's button is clicked separately, by text,
+    /// via clickNextVerify — the probe's shape).
+    private static func fillFieldValue(selector: String, value: String) -> String {
+        """
+        (function(){
+          var el = document.querySelector(\(jsLiteral(selector)));
+          if (!el) { return 'nofield'; }
+          el.focus();
+          var setter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value').set;
+          setter.call(el, \(jsLiteral(value)));
+          el.dispatchEvent(new Event('input', {bubbles: true}));
+          el.dispatchEvent(new Event('change', {bubbles: true}));
+          return 'filled';
+        })()
+        """
+    }
 
     private static func jsLiteral(_ value: String) -> String {
         var out = "'"
@@ -494,8 +876,46 @@ final class JoeWebController: NSObject, JoeWebHostDelegate {
     @MainActor
     func evaluateForResult(_ js: String,
                            completion: @escaping @MainActor (String?) -> Void) {
-        host?.evaluateJavaScript(js) { result in
+        // The completion MUST fire on every path (review
+        // round 1, BLOCKER 2): with a nil host the old
+        // optional-chain simply dropped it, and any
+        // caller waiting on it — the door chooser's
+        // continuation in evaluateAsync — hung forever.
+        guard let host else {
+            completion(nil)
+            return
+        }
+        // The completion closure captures the host
+        // STRONGLY (review round 2, MINOR): the controller
+        // holds it weakly, and a host deallocated mid-
+        // evaluation could take the completion with it —
+        // the capture keeps the host (and its web view)
+        // alive until the handler has fired.
+        host.evaluateJavaScript(js) { result in
+            _ = host
             Task { @MainActor in completion(result) }
+        }
+    }
+
+    /// v2.0.42: document-start scripts (the door's
+    /// capability masking). Sticky by design: the script
+    /// is remembered and applied to the current host AND
+    /// to any host created later, so the install lands
+    /// before the first navigation regardless of the
+    /// exact order the view and the model start in.
+    private var startScripts: [String] = []
+
+    @MainActor
+    func installDocumentStartScript(_ js: String) {
+        startScripts.append(js)
+        host?.addDocumentStartScript(js)
+    }
+
+    /// Called by the representable when a host is born.
+    @MainActor
+    func applyStartScripts(to newHost: JoeWebHostView) {
+        for js in startScripts {
+            newHost.addDocumentStartScript(js)
         }
     }
 
@@ -550,6 +970,7 @@ struct JoeWebView: UIViewRepresentable {
         host.playbackPressesEnabled = playbackPresses
         host.delegate = controller
         controller.host = host
+        controller.applyStartScripts(to: host)
         return host
     }
 
@@ -1317,15 +1738,34 @@ private final class JoeYtDoorModel: ObservableObject {
     let controller = JoeWebController()
     @Published var fieldKind = "none"
     private var started = false
+    /// Set by stop() when the door closes; the start
+    /// load below checks it after its await (review
+    /// round 5, MINOR — the same post-restore guard the
+    /// player model carries).
+    private var stopped = false
 
     func start() {
         guard !started else { return }
         started = true
+        stopped = false
         controller.onFinishLoad = {
             Task { await JoeYtSession.shared.refresh() }
         }
-        Task {
+        // v2.0.42: capability masking BEFORE the first
+        // load (Probe 4's mechanism, device-proven): with
+        // no WebAuthn surface, Google stays off the
+        // passkey ceremony the re-signed build cannot
+        // complete, and the 2SV chooser below becomes the
+        // only detour.
+        controller.installDocumentStartScript(JoeYtJS.doorMasking)
+        DiagLog.write("YT", "door: masking cài trước lần tải đầu")
+        Task { [weak self] in
             await JoeYtSession.shared.ensureSession()
+            // The door may have closed during the
+            // session restore — never fire the sign-in
+            // load into a dismantled host (review round
+            // 5, MINOR).
+            guard let self, !self.stopped else { return }
             // Land DIRECTLY on Google's sign-in page, not on
             // the channel page (a deliberate difference from
             // the Sony door): reaching the form must not
@@ -1344,13 +1784,254 @@ private final class JoeYtDoorModel: ObservableObject {
     /// One probe of the page's credential field; the door's
     /// 2 s loop calls it alongside the presence refresh so
     /// the native form's buttons enable for the step the
-    /// page is actually on.
+    /// page is actually on. v2.0.42: entering the
+    /// 'challenge' step also snapshots the page's
+    /// candidate-control inventory (values-free) so a
+    /// future page-shape change is diagnosable from one
+    /// log line.
     func probeField() {
         controller.evaluateForResult(JoeYtJS.doorProbe) { [weak self] result in
-            if let result, result != self?.fieldKind {
-                self?.fieldKind = result
+            guard let self, let result, result != self.fieldKind else { return }
+            self.fieldKind = result
+            if result == "challenge" {
+                self.inventoryChallengePage()
             }
         }
+    }
+
+    // MARK: 2SV chooser (v2.0.42 — Probe 4 port)
+    //
+    // Ported from the probe's device-proven door (three
+    // passes on 2026-11-20: SMS + click v2; Google prompt
+    // ×2). The flow: the passkey step offers 'Try another
+    // way' → the chooser lists the account's methods
+    // (prompt / authenticator / SMS — no password row on
+    // this account) → a row click (v2: qualified ancestor
+    // + full press sequence; ONE 3 s descendant retry)
+    // → a step watch classifies what follows: signed-in,
+    // a code input (owner types the code natively), the
+    // phone prompt, or an error (logged, surfaced in the
+    // note). Page VALUES are never read back; the code
+    // travels one-way and only its length is logged.
+
+    @Published var chooserRows: [String] = []
+    @Published var chooserBusy = false
+    @Published var chooserNote: String?
+    @Published var awaitingCode = false
+    private var stepWatchGeneration = 0
+
+    /// Snapshot the challenge page's control inventory
+    /// (values-free) into the log.
+    private func inventoryChallengePage() {
+        controller.evaluateForResult(JoeYtJS.doorDomInventory) { result in
+            guard let result else { return }
+            DiagLog.write("YT", "door: challenge DOM (chỉ nhãn, không giá trị): \(result)")
+        }
+    }
+
+    /// Refresh the visible chooser rows (labels only).
+    private func refreshChooserRows() {
+        controller.evaluateForResult(JoeYtJS.chooserRows) { [weak self] result in
+            guard let self, let result,
+                  let data = result.data(using: .utf8),
+                  let rows = try? JSONDecoder().decode([String].self, from: data)
+            else { return }
+            if rows != self.chooserRows {
+                self.chooserRows = rows
+                DiagLog.write("YT", "door: chooser rows=\(rows.count) — \(rows.joined(separator: " | "))")
+            }
+        }
+    }
+
+    /// 'Try another way' — the steer around the passkey
+    /// wall. After the click, capture the chooser
+    /// inventory; if no inventory exists, ALSO chase the
+    /// legacy password row (older accounts list one).
+    func tryAnotherWay() {
+        guard !chooserBusy else { return }
+        chooserBusy = true
+        chooserNote = nil
+        DiagLog.write("YT", "door: bấm Try another way")
+        controller.evaluateForResult(JoeYtJS.clickTryAnotherWay) { [weak self] result in
+            guard let self else { return }
+            DiagLog.write("YT", "door: Try another way → \(result ?? "nil")")
+            self.chooserBusy = false
+            self.refreshChooserRows()
+            // The legacy chase is tied to the same
+            // generation stop() bumps (review round 3,
+            // MINOR): after the door closes it must not
+            // fire even one more evaluation.
+            let generation = self.stepWatchGeneration
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard let self, self.stepWatchGeneration == generation,
+                      self.chooserRows.isEmpty
+                else { return }
+                self.controller.evaluateForResult(JoeYtJS.clickPasswordMethod) { r2 in
+                    DiagLog.write("YT", "door: dò hàng mật khẩu (legacy) → \(r2 ?? "nil")")
+                }
+            }
+        }
+    }
+
+    /// One chooser row tap: click v2, and if the step has
+    /// not changed in 3 s, ONE retry on the row's first
+    /// interactive descendant; then the step watch.
+    func chooseRow(_ row: String) {
+        guard !chooserBusy else { return }
+        cancelStepWatch()
+        chooserBusy = true
+        chooserNote = nil
+        DiagLog.write("YT", "door: chọn dòng chooser — \(row)")
+        let needle = Self.rowNeedle(row)
+        controller.evaluateForResult(
+            JoeYtJS.clickChooserRow(needle: needle, avoid: "passkey")
+        ) { [weak self] result in
+            guard let self else { return }
+            DiagLog.write("YT", "door: click v2 → \(result ?? "nil")")
+            self.chooserBusy = false
+            self.watchChooserStep(needle: needle, retried: false)
+        }
+    }
+
+    /// The code field's submit: fill one-way, click the
+    /// page's Next/Verify, then the same step watch.
+    func submitCode(_ code: String) {
+        let trimmed = code.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !chooserBusy else { return }
+        cancelStepWatch()
+        chooserBusy = true
+        chooserNote = nil
+        DiagLog.write("YT", "door: điền mã 2SV (dài \(trimmed.count) ký tự — giá trị không log)")
+        controller.evaluateForResult(JoeYtJS.fillCodeValue(trimmed)) { [weak self] result in
+            guard let self else { return }
+            DiagLog.write("YT", "door: điền mã → \(result ?? "nil")")
+            self.controller.evaluateForResult(JoeYtJS.clickNextVerify) { [weak self] r2 in
+                guard let self else { return }
+                DiagLog.write("YT", "door: bấm Next/Verify → \(r2 ?? "nil")")
+                self.chooserBusy = false
+                self.watchChooserStep(needle: nil, retried: true)
+            }
+        }
+    }
+
+    private func cancelStepWatch() {
+        stepWatchGeneration += 1
+    }
+
+    /// The door closed (review round 2, MINOR): stop the
+    /// chooser step watch from polling an orphaned model
+    /// for the rest of its 120 s window. Also bars the
+    /// start load if it is still restoring the session
+    /// (review round 5, MINOR).
+    func stop() {
+        stopped = true
+        cancelStepWatch()
+        chooserBusy = false
+    }
+
+    /// Poll the step classifier for up to 120 s after a
+    /// chooser action. The retry leg fires once at ~3 s
+    /// when a needle is armed AND the step has not moved
+    /// at all (review round 1, MINOR: without the
+    /// progress check the retry could re-click a row on
+    /// an intermediate page the owner already acted on).
+    private func watchChooserStep(needle: String?, retried: Bool) {
+        stepWatchGeneration += 1
+        let generation = stepWatchGeneration
+        let deadline = Date().addingTimeInterval(120)
+        Task { [weak self] in
+            // The retry/progress state lives INSIDE the
+            // task (review round 3, BLOCKER): a captured
+            // var mutated from a Task closure is a Swift 6
+            // compile error — the probe's door kept this
+            // state in properties for the same reason.
+            // These two are read/written nowhere else.
+            var didRetry = retried
+            var stepMoved = false
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard let self, self.stepWatchGeneration == generation
+                else { return }
+                if let step = await self.readChooserStep() {
+                    if step == "code-input" || step == "prompt" {
+                        stepMoved = true
+                    }
+                    let done = self.applyChooserStep(step)
+                    if done { return }
+                }
+                if !didRetry, !stepMoved, let needle,
+                   Date() > deadline.addingTimeInterval(-117) {
+                    didRetry = true
+                    let result = await self.evaluateAsync(
+                        JoeYtJS.clickChooserRowRetry(needle: needle, avoid: "passkey"))
+                    DiagLog.write("YT", "door: click retry (descendant) → \(result ?? "nil")")
+                }
+            }
+            guard let self, self.stepWatchGeneration == generation else { return }
+            DiagLog.write("YT", "door: watch bước chooser — hết 120s chưa đổi bước")
+            if self.chooserNote == nil {
+                self.chooserNote = "Trang chưa chuyển bước — anh thử lại, hoặc chọn cách xác thực khác."
+            }
+        }
+    }
+
+    private func evaluateAsync(_ js: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            controller.evaluateForResult(js) { result in
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    private func readChooserStep() async -> String? {
+        await evaluateAsync(JoeYtJS.chooserStep)
+    }
+
+    /// Returns true when the watch should stop.
+    private func applyChooserStep(_ step: String) -> Bool {
+        if step == "signed-in" {
+            DiagLog.write("YT", "door: chooser watch — ĐÃ ĐĂNG NHẬP")
+            awaitingCode = false
+            chooserRows = []
+            chooserNote = nil
+            Task { await JoeYtSession.shared.refresh() }
+            return true
+        }
+        if step.hasPrefix("error:") {
+            let text = String(step.dropFirst("error:".count))
+            DiagLog.write("YT", "door: chooser watch — trang báo lỗi: \(text)")
+            chooserNote = "Google báo: \(text)"
+            return true
+        }
+        if step == "code-input" {
+            if !awaitingCode {
+                DiagLog.write("YT", "door: chooser watch — trang hỏi mã xác thực")
+                awaitingCode = true
+                chooserNote = "Google đang hỏi mã xác thực — anh nhập mã vào ô bên dưới rồi bấm Nhập mã."
+            }
+            return false
+        }
+        if step == "prompt" {
+            if chooserNote == nil || awaitingCode {
+                DiagLog.write("YT", "door: chooser watch — chờ duyệt trên điện thoại (Tap Yes)")
+                awaitingCode = false
+                chooserNote = "Anh mở điện thoại và bấm Yes / Đồng ý để duyệt đăng nhập."
+            }
+            return false
+        }
+        return false
+    }
+
+    /// The needle a row is clicked by: its text before
+    /// any " - " descriptor tail, trimmed and capped —
+    /// the shortest unique fragment of the label.
+    private static func rowNeedle(_ row: String) -> String {
+        var text = row
+        if let dash = text.range(of: " - ") {
+            text = String(text[..<dash.lowerBound])
+        }
+        return String(text.trimmingCharacters(in: .whitespaces).prefix(60))
     }
 
     func fillEmail(_ email: String) {
@@ -1387,6 +2068,10 @@ struct JoeYtSignInView: View {
     /// page; neither value is ever logged or stored.
     @State private var emailText = ""
     @State private var passwordText = ""
+    /// The 2SV code field (v2.0.42) — same discipline as
+    /// the password: view state only, cleared on submit,
+    /// never logged or stored.
+    @State private var codeText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -1423,6 +2108,13 @@ struct JoeYtSignInView: View {
             }
             if !session.signedIn && session.bridgeAvailable {
                 nativeForm
+            }
+            if !session.signedIn && session.bridgeAvailable
+                && (doorModel.fieldKind == "challenge"
+                    || !doorModel.chooserRows.isEmpty
+                    || doorModel.awaitingCode
+                    || doorModel.chooserNote != nil) {
+                challengeControls
             }
             if session.bridgeAvailable {
                 JoeWebView(controller: doorModel.controller,
@@ -1462,6 +2154,7 @@ struct JoeYtSignInView: View {
             }
         }
         .onDisappear {
+            doorModel.stop()
             if session.signedIn {
                 Task { await JoeYtSession.shared.mirrorNow() }
             }
@@ -1513,6 +2206,71 @@ struct JoeYtSignInView: View {
                 .joeCardButton()
                 .disabled(passwordText.isEmpty
                     || doorModel.fieldKind != "password")
+            }
+        }
+    }
+
+    /// The 2SV challenge controls (v2.0.42 — the Probe 4
+    /// port): when Google lands on the passkey /
+    /// verification step, the door steers around it —
+    /// 'Thử cách khác' opens the account's method list,
+    /// each method is a native button, and a code method
+    /// gets its own native field. The web page below stays
+    /// visible throughout, so the owner watches Google's
+    /// own screen react.
+    private var challengeControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Google đang dừng ở bước xác thực (passkey / xác minh 2 bước). Bấm \"Thử cách khác\" để mở danh sách cách đăng nhập khác của tài khoản, rồi chọn một cách — app bấm giúp anh ngay trên trang.")
+                .font(.system(size: 23))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1400, alignment: .leading)
+            HStack(spacing: 14) {
+                Button {
+                    doorModel.tryAnotherWay()
+                } label: {
+                    JoeSecondaryLabel(title: "Thử cách khác")
+                }
+                .joeCardButton()
+                .disabled(doorModel.chooserBusy)
+                if doorModel.chooserBusy {
+                    ProgressView()
+                        .tint(theme.text)
+                }
+            }
+            if !doorModel.chooserRows.isEmpty {
+                ForEach(doorModel.chooserRows, id: \.self) { row in
+                    Button {
+                        doorModel.chooseRow(row)
+                    } label: {
+                        JoeSecondaryLabel(title: row)
+                    }
+                    .joeCardButton()
+                    .disabled(doorModel.chooserBusy)
+                }
+            }
+            if doorModel.awaitingCode {
+                HStack(spacing: 14) {
+                    TextField("Mã xác thực", text: $codeText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.text)
+                        .frame(maxWidth: 560)
+                    Button {
+                        let value = codeText
+                        codeText = ""
+                        doorModel.submitCode(value)
+                    } label: {
+                        JoeSecondaryLabel(title: "Nhập mã")
+                    }
+                    .joeCardButton()
+                    .disabled(codeText.isEmpty || doorModel.chooserBusy)
+                }
+            }
+            if let note = doorModel.chooserNote {
+                Text(note)
+                    .font(.system(size: 23))
+                    .foregroundStyle(theme.text)
+                    .frame(maxWidth: 1400, alignment: .leading)
             }
         }
     }

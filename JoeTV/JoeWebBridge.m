@@ -627,6 +627,30 @@ static BOOL (^JoeRemotePressConsumer)(NSInteger pressType) = nil;
     }
 }
 
+// v2.0.42: document-start user script on the ALREADY-BUILT
+// web view's configuration content controller (ported
+// verbatim from the YT Probe bridge delta, 2026-11-20).
+// WebKit applies scripts added after creation to
+// subsequent navigations — callers install before their
+// first load (the door's masking does exactly that).
+- (void)addDocumentStartScript:(NSString *)source {
+    if (self.webView == nil || source == nil) { return; }
+    id config = JoeMsgId0(self.webView, NSSelectorFromString(@"configuration"));
+    id ucc = config != nil
+        ? JoeMsgId0(config, NSSelectorFromString(@"userContentController"))
+        : nil;
+    Class scriptClass = JoeWKClass(@"WKUserScript");
+    if (ucc == nil || scriptClass == Nil) { return; }
+    id script = [scriptClass alloc];
+    script = ((id (*)(id, SEL, id, NSInteger, BOOL))objc_msgSend)(
+        script,
+        NSSelectorFromString(@"initWithSource:injectionTime:forMainFrameOnly:"),
+        source, (NSInteger)0, YES);
+    if (script != nil) {
+        JoeMsgVoidId(ucc, NSSelectorFromString(@"addUserScript:"), script);
+    }
+}
+
 - (nullable UIView *)joe_contentViewIn:(UIView *)root {
     for (UIView *sub in root.subviews) {
         if ([NSStringFromClass(sub.class)

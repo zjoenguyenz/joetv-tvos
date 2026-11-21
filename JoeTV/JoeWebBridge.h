@@ -89,6 +89,13 @@ typedef NS_ENUM(NSInteger, JoeWebNavigationMode) {
 /// Re-asserts first responder (player surfaces: after a load
 /// and whenever an overlay above the player closes).
 - (void)focusContent;
+/// Adds a WKUserScript at document start to this host's web
+/// view. Scripts added after creation apply to SUBSEQUENT
+/// navigations, so the caller installs before its first
+/// load. v2.0.42: used by the sign-in door's capability
+/// masking (the Probe 4 mechanism, device-proven) and by
+/// nothing else.
+- (void)addDocumentStartScript:(NSString *)source;
 @end
 
 /// Store-level bridge services (no view needed): the default
