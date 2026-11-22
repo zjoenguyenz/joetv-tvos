@@ -245,19 +245,7 @@ struct JoeMovieDetail: View {
                             .font(.system(size: 25))
                             .foregroundStyle(theme.meta)
                         Button {
-                            // D1 (review round 2, defect 2):
-                            // a Select press is owner input
-                            // even on this surface — a
-                            // successful retry re-keys the
-                            // preview task when the detail
-                            // lands, and without this kill a
-                            // preview could auto-play inside
-                            // a visit the owner already
-                            // interacted with (the provider
-                            // switch carries the equivalent
-                            // explicit kill via its hook).
-                            preview.kill(reason: "input")
-                            Task { await retryLoad() }
+                            retryButtonTapped()
                         } label: {
                             JoePrimaryLabel(title: "Thử lại")
                         }
@@ -296,11 +284,10 @@ struct JoeMovieDetail: View {
     /// expression is heavy. Modifier ORDER is unchanged.
     private var detailScrollTasks: some View {
         detailScrollContent
-        .task(id: slug + "|" + provider) { await load() }
+        .task(id: loadTaskID) { await load() }
         .task(id: detail?.movie.id ?? "") { await runTMDBEnrichment() }
         .task(id: detail?.movie.id ?? "") { await runTMDBLogoFetch() }
-        .task(id: provider + "|" + slug + "|" + (focusedEp ?? "")
-              + "|" + (detail == nil ? "0" : "1")) {
+        .task(id: dwellTaskID) {
             // v2.0.8 (Phase 2/3): dwell pre-resolve — see
             // dwellPreResolve(). SwiftUI cancels and restarts
             // this task whenever the key changes (provider,
@@ -308,8 +295,7 @@ struct JoeMovieDetail: View {
             // speculative work dies on exit/switch by itself.
             await dwellPreResolve()
         }
-        .task(id: "preview|" + provider + "|" + slug
-              + "|" + (detail == nil ? "0" : "1")) {
+        .task(id: previewTaskID) {
             // 2.0.48 (Leg 3): the backdrop preview's dwell.
             // Keyed WITHOUT the focused episode on purpose:
             // the preview target is fixed at open time (the
@@ -341,10 +327,7 @@ struct JoeMovieDetail: View {
         }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director,
-                          attemptRows: [Providers.displayName(Providers.KK),
-                                        Providers.displayName(Providers.VS),
-                                        Providers.displayName(Providers.F4K),
-                                        Providers.displayName(Providers.TP)],
+                          attemptRows: chainAttemptRows,
                           filmTitle: holder.title,
                           filmEpisode: holder.episode,
                           sourceLine: holder.sourceLine)
@@ -357,10 +340,7 @@ struct JoeMovieDetail: View {
         // layer, outside this view, and Menu exited the app
         // from here on device. Unconditional: it exists exactly
         // while the detail does.
-        .onExitCommand {
-            preview.kill(reason: "menu")
-            nav.movie = nil
-        }
+        .onExitCommand { handleExitCommand() }
     }
 
     /// Structural fix, final stage: the preview/input
@@ -382,46 +362,37 @@ struct JoeMovieDetail: View {
         // other transition kills, dwell included (see
         // JoePreview.swift focusInput).
         .onChange(of: focusedEp) { old, new in
-            preview.focusInput(landingShaped: old == nil && new != nil)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: ytEpFocus) { old, new in
-            preview.focusInput(landingShaped: old == nil && new != nil)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: focusedPlay) { old, new in
-            preview.focusInput(landingShaped: !old && new)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: focusedFav) { old, new in
-            preview.focusInput(landingShaped: !old && new)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: focusedFollow) { old, new in
-            preview.focusInput(landingShaped: !old && new)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: focusedAlt) { old, new in
-            preview.focusInput(landingShaped: old == nil && new != nil)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: focusedRetry) { old, new in
-            preview.focusInput(landingShaped: !old && new)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: focusedCast) { old, new in
-            preview.focusInput(landingShaped: old == nil && new != nil)
+            focusLandingChanged(old: old, new: new)
         }
         .onChange(of: focusedFranchise) { old, new in
-            preview.focusInput(landingShaped: old == nil && new != nil)
+            focusLandingChanged(old: old, new: new)
         }
-        .onChange(of: playerHolder?.id) {
-            if playerHolder != nil { preview.kill(reason: "play") }
-        }
-        .onChange(of: nav.ytPlayer?.id) {
-            // The YouTube player's presentation — the
-            // chain player's hook above does not cover
-            // it, and a TVB title's Play tap (focus
-            // already resting on Play, no focus change)
-            // reaches ONLY this hook.
-            if nav.ytPlayer != nil { preview.kill(reason: "play") }
-        }
-        .onChange(of: provider) { preview.kill(reason: "input") }
+        .onChange(of: playerHolder?.id) { handlePlayerPresentation() }
+        .onChange(of: nav.ytPlayer?.id) { handleYtPlayerPresentation() }
+        .onChange(of: provider) { handleProviderChange() }
         .onChange(of: scenePhase) { handleScenePhaseChange() }
-        .onDisappear { preview.stop() }
+        .onDisappear { handleDetailDisappear() }
         // TVB YouTube feature: the catalogue + session state
         // the source-row integration reads, and the chain
         // hand-back — when the YouTube player (launched from
@@ -429,10 +400,137 @@ struct JoeMovieDetail: View {
         // detail plays it via the chain itself.
         .task { await loadYtSession() }
         .onChange(of: nav.ytChainPlay) { _, token in
-            guard let token, token.route == route else { return }
-            nav.ytChainPlay = nil
-            if let d = detail { play(d, epName: token.epName) }
+            handleYtChainPlay(token)
         }
+    }
+
+    // MARK: - 2.0.48 sweep: hook handlers + hoisted keys
+
+    /// Sweep (CI run #32): the type-check timeout
+    /// migrated a third time — from the scenePhase
+    /// line (run #30) to the session-refresh line
+    /// (run #31) to the ytPlayer hook (run #32,
+    /// :420) — so the whole file was swept in one
+    /// pass: every remaining inline body in the
+    /// scroll chain and every preview call standing
+    /// in a view closure moved into a named method,
+    /// and every compound expression in a modifier
+    /// argument or task key was hoisted into an
+    /// explicitly-typed let or computed property.
+    /// Behaviour is unchanged everywhere: same
+    /// conditions, same order, same arguments and
+    /// reason strings.
+
+    /// The load task's key (was inline in the chain).
+    private var loadTaskID: String {
+        slug + "|" + provider
+    }
+
+    /// The dwell task's key (was inline in the chain).
+    private var dwellTaskID: String {
+        provider + "|" + slug + "|" + (focusedEp ?? "")
+            + "|" + (detail == nil ? "0" : "1")
+    }
+
+    /// The preview task's key (was inline in the
+    /// chain).
+    private var previewTaskID: String {
+        "preview|" + provider + "|" + slug
+            + "|" + (detail == nil ? "0" : "1")
+    }
+
+    /// The chain player's attempt rows (was an
+    /// inline array literal in the cover closure).
+    private var chainAttemptRows: [String] {
+        [Providers.displayName(Providers.KK),
+         Providers.displayName(Providers.VS),
+         Providers.displayName(Providers.F4K),
+         Providers.displayName(Providers.TP)]
+    }
+
+    /// One focus binding's landing report (was
+    /// inline in nine .onChange closures in the
+    /// chain): the optional bindings land when the
+    /// value goes unset → set.
+    private func focusLandingChanged<T>(old: T?, new: T?) {
+        preview.focusInput(landingShaped: old == nil && new != nil)
+    }
+
+    /// The Bool bindings' landing report: a landing
+    /// is the false → true transition.
+    private func focusLandingChanged(old: Bool, new: Bool) {
+        preview.focusInput(landingShaped: !old && new)
+    }
+
+    /// The chain player's presentation (was an
+    /// inline if in its .onChange closure).
+    private func handlePlayerPresentation() {
+        if playerHolder != nil { preview.kill(reason: "play") }
+    }
+
+    /// The YouTube player's presentation — the
+    /// chain player's hook does not cover it, and a
+    /// TVB title's Play tap (focus already resting
+    /// on Play, no focus change) reaches ONLY this
+    /// hook. (Was an inline if in its .onChange
+    /// closure — the run #32 timeout site.)
+    private func handleYtPlayerPresentation() {
+        if nav.ytPlayer != nil { preview.kill(reason: "play") }
+    }
+
+    /// The provider switch's preview kill (was an
+    /// inline .onChange closure body).
+    private func handleProviderChange() {
+        preview.kill(reason: "input")
+    }
+
+    /// The detail's disappearance stops the preview
+    /// outright (was an inline .onDisappear
+    /// closure).
+    private func handleDetailDisappear() {
+        preview.stop()
+    }
+
+    /// The chain hand-back (was a multi-statement
+    /// .onChange closure in the chain): when the
+    /// YouTube player (launched from this detail in
+    /// Auto) gives an episode back, this detail
+    /// plays it via the chain itself.
+    private func handleYtChainPlay(_ token: JoeYtChainPlay?) {
+        guard let token, token.route == route else { return }
+        nav.ytChainPlay = nil
+        if let d = detail { play(d, epName: token.epName) }
+    }
+
+    /// Menu closes THIS detail (was an inline
+    /// .onExitCommand closure in the covers stage).
+    private func handleExitCommand() {
+        preview.kill(reason: "menu")
+        nav.movie = nil
+    }
+
+    /// The error branch's Retry press (was inline
+    /// in the button's action closure in the content
+    /// stage). D1 (review round 2, defect 2): a
+    /// Select press is owner input even on this
+    /// surface — a successful retry re-keys the
+    /// preview task when the detail lands, and
+    /// without this kill a preview could auto-play
+    /// inside a visit the owner already interacted
+    /// with (the provider switch carries the
+    /// equivalent explicit kill via its hook).
+    private func retryButtonTapped() {
+        preview.kill(reason: "input")
+        Task { await retryLoad() }
+    }
+
+    /// The one bare preview kill every press on
+    /// this screen performs (rule D1), named so a
+    /// press closure that must also run its own
+    /// action (the source rows) stays a pair of
+    /// plain calls.
+    private func killPreviewOnInput() {
+        preview.kill(reason: "input")
     }
 
     /// The YouTube catalogue/session warm-up that used
@@ -645,6 +743,8 @@ struct JoeMovieDetail: View {
             // from the tapped card's decoded cache on the
             // first frame, and the page does not change shape
             // when the detail lands.
+            let bandTopPadding: CGFloat = bandVisible(
+                movie: m, tmdbURL: nil) ? -168 : 0
             VStack(alignment: .leading, spacing: 0) {
                 backdropBand(movie: m, tmdbURL: nil)
                 HStack(alignment: .top, spacing: 44) {
@@ -663,7 +763,7 @@ struct JoeMovieDetail: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.top, bandVisible(movie: m, tmdbURL: nil) ? -168 : 0)
+                .padding(.top, bandTopPadding)
             }
         }
     }
@@ -718,13 +818,13 @@ struct JoeMovieDetail: View {
         // block; the "Chọn tập" block is a rail-title block
         // (margin-top 36). Per-element margins, spacing 0 — the
         // uniform 32 gap matched neither drawing value.
-        VStack(alignment: .leading, spacing: 0) {
+        let headerTopPadding: CGFloat = bandVisible(
+            movie: d.movie, tmdbURL: tmdbBackdropURL) ? -168 : 0
+        return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 backdropBand(movie: d.movie, tmdbURL: tmdbBackdropURL)
                 header(d)
-                    .padding(.top, bandVisible(movie: d.movie,
-                                                tmdbURL: tmdbBackdropURL)
-                             ? -168 : 0)
+                    .padding(.top, headerTopPadding)
             }
             // v2.0.8 (Phase 1): the header region (band +
             // poster + Play/Favourite) joins the section
@@ -744,6 +844,9 @@ struct JoeMovieDetail: View {
     /// vertical melt to the page background at the bottom).
     private var ultraBackdrop: some View {
         let m = detail?.movie ?? placeholderMovie()
+        let previewOpacity: Double = preview.visible && !preview.fadingOut
+            ? 1 : 0
+        let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
         return ZStack {
             if let url = m.posterURL {
                 JoeBandImage(url: url, targetPixels: 1920,
@@ -770,8 +873,8 @@ struct JoeMovieDetail: View {
             // the player in the same update, per rule D1.
             if preview.player != nil {
                 JoePreviewLayerView(controller: preview)
-                    .opacity(preview.visible && !preview.fadingOut ? 1 : 0)
-                    .animation(.easeInOut(duration: preview.visible ? 0.8 : 0.15),
+                    .opacity(previewOpacity)
+                    .animation(.easeInOut(duration: previewFadeDuration),
                                value: preview.visible)
                     .animation(.easeInOut(duration: 0.8),
                                value: preview.fadingOut)
@@ -815,11 +918,15 @@ struct JoeMovieDetail: View {
     /// row (play + favourite CIRCLE), synopsis, cast circles —
     /// then the shared source chips and episode servers.
     private func ultraDetail(_ d: Detail) -> some View {
-        let hasGenres = !d.categories
+        let hasGenres: Bool = !d.categories
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .isEmpty
+        let hasSynopsis: Bool = !(tmdb?.overview.isEmpty ?? true)
+            || !d.content.isEmpty
+        let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
+            ? d.content : (tmdb?.overview ?? "")
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 if !tmdbLogoURL.isEmpty,
@@ -872,9 +979,8 @@ struct JoeMovieDetail: View {
                     followButton(d)
                 }
                 .padding(.top, 22)
-                if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
-                    Text((tmdb?.overview.isEmpty ?? true)
-                         ? d.content : (tmdb?.overview ?? ""))
+                if hasSynopsis {
+                    Text(synopsisText)
                         .font(.system(size: 27))
                         .foregroundStyle(theme.text.opacity(0.92))
                         .lineSpacing(8)
@@ -899,44 +1005,7 @@ struct JoeMovieDetail: View {
     /// (favButton's action, a circle face).
     private func ultraFavCircle(_ d: Detail) -> some View {
         Button {
-            // D1 (2.0.48): a Select press with focus
-            // already resting here changes no hooked
-            // state — the press itself kills the preview.
-            preview.kill(reason: "input")
-            var e = WatchStore.Entry()
-            e.kind = Providers.kindOf(provider)
-            e.key = favKey
-            e.title = d.movie.name
-            e.poster = d.movie.poster
-            e.year = d.movie.year
-            e.slug = slug
-            e.source = provider
-            // v2.0.38 (Sony 2.3.41 parity, item 3): stamp
-            // the stable ids, exactly as the progress
-            // saves do (makeDirector) — a favourite saved
-            // without them reopens fail-open under the
-            // wrong-film gate, because its tvbRouteContext
-            // rebuilds from these stamps (the gap the
-            // 2.0.37 round named and left).
-            e.imdbId = d.movie.imdbId
-            e.tmdbId = d.movie.tmdbId
-            // The payload → launch fallback (Sony's
-            // knownTmdbId order): a TVB payload can stand
-            // by an id-matched holder with no ids of its
-            // own — the route's snapshot context still
-            // knows the title's identity (the torrent
-            // rung's pinned construction reads it the
-            // same way), and the stamp must not come out
-            // empty for exactly the titles the gate
-            // exists for.
-            if e.tmdbId.isEmpty, let ctx = route.tvb {
-                e.tmdbId = "\(ctx.tmdbId)"
-            }
-            if e.imdbId.isEmpty, let ctx = route.tvb {
-                e.imdbId = ctx.imdbId
-            }
-            e.ts = Int64(Date().timeIntervalSince1970 * 1000)
-            watch.toggleFavorite(e)
+            ultraFavCircleAction(d)
         } label: {
             Text(isFav ? "♥" : "♡")
                 .font(.system(size: 34))
@@ -951,6 +1020,50 @@ struct JoeMovieDetail: View {
         }
         .joeCardButton()
         .focused($focusedFav)
+    }
+
+    /// ultraFavCircle's press, extracted from its
+    /// Button action closure (2.0.48 sweep): the
+    /// original body verbatim.
+    private func ultraFavCircleAction(_ d: Detail) {
+        // D1 (2.0.48): a Select press with focus
+        // already resting here changes no hooked
+        // state — the press itself kills the preview.
+        preview.kill(reason: "input")
+        var e = WatchStore.Entry()
+        e.kind = Providers.kindOf(provider)
+        e.key = favKey
+        e.title = d.movie.name
+        e.poster = d.movie.poster
+        e.year = d.movie.year
+        e.slug = slug
+        e.source = provider
+        // v2.0.38 (Sony 2.3.41 parity, item 3): stamp
+        // the stable ids, exactly as the progress
+        // saves do (makeDirector) — a favourite saved
+        // without them reopens fail-open under the
+        // wrong-film gate, because its tvbRouteContext
+        // rebuilds from these stamps (the gap the
+        // 2.0.37 round named and left).
+        e.imdbId = d.movie.imdbId
+        e.tmdbId = d.movie.tmdbId
+        // The payload → launch fallback (Sony's
+        // knownTmdbId order): a TVB payload can stand
+        // by an id-matched holder with no ids of its
+        // own — the route's snapshot context still
+        // knows the title's identity (the torrent
+        // rung's pinned construction reads it the
+        // same way), and the stamp must not come out
+        // empty for exactly the titles the gate
+        // exists for.
+        if e.tmdbId.isEmpty, let ctx = route.tvb {
+            e.tmdbId = "\(ctx.tmdbId)"
+        }
+        if e.imdbId.isEmpty, let ctx = route.tvb {
+            e.imdbId = ctx.imdbId
+        }
+        e.ts = Int64(Date().timeIntervalSince1970 * 1000)
+        watch.toggleFavorite(e)
     }
 
     /// D — Poster Wall: everything centred (poster, title, meta,
@@ -977,11 +1090,15 @@ struct JoeMovieDetail: View {
         // (absent elements collapse with their margin, like
         // CSS). The origin line and the cast row are app-only
         // elements (kept); they ride the same rhythm.
-        let hasGenres = !d.categories
+        let hasGenres: Bool = !d.categories
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .isEmpty
+        let hasSynopsis: Bool = !(tmdb?.overview.isEmpty ?? true)
+            || !d.content.isEmpty
+        let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
+            ? d.content : (tmdb?.overview ?? "")
         return VStack(alignment: .center, spacing: 0) {
             // v2.0.8 (Phase 1): the header region (poster
             // through the Play/Favourite row) is its own
@@ -1016,12 +1133,11 @@ struct JoeMovieDetail: View {
             }
             genreChips(d)
                 .padding(.top, hasGenres ? 16 : 0)
-            if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
+            if hasSynopsis {
                 // Design .hero-syn under D: 27px, white at
                 // .92 (the base rule's opacity survives D's
                 // size override), max-width 920, centred.
-                Text((tmdb?.overview.isEmpty ?? true)
-                     ? d.content : (tmdb?.overview ?? ""))
+                Text(synopsisText)
                     .font(.system(size: 27))
                     .foregroundStyle(theme.text.opacity(0.92))
                     .lineSpacing(8)
@@ -1083,8 +1199,12 @@ struct JoeMovieDetail: View {
         // paddings (absent elements collapse with their
         // margin, like CSS). The meta line is the drawing's
         // .hero-meta: 27 medium in the heroMeta colour.
-        let hasGenres = d.categories.split(separator: ",")
+        let hasGenres: Bool = d.categories.split(separator: ",")
             .contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let hasSynopsis: Bool = !(tmdb?.overview.isEmpty ?? true)
+            || !d.content.isEmpty
+        let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
+            ? d.content : (tmdb?.overview ?? "")
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 36) {
                 posterArt(d.movie)
@@ -1155,9 +1275,8 @@ struct JoeMovieDetail: View {
                     .focusSection()
                     .padding(.top, 26)
             }
-            if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
-                Text((tmdb?.overview.isEmpty ?? true)
-                     ? d.content : (tmdb?.overview ?? ""))
+            if hasSynopsis {
+                Text(synopsisText)
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
                     .lineSpacing(6)
@@ -1210,6 +1329,29 @@ struct JoeMovieDetail: View {
         .focusSection()
     }
 
+    /// The current-source row's state text (was an
+    /// inline ternary in sourceRowEntry's call —
+    /// hoisted by the 2.0.48 sweep).
+    private var currentRowState: String {
+        ytActiveMode == nil
+            ? (autoSource ? "Sẵn sàng" : "● Đang phát")
+            : "Sẵn sàng"
+    }
+
+    /// The current-source row's state colour (same
+    /// hoist).
+    private var currentRowStateColor: Color {
+        ytActiveMode == nil && !autoSource
+            ? JoeTheme.okGreen : theme.meta
+    }
+
+    /// The current-source row's state weight (same
+    /// hoist).
+    private var currentRowStateWeight: Font.Weight {
+        ytActiveMode == nil && !autoSource
+            ? .semibold : .regular
+    }
+
     /// One row-anatomy entry (F's half of the shared
     /// membership model).
     @ViewBuilder
@@ -1241,13 +1383,9 @@ struct JoeMovieDetail: View {
             sourceRow(name: Providers.displayName(provider),
                       meta: d.servers.map { $0.name }.filter { !$0.isEmpty }
                         .joined(separator: " · "),
-                      state: ytActiveMode == nil
-                        ? (autoSource ? "Sẵn sàng" : "● Đang phát")
-                        : "Sẵn sàng",
-                      stateColor: ytActiveMode == nil && !autoSource
-                        ? JoeTheme.okGreen : theme.meta,
-                      stateWeight: ytActiveMode == nil && !autoSource
-                        ? .semibold : .regular,
+                      state: currentRowState,
+                      stateColor: currentRowStateColor,
+                      stateWeight: currentRowStateWeight,
                       focusID: "current") {
                 autoSource = false
                 ytChainPinned = true
@@ -1360,7 +1498,7 @@ struct JoeMovieDetail: View {
             // lives at this single construction point and
             // no row action can miss it.
             let button = Button(action: {
-                preview.kill(reason: "input")
+                killPreviewOnInput()
                 action()
             }) {
                 row.overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
@@ -1381,7 +1519,7 @@ struct JoeMovieDetail: View {
     /// by all three heads; non-focusable decoration).
     @ViewBuilder
     private func genreChips(_ d: Detail) -> some View {
-        let genres = d.categories
+        let genres: [String] = d.categories
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -1416,8 +1554,12 @@ struct JoeMovieDetail: View {
         // buttons 26 with gap 18 — so the column runs at
         // spacing 0 with per-element top paddings (absent
         // elements collapse with their margin, like CSS).
-        let hasGenres = d.categories.split(separator: ",")
+        let hasGenres: Bool = d.categories.split(separator: ",")
             .contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let hasSynopsis: Bool = !(tmdb?.overview.isEmpty ?? true)
+            || !d.content.isEmpty
+        let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
+            ? d.content : (tmdb?.overview ?? "")
         return HStack(alignment: .top, spacing: 44) {
             posterArt(d.movie)
             // OWNER FIDELITY RULE (design A render, 2026-11-15):
@@ -1444,9 +1586,8 @@ struct JoeMovieDetail: View {
                 }
                 genreChips(d)
                     .padding(.top, hasGenres ? 18 : 0)
-                if !(tmdb?.overview.isEmpty ?? true) || !d.content.isEmpty {
-                    Text((tmdb?.overview.isEmpty ?? true)
-                         ? d.content : (tmdb?.overview ?? ""))
+                if hasSynopsis {
+                    Text(synopsisText)
                         .font(.system(size: 26))
                         .foregroundStyle(theme.text.opacity(0.92))
                         .lineSpacing(8)
@@ -1510,12 +1651,7 @@ struct JoeMovieDetail: View {
                             .foregroundStyle(theme.meta)
                     }
                     Button {
-                        // D1 (2.0.48): the press itself
-                        // kills the preview (see castCell).
-                        preview.kill(reason: "input")
-                        actorRoute = .tmdb(personId: member.id,
-                                            name: member.name,
-                                            photoURL: member.photoURL)
+                        actorNameAction(member)
                     } label: {
                         JoeActorNameLabel(name: member.name)
                     }
@@ -1526,6 +1662,18 @@ struct JoeMovieDetail: View {
             .frame(maxWidth: 1050, alignment: .leading)
             .padding(.top, 14)
         }
+    }
+
+    /// The actors line's name-button press, extracted
+    /// from its Button action closure (2.0.48 sweep):
+    /// the original body verbatim.
+    private func actorNameAction(_ member: TMDBCastMember) {
+        // D1 (2.0.48): the press itself
+        // kills the preview (see castCell).
+        preview.kill(reason: "input")
+        actorRoute = .tmdb(personId: member.id,
+                            name: member.name,
+                            photoURL: member.photoURL)
     }
 
     /// v2.0.30 (FIX6): which of the cast the design-A line
@@ -1754,18 +1902,25 @@ private struct JoeActorNameLabel: View {
     private var torrentChip: some View {
         if TorrentSettings.isConfigured {
             Button {
-                // D1 (2.0.48): the press is a no-op while
-                // the identity is .pending / .unresolved —
-                // it still counts as input, so it kills
-                // the preview itself (see sourceChip).
-                preview.kill(reason: "input")
-                openTorrentDetail()
+                torrentChipAction()
             } label: {
                 JoeChipLabel(title: "Torrent", selected: false)
             }
             .joeCardButton()
             .focused($focusedAlt, equals: "torrent")
         }
+    }
+
+    /// torrentChip's press, extracted from its
+    /// Button action closure (2.0.48 sweep): the
+    /// original body verbatim.
+    private func torrentChipAction() {
+        // D1 (2.0.48): the press is a no-op while
+        // the identity is .pending / .unresolved —
+        // it still counts as input, so it kills
+        // the preview itself (see sourceChip).
+        preview.kill(reason: "input")
+        openTorrentDetail()
     }
 
     /// One chip-anatomy entry (shared by A's sourceChips and
@@ -1777,18 +1932,7 @@ private struct JoeActorNameLabel: View {
         switch entry {
         case .auto:
             Button {
-                // D1 (2.0.48): these actions set only
-                // unhooked mode state — a Select with
-                // focus already resting here changes no
-                // hooked value, so the press itself kills
-                // the preview (the fav/follow rule).
-                preview.kill(reason: "input")
-                autoSource = true
-                // TVB YouTube: Tự động is the YouTube-first
-                // mode when a match exists (the owner's law);
-                // with no match this is exactly the old tap.
-                ytChainPinned = false
-                ytMode = .auto
+                autoChipAction()
             } label: {
                 JoeChipLabel(title: "Tự động",
                              selected: ytAutoActive)
@@ -1797,10 +1941,7 @@ private struct JoeActorNameLabel: View {
             .focused($focusedAlt, equals: "auto")
         case .youtube:
             Button {
-                preview.kill(reason: "input")
-                ytChainPinned = false
-                ytMode = .youtube
-                autoSource = false
+                youtubeChipAction()
             } label: {
                 JoeChipLabel(title: "YouTube",
                              selected: ytActiveMode == .youtube)
@@ -1809,9 +1950,7 @@ private struct JoeActorNameLabel: View {
             .focused($focusedAlt, equals: "youtube")
         case .current:
             Button {
-                preview.kill(reason: "input")
-                autoSource = false
-                ytChainPinned = true
+                currentChipAction()
             } label: {
                 JoeChipLabel(title: Providers.displayName(provider),
                              selected: ytActiveMode == nil && !autoSource)
@@ -1820,12 +1959,7 @@ private struct JoeActorNameLabel: View {
             .focused($focusedAlt, equals: "current")
         case .alternative(let code, let altSlug):
             Button {
-                preview.kill(reason: "input")
-                switchNotice = nil
-                autoSource = false
-                ytChainPinned = true
-                provider = code
-                slug = altSlug
+                alternativeChipAction(code: code, altSlug: altSlug)
             } label: {
                 JoeChipLabel(title: Providers.displayName(code), selected: false)
             }
@@ -1834,6 +1968,52 @@ private struct JoeActorNameLabel: View {
         case .torrent:
             torrentChip
         }
+    }
+
+    /// The Tự động chip's press, extracted from its
+    /// Button action closure (2.0.48 sweep): the
+    /// original body verbatim.
+    private func autoChipAction() {
+        // D1 (2.0.48): these actions set only
+        // unhooked mode state — a Select with
+        // focus already resting here changes no
+        // hooked value, so the press itself kills
+        // the preview (the fav/follow rule).
+        preview.kill(reason: "input")
+        autoSource = true
+        // TVB YouTube: Tự động is the YouTube-first
+        // mode when a match exists (the owner's law);
+        // with no match this is exactly the old tap.
+        ytChainPinned = false
+        ytMode = .auto
+    }
+
+    /// The YouTube chip's press, extracted the same
+    /// way: the original body verbatim.
+    private func youtubeChipAction() {
+        preview.kill(reason: "input")
+        ytChainPinned = false
+        ytMode = .youtube
+        autoSource = false
+    }
+
+    /// The current-source chip's press, extracted
+    /// the same way: the original body verbatim.
+    private func currentChipAction() {
+        preview.kill(reason: "input")
+        autoSource = false
+        ytChainPinned = true
+    }
+
+    /// An alternative-source chip's press, extracted
+    /// the same way: the original body verbatim.
+    private func alternativeChipAction(code: String, altSlug: String) {
+        preview.kill(reason: "input")
+        switchNotice = nil
+        autoSource = false
+        ytChainPinned = true
+        provider = code
+        slug = altSlug
     }
 
     /// The unresolved-identity note under a chip row: the
@@ -1902,6 +2082,11 @@ private struct JoeActorNameLabel: View {
     @ViewBuilder
     private func posterArt(_ m: Movie) -> some View {
         let size = posterSize
+        let posterRadius: CGFloat = theme.id == .billboard
+            ? 2
+            : (theme.id == .posterWall
+               ? 18
+               : max(theme.rCard - theme.artInset, 0))
         let image = ZStack {
             Color.black.opacity(0.45)
             JoeRemoteImage(url: m.posterURL,
@@ -1925,11 +2110,7 @@ private struct JoeActorNameLabel: View {
         // A 2px (the approved drawing — an earlier "A: square 0,
         // accepted" note is superseded by the drawing itself);
         // D: the wall's 18 stroke radius; F: rCard − artInset.
-        .clipShape(RoundedRectangle(cornerRadius: theme.id == .billboard
-                                    ? 2
-                                    : (theme.id == .posterWall
-                                       ? 18
-                                       : max(theme.rCard - theme.artInset, 0))))
+        .clipShape(RoundedRectangle(cornerRadius: posterRadius))
         if theme.id == .posterWall {
             // Design-D detail: the poster's frame line is a
             // 2px OUTSET shadow — box-shadow: 0 0 0 2px
@@ -1991,6 +2172,9 @@ private struct JoeActorNameLabel: View {
     /// renders un-overlapped).
     @ViewBuilder
     private func backdropBand(movie: Movie, tmdbURL: URL?) -> some View {
+        let previewOpacity: Double = preview.visible && !preview.fadingOut
+            ? 1 : 0
+        let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
         if bandVisible(movie: movie, tmdbURL: tmdbURL) {
             ZStack {
                 Color.black.opacity(0.45)
@@ -2018,8 +2202,8 @@ private struct JoeActorNameLabel: View {
                 if preview.player != nil {
                     JoePreviewLayerView(controller: preview)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .opacity(preview.visible && !preview.fadingOut ? 1 : 0)
-                        .animation(.easeInOut(duration: preview.visible ? 0.8 : 0.15),
+                        .opacity(previewOpacity)
+                        .animation(.easeInOut(duration: previewFadeDuration),
                                    value: preview.visible)
                         .animation(.easeInOut(duration: 0.8),
                                    value: preview.fadingOut)
@@ -2081,17 +2265,24 @@ private struct JoeActorNameLabel: View {
 
     private func castCell(_ member: TMDBCastMember) -> some View {
         Button {
-            // D1 (2.0.48): the press itself kills the
-            // preview — presenting the actor cover must
-            // not leave it playing behind the cover.
-            preview.kill(reason: "input")
-            actorRoute = .tmdb(personId: member.id, name: member.name,
-                                photoURL: member.photoURL)
+            castCellAction(member)
         } label: {
             JoeCastCellLabel(member: member)
         }
         .joeCardButton()
         .focused($focusedCast, equals: member.id)
+    }
+
+    /// castCell's press, extracted from its Button
+    /// action closure (2.0.48 sweep): the original
+    /// body verbatim.
+    private func castCellAction(_ member: TMDBCastMember) {
+        // D1 (2.0.48): the press itself kills the
+        // preview — presenting the actor cover must
+        // not leave it playing behind the cover.
+        preview.kill(reason: "input")
+        actorRoute = .tmdb(personId: member.id, name: member.name,
+                            photoURL: member.photoURL)
     }
 
 /// v2.0.29 (cluster A, item 1a): one cast cell's label.
@@ -2260,55 +2451,40 @@ private struct JoeCastCellLabel: View {
     }
 
     private func playButton(_ d: Detail) -> some View {
-        let isResume = !route.preselectEp.isEmpty
+        let isResume: Bool = !route.preselectEp.isEmpty
             || watch.progressForTitle(slug: slug, provider: provider,
                                       title: d.movie.name,
                                       year: d.movie.year) != nil
+        let playDisabled: Bool = (ytActiveMode != nil
+                   ? (ytMatch?.eps.isEmpty ?? true)
+                   : startEpisode(d) == nil) || switching
         return Button {
-            if ytActiveMode != nil, let yt = ytMatch {
-                ytPlayButtonAction(d, yt: yt)
-            } else if let ep = startEpisode(d) { play(d, epName: ep) }
+            playButtonTapped(d)
         } label: {
             JoePrimaryLabel(title: isResume ? "Xem tiếp" : "Xem ngay",
                             systemImage: "play.fill")
         }
         .joeCardButton()
         .focused($focusedPlay)
-        .disabled((ytActiveMode != nil
-                   ? (ytMatch?.eps.isEmpty ?? true)
-                   : startEpisode(d) == nil) || switching)
+        .disabled(playDisabled)
         // v2.0.8 (Phase 1): no hand-written exits — the
         // header sits in its own .focusSection() (see the
         // themed compositions) and the focus engine moves
         // geometrically from here.
     }
 
+    /// The Play button's press, extracted from its
+    /// action closure (2.0.48 sweep): the original
+    /// if/else-if verbatim.
+    private func playButtonTapped(_ d: Detail) {
+        if ytActiveMode != nil, let yt = ytMatch {
+            ytPlayButtonAction(d, yt: yt)
+        } else if let ep = startEpisode(d) { play(d, epName: ep) }
+    }
+
     private func favButton(_ d: Detail) -> some View {
         Button {
-            // D1 (2.0.48): a Select press with focus
-            // already resting here changes no hooked
-            // state — the press itself kills the preview.
-            preview.kill(reason: "input")
-            var e = WatchStore.Entry()
-            e.kind = Providers.kindOf(provider)
-            e.key = favKey
-            e.title = d.movie.name
-            e.poster = d.movie.poster
-            e.year = d.movie.year
-            e.slug = slug
-            e.source = provider
-            // v2.0.38 (Sony 2.3.41 parity, item 3): the
-            // stable-id stamps — see ultraFavCircle.
-            e.imdbId = d.movie.imdbId
-            e.tmdbId = d.movie.tmdbId
-            if e.tmdbId.isEmpty, let ctx = route.tvb {
-                e.tmdbId = "\(ctx.tmdbId)"
-            }
-            if e.imdbId.isEmpty, let ctx = route.tvb {
-                e.imdbId = ctx.imdbId
-            }
-            e.ts = Int64(Date().timeIntervalSince1970 * 1000)
-            watch.toggleFavorite(e)
+            favButtonAction(d)
         } label: {
             // UI-6 defect D-10: built on the shared label
             // metrics (JoeSecondaryLabel — design .btn: 29 pt
@@ -2335,6 +2511,36 @@ private struct JoeCastCellLabel: View {
         // the focus engine's geometric moves — no
         // hand-written routing.
         .focused($focusedFav)
+    }
+
+    /// favButton's press, extracted from its
+    /// Button action closure (2.0.48 sweep): the
+    /// original body verbatim.
+    private func favButtonAction(_ d: Detail) {
+        // D1 (2.0.48): a Select press with focus
+        // already resting here changes no hooked
+        // state — the press itself kills the preview.
+        preview.kill(reason: "input")
+        var e = WatchStore.Entry()
+        e.kind = Providers.kindOf(provider)
+        e.key = favKey
+        e.title = d.movie.name
+        e.poster = d.movie.poster
+        e.year = d.movie.year
+        e.slug = slug
+        e.source = provider
+        // v2.0.38 (Sony 2.3.41 parity, item 3): the
+        // stable-id stamps — see ultraFavCircle.
+        e.imdbId = d.movie.imdbId
+        e.tmdbId = d.movie.tmdbId
+        if e.tmdbId.isEmpty, let ctx = route.tvb {
+            e.tmdbId = "\(ctx.tmdbId)"
+        }
+        if e.imdbId.isEmpty, let ctx = route.tvb {
+            e.imdbId = ctx.imdbId
+        }
+        e.ts = Int64(Date().timeIntervalSince1970 * 1000)
+        watch.toggleFavorite(e)
     }
 
     /// Idea 7a: is this detail a SERIES? Counted over the
@@ -2372,18 +2578,7 @@ private struct JoeCastCellLabel: View {
     private func followButton(_ d: Detail) -> some View {
         if isSeries(d) {
             Button {
-                // D1 (2.0.48): a Select press with focus
-                // already resting here changes no hooked
-                // state — the press itself kills the
-                // preview.
-                preview.kill(reason: "input")
-                _ = FollowStore.shared.toggle(
-                    provider: provider,
-                    slug: d.movie.slug,
-                    title: d.movie.name,
-                    poster: d.movie.poster,
-                    currentEpisodes: FollowStore.episodeCount(
-                        from: d.movie.episodeCurrent))
+                followButtonAction(d)
             } label: {
                 Text(isFollowing(d) ? "Đang theo dõi" : "Theo dõi")
                     .font(.system(size: 29, weight: .semibold))
@@ -2399,6 +2594,24 @@ private struct JoeCastCellLabel: View {
             .joeCardButton()
             .focused($focusedFollow)
         }
+    }
+
+    /// followButton's press, extracted from its
+    /// Button action closure (2.0.48 sweep): the
+    /// original body verbatim.
+    private func followButtonAction(_ d: Detail) {
+        // D1 (2.0.48): a Select press with focus
+        // already resting here changes no hooked
+        // state — the press itself kills the
+        // preview.
+        preview.kill(reason: "input")
+        _ = FollowStore.shared.toggle(
+            provider: provider,
+            slug: d.movie.slug,
+            title: d.movie.name,
+            poster: d.movie.poster,
+            currentEpisodes: FollowStore.episodeCount(
+                from: d.movie.episodeCurrent))
     }
 
     // MARK: - Nguồn phát chips (design D)
@@ -2534,17 +2747,26 @@ private struct JoeCastCellLabel: View {
 
     private func epChip(_ d: Detail, ep: Episode, serverIndex: Int,
                         episodeIndex: Int) -> some View {
-        let focusKey = "\(serverIndex)|\(ep.name)"
-        let playable = Providers.isPlayable(code: provider, episode: ep)
+        let focusKey: String = "\(serverIndex)|\(ep.name)"
+        let playable: Bool = Providers.isPlayable(code: provider, episode: ep)
         let storedEp = watch.progressForTitle(slug: slug, provider: provider,
                                               title: d.movie.name,
                                               year: d.movie.year)?.ep
-        let preselected = ep.name == (!route.preselectEp.isEmpty
-                                      ? route.preselectEp : storedEp)
+        let preselectTarget: String? = !route.preselectEp.isEmpty
+            ? route.preselectEp : storedEp
+        let preselected: Bool = ep.name == preselectTarget
         // F4: focus identity is "<serverIndex>|<episodeName>" —
         // every server has its own "Tập 1", and keying by name
         // alone lit up one chip per server at once (C-3).
-        let focused = focusedEp == focusKey
+        let focused: Bool = focusedEp == focusKey
+        let chipStroke: Color = focused
+            ? (theme.id == .posterWall && preselected
+               ? Color.white : theme.focus)
+            : (preselected ? Color.clear : theme.stroke)
+        let chipLineWidth: CGFloat = focused ? theme.ringWidth : 1.5
+        let chipForeground: Color = !playable
+            ? theme.text.opacity(0.35)
+            : (preselected ? theme.onAccent : theme.text)
         return Button {
             play(d, epName: ep.name)
         } label: {
@@ -2556,8 +2778,7 @@ private struct JoeCastCellLabel: View {
             // capsule stroke.
             Text(ep.name)
                 .font(.system(size: 24, weight: preselected ? .semibold : .medium))
-                .foregroundStyle(!playable ? theme.text.opacity(0.35)
-                                  : (preselected ? theme.onAccent : theme.text))
+                .foregroundStyle(chipForeground)
                 .lineLimit(1)
                 .padding(.horizontal, 22)
                 .padding(.vertical, 11)
@@ -2574,11 +2795,7 @@ private struct JoeCastCellLabel: View {
                 // state and theme keeps the expression below
                 // unchanged.
                 .overlay(Capsule()
-                    .strokeBorder(focused
-                                  ? (theme.id == .posterWall && preselected
-                                     ? Color.white : theme.focus)
-                                  : (preselected ? Color.clear : theme.stroke),
-                                  lineWidth: focused ? theme.ringWidth : 1.5))
+                    .strokeBorder(chipStroke, lineWidth: chipLineWidth))
         }
         .joeCardButton()
         .focused($focusedEp, equals: focusKey)
@@ -2633,14 +2850,20 @@ private struct JoeCastCellLabel: View {
         let storedEp = watch.progressForTitle(slug: slug, provider: provider,
                                               title: d.movie.name,
                                               year: d.movie.year)?.ep
-        let preselected = index < names.count
-            && names[index] == (!route.preselectEp.isEmpty
-                                ? route.preselectEp : storedEp)
-        let focused = ytEpFocus == index
-        let label = index < names.count
+        let preselectTarget: String? = !route.preselectEp.isEmpty
+            ? route.preselectEp : storedEp
+        let preselected: Bool = index < names.count
+            && names[index] == preselectTarget
+        let focused: Bool = ytEpFocus == index
+        let label: String = index < names.count
             ? names[index]
             : (yt.epTitle(at: index).isEmpty
                ? "Tập \(index + 1)" : yt.epTitle(at: index))
+        let chipStroke: Color = focused
+            ? (theme.id == .posterWall && preselected
+               ? Color.white : theme.focus)
+            : (preselected ? Color.clear : theme.stroke)
+        let chipLineWidth: CGFloat = focused ? theme.ringWidth : 1.5
         return Button {
             ytPlayEpisode(d, yt: yt, names: names, index: index)
         } label: {
@@ -2653,11 +2876,7 @@ private struct JoeCastCellLabel: View {
                 .background(Capsule()
                     .fill(preselected ? theme.accent : theme.surface2))
                 .overlay(Capsule()
-                    .strokeBorder(focused
-                                  ? (theme.id == .posterWall && preselected
-                                     ? Color.white : theme.focus)
-                                  : (preselected ? Color.clear : theme.stroke),
-                                  lineWidth: focused ? theme.ringWidth : 1.5))
+                    .strokeBorder(chipStroke, lineWidth: chipLineWidth))
         }
         .joeCardButton()
         .focused($ytEpFocus, equals: index)
