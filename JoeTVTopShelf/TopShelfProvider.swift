@@ -28,13 +28,12 @@ import TVServices
 //    in project.yml so XcodeGen bundles them as resources,
 //    exactly like Đá Banh TV's mu-shelf-*.jpg). Entry 1 of
 //    the manifest is the recommended hero (TMDB
-//    trending/all/week #1 at manifest generation time); the
-//    remaining entries are SHUFFLED on every
-//    loadTopShelfContent call, so the shelf shows the
-//    recommended title's backdrop first plus a few random
-//    titles after it (owner's redo spec, verbatim: "làm lại
-//    backdrop làm sao nó hiện lên phim đề cử và hiện lên vài
-//    phim random"). Every item deep-links joetv://tmdb?id=…
+//    trending/all/week #1 at manifest generation time).
+//    v2.1.1 (WS-E): the presentation order is a DAY-SEEDED
+//    ROTATION of the whole manifest (see bundledContent) —
+//    the earlier hero-first + shuffled-tail shape is
+//    superseded by the owner's 2026-11-22 full-set
+//    rotation order. Every item deep-links joetv://tmdb?id=…
 //    to its own title. If the manifest is missing or empty
 //    the provider returns nil — never fabricate content.
 //
@@ -221,11 +220,24 @@ final class TopShelfProvider: TVTopShelfContentProvider {
 
     /// Build the carousel from the bundled shelf-manifest.json
     /// + bundled backdrop JPEGs (the proven-readable image
-    /// location — see the header note). Item 1 is the
-    /// manifest's first entry (the recommended hero); the
-    /// remaining entries are shuffled per call ("vài phim
-    /// random"). Nil when the manifest is missing/empty or no
-    /// entry has a loadable bundled image — never fabricate.
+    /// location — see the header note).
+    ///
+    /// v2.1.1 (WS-E, owner order 2026-11-22 01:27 CST —
+    /// full-set rotation): the WHOLE manifest set is handed
+    /// to the carousel on every call, in an order rotated
+    /// by day — the rotation offset is the day-of-year, so
+    /// the leading title advances one step per day and
+    /// every entry in the set takes the lead in turn. The
+    /// pre-fix shape pinned manifest entry 1 as the hero on
+    /// every load and shuffled only the tail, so the shelf
+    /// always opened on the same title and the owner's
+    /// "nó cứ hiện một phim đầu rồi lặp mấy hình" was the
+    /// construction, not a bug. A per-call shuffle is
+    /// deliberately NOT used: it gives no coverage
+    /// guarantee, while the day rotation provably leads
+    /// with every entry once per cycle. Nil when the
+    /// manifest is missing/empty or no entry has a loadable
+    /// bundled image — never fabricate.
     private static func bundledContent() -> TVTopShelfContent? {
         guard let manifestURL = Bundle.main.url(
                 forResource: "shelf-manifest", withExtension: "json"),
@@ -263,15 +275,15 @@ final class TopShelfProvider: TVTopShelfContentProvider {
             return ci
         }
 
-        var items: [TVTopShelfCarouselItem] = []
-        // Recommended hero first (manifest entry 1)…
-        if let hero = entries.first, let ci = carouselItem(hero) {
-            items.append(ci)
-        }
-        // …then the remaining titles in random order.
-        items += entries.dropFirst().shuffled()
-            .compactMap(carouselItem)
-        // De-duplicate by identifier, hero order preserved.
+        // The full set, rotated by day (see the doc note
+        // above): entry order wraps, nothing is dropped,
+        // and the lead advances daily.
+        let day = Calendar.current.ordinality(of: .day, in: .year,
+                                              for: Date()) ?? 1
+        let start = entries.count > 0 ? day % entries.count : 0
+        let rotated = Array(entries[start...]) + Array(entries[..<start])
+        var items: [TVTopShelfCarouselItem] = rotated.compactMap(carouselItem)
+        // De-duplicate by identifier, rotation order preserved.
         var seen = Set<String>()
         items = items.filter { seen.insert($0.identifier).inserted }
 

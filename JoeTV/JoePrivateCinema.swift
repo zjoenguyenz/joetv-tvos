@@ -39,6 +39,573 @@ struct PCClockLabel: View {
     static let clockStyle = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
 }
 
+// MARK: - Focus-follows backdrop (v2.1.1, WS-I)
+//
+// Owner decision + designer treatment (leader steering
+// 2026-11-22 02:26 CST): on the Private Cinema many-rail
+// homes, focusing ANY title card updates the hero
+// together — the hero TEXT changes first, immediately
+// with focus (each home renders its text from the SAME
+// focus derivation its context strip already uses, so
+// text is synchronous by construction), and the BACKDROP
+// follows after a 140 ms debounce, crossfading in over
+// 520 ms while the PREVIOUS backdrop stays on screen (no
+// black flash, no strobe, no placeholder). One shared
+// controller (below) owns the backdrop leg for all three
+// PC homes (Phim / TVB / Torrent); each home owns one
+// instance and feeds it resolved items from its own
+// focus state. FL-017 discipline: the debounce task is
+// the ONLY work a focus change schedules — no catalogue
+// searches, no spec builds on the focus path (the item
+// resolution rides the strip helpers' existing lookups).
+
+/// One focus-resolved hero item for the backdrop
+/// controller (v2.1.1, WS-I): the text-facing identity of
+/// the currently focused title plus its art ladder,
+/// resolved by the owning home from REAL fields only.
+/// `key` is the focus identity the home already mints
+/// (the .focused binding value, or the featured movie's
+/// id at rest) — the controller dedupes on it.
+struct JoeCinemaHeroItem: Equatable {
+    var key: String
+    var title: String
+    var meta: String
+    var synopsis: String
+    /// Primary backdrop art (the surface's own backdrop
+    /// ladder's first leg); nil when the title carries
+    /// no backdrop — the poster then becomes the backdrop.
+    var backdropURL: URL?
+    /// Poster art: the fallback leg, and the backdrop
+    /// itself when `backdropURL` is nil.
+    var posterURL: URL?
+}
+
+/// The shared focus-follows-backdrop controller
+/// (v2.1.1, WS-I): one instance per PC home, owned as
+/// @StateObject by the home view. All mutable state is
+/// @MainActor-isolated (the class is @MainActor; the
+/// @Published images are written only on the main actor).
+///
+/// Contract of focusChanged(to:):
+///  - the text-facing `current` item is set
+///    SYNCHRONOUSLY, in the call itself — the caller's
+///    hero text re-renders from its own focus derivation
+///    in the same focus transaction, so text always
+///    leads the backdrop;
+///  - the backdrop swap is (re)scheduled: any prior
+///    pending task is cancelled, the new art loads after
+///    a 140 ms debounce through the EXISTING pipeline
+///    (JoeImagePipeline.shared.image(for:targetPixels:)
+///    — JoeImagePipeline.swift:162 — the visible-load
+///    entry whose loads run at .userInitiated priority
+///    in a detached task, bucket 1920 for
+///    targetPixels 1920, the hero legs' bucket), with
+///    the poster-fix set's HEDGED fallback (the
+///    JoeRemoteImage.resolve pattern,
+///    JoeImagePipeline.swift:775): the backdrop leg runs
+///    at once and starts the poster leg the moment it
+///    fails; a 5 s hedge starts the same poster leg if
+///    the backdrop leg is still grinding; the first
+///    bitmap wins. A poster-only title loads its poster
+///    directly (the poster IS its backdrop). No new
+///    loader, no new URLSession anywhere;
+///  - on success the new bitmap crossfades in over the
+///    displayed one (two-layer opacity swap, 520 ms,
+///    timingCurve(0.22, 0.61, 0.36, 1.0)); on failure
+///    (BOTH legs failed) the backdrop clears to plain
+///    Ink (FIX-10a). A title with NO art at all clears
+///    to plain Ink after the same debounce (no
+///    placeholder image is ever minted).
+///  - Reduce Motion ON: the swap is instant — the new
+///    bitmap replaces the base layer with no crossfade
+///    animation (the layer view renders the top layer
+///    only while a crossfade is in flight, and this
+///    controller never starts one under Reduce Motion).
+@MainActor
+final class JoeCinemaBackdropController: ObservableObject {
+
+    /// The text-facing current item (set synchronously
+    /// by focusChanged; the homes render hero text from
+    /// their own focus derivations, this is the
+    /// controller's record for dedupe + the load leg).
+    @Published private(set) var current: JoeCinemaHeroItem?
+
+    /// The displayed (base) backdrop bitmap. Stays up
+    /// while the next backdrop loads — cleared only by
+    /// a successful swap, by a no-art title's debounced
+    /// clear, or by a both-legs-failed load's debounced
+    /// clear (FIX-10a).
+    @Published private(set) var baseImage: UIImage?
+    /// The incoming bitmap during a crossfade, painted
+    /// over baseImage at topOpacity; nil outside a fade.
+    @Published private(set) var topImage: UIImage?
+    /// The incoming layer's opacity (0 → 1 over the
+    /// crossfade, animated with the spec's timing curve).
+    @Published private(set) var topOpacity: Double = 0
+
+    /// The pending debounce/load task — the ONLY task a
+    /// focus change may schedule (FL-017).
+    private var pendingTask: Task<Void, Never>?
+    /// Monotonic focus generation: a superseded task
+    /// (cancelled or not — the pipeline awaits inside it
+    /// are uninterruptible) recognises itself as stale
+    /// by generation before it may touch the layers.
+    private var generation = 0
+    /// The URL the displayed bitmap actually came from
+    /// (the backdrop leg's URL, or the poster's when the
+    /// fallback leg won) — a focus move to a title whose
+    /// effective art is already on screen schedules no
+    /// load and no fade.
+    private var displayedSource: URL?
+
+    /// Focus moved (or the rest/featured item was
+    /// seeded). `item == nil` is the TVB/Torrent rest
+    /// state: no title focused, no featured hero — the
+    /// backdrop clears to plain Ink after the debounce.
+    func focusChanged(to item: JoeCinemaHeroItem?) {
+        // Text first: the current item flips NOW, in the
+        // focus transaction itself.
+        current = item
+        pendingTask?.cancel()
+        pendingTask = nil
+        generation += 1
+        guard let item else {
+            let gen = generation
+            pendingTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 140_000_000)
+                guard !Task.isCancelled, gen == self.generation
+                else { return }
+                self.baseImage = nil
+                self.topImage = nil
+                self.topOpacity = 0
+                self.displayedSource = nil
+            }
+            return
+        }
+        // Same effective art already displayed: text was
+        // the only change (e.g. the featured item's
+        // backdrop URL resolving to the URL already up).
+        let effective = item.backdropURL ?? item.posterURL
+        if let effective, effective == displayedSource {
+            // FIX-8 / R4 Lens A MINOR 1: this branch runs
+            // AFTER generation += 1, so a focus move to a
+            // different card carrying the SAME art inside
+            // the 560 ms promotion window invalidates the
+            // in-flight promotion (its settle checks
+            // gen == generation) and re-arms nothing —
+            // topImage would stay at opacity 1 over a
+            // stale baseImage indefinitely. The wanted
+            // bitmap IS the top layer (displayedSource
+            // was assigned from it before swap), so settle
+            // it into the base layer NOW, in this branch,
+            // instead of just returning.
+            if topImage != nil {
+                baseImage = topImage
+                topImage = nil
+                topOpacity = 0
+            }
+            return
+        }
+        if item.backdropURL == nil, item.posterURL == nil {
+            // No art at all: plain Ink + gradient + the
+            // title text (spec point 3) — the previous
+            // title's backdrop must not linger under a
+            // title that has none.
+            let gen = generation
+            pendingTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 140_000_000)
+                guard !Task.isCancelled, gen == self.generation
+                else { return }
+                self.baseImage = nil
+                self.topImage = nil
+                self.topOpacity = 0
+                self.displayedSource = nil
+            }
+            return
+        }
+        let gen = generation
+        let backdrop = item.backdropURL
+        let poster = item.posterURL
+        // CAPTURE MAP (debounce/load task): self (the
+        // @StateObject-owned controller — retained for
+        // the task's life by design, it IS the layer
+        // owner), gen (Int, value), backdrop / poster
+        // (URL?, values). Nothing else is captured; the
+        // load itself touches only JoeImagePipeline
+        // .shared (a singleton) from a static helper.
+        pendingTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            guard !Task.isCancelled, gen == self.generation
+            else { return }
+            let loaded = await Self.loadBackdrop(
+                backdrop: backdrop, poster: poster)
+            guard !Task.isCancelled, gen == self.generation
+            else { return }
+            // FIX-10a / RECON-POWERMAX point 5: BOTH legs
+            // failed for the CURRENT selection (the
+            // generation guard above has passed, so this
+            // load still belongs to it) — clear to plain
+            // Ink, exactly as the no-art-URLs path does,
+            // including nil-ing displayedSource (otherwise
+            // a later title whose effective URL equals the
+            // stale source would take the same-art early
+            // return and never reload). The previous
+            // title's backdrop must not linger.
+            guard let loaded else {
+                self.baseImage = nil
+                self.topImage = nil
+                self.topOpacity = 0
+                self.displayedSource = nil
+                return
+            }
+            self.displayedSource = loaded.source
+            self.swap(to: loaded.image, generation: gen)
+        }
+    }
+
+    /// Publish a loaded bitmap over the displayed one:
+    /// the 520 ms crossfade (two-layer opacity swap,
+    /// the spec's timing curve), then a promotion step
+    /// settles the bitmap into the base layer. Reduce
+    /// Motion swaps instantly with no animation and no
+    /// top layer.
+    ///
+    /// CAPTURE MAP (promotion task): self, gen (Int,
+    /// value), image (UIImage — the bitmap being
+    /// promoted; identity-compared before settling so a
+    /// newer fade's bitmap is never settled by an older
+    /// fade's promotion).
+    private func swap(to image: UIImage, generation gen: Int) {
+        if UIAccessibility.isReduceMotionEnabled {
+            baseImage = image
+            topImage = nil
+            topOpacity = 0
+            return
+        }
+        topImage = image
+        topOpacity = 0
+        withAnimation(.timingCurve(0.22, 0.61, 0.36, 1.0,
+                                   duration: 0.52)) {
+            topOpacity = 1
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 560_000_000)
+            guard gen == self.generation,
+                  self.topImage === image else { return }
+            self.baseImage = image
+            self.topImage = nil
+            self.topOpacity = 0
+        }
+    }
+
+    /// The backdrop load leg (WS-I): backdrop URL first,
+    /// poster as the hedged fallback — the poster-fix
+    /// set's race (JoeRemoteImage.resolve,
+    /// JoeImagePipeline.swift:775): the backdrop leg
+    /// runs at once; if it finishes with no bitmap, the
+    /// poster leg starts immediately (the old serial
+    /// behaviour, preserved); a hedge leg sleeps 5 s
+    /// and then starts the SAME poster load concurrently
+    /// if no bitmap exists yet; the first bitmap wins.
+    /// A poster-only title (backdrop == nil) loads the
+    /// poster directly — it IS the backdrop. Every load
+    /// is JoeImagePipeline.shared.image(for:
+    /// targetPixels: 1920) — the pipeline's
+    /// .userInitiated visible load at the hero bucket.
+    /// Returns the winning bitmap + the URL it came
+    /// from, or nil when every leg failed.
+    ///
+    /// FIX-8 / R4 Lens A MINOR 2: the race now runs on
+    /// the poster pipeline's OWN race-box pattern
+    /// (JoeResolveRaceBox, JoeImagePipeline.swift:898)
+    /// instead of a task group. A task group's scope
+    /// cannot exit until EVERY child finishes, and a
+    /// hedge child already inside the pipeline's
+    /// detached load cannot be interrupted by
+    /// cancellation — so a backdrop win arriving while
+    /// the hedge's poster load was still running was
+    /// delayed by that losing load. Here the caller
+    /// polls the box (JoeBackdropRaceBox below) and
+    /// returns the moment a winner is published (or
+    /// both legs are known done); the losing leg's
+    /// wrapper is cancelled by the defer, which does
+    /// NOT cancel the pipeline's own detached in-flight
+    /// load — a losing load still lands in cache when
+    /// it lands, and its late publication lands in a
+    /// box nobody reads. The caller's generation guard
+    /// is untouched: focusChanged re-checks
+    /// gen == generation after this await, before any
+    /// swap is applied, exactly as before.
+    ///
+    /// CAPTURE MAP (leg tasks): each Task captures only
+    /// the box (JoeBackdropRaceBox, @unchecked Sendable,
+    /// all fields under its NSLock), backdrop / poster
+    /// (URL / URL?, Sendable values) and the static leg
+    /// helpers via Self — no instance state, no view
+    /// state; the legs touch only JoeImagePipeline
+    /// .shared (a singleton).
+    private static func loadBackdrop(
+        backdrop: URL?, poster: URL?
+    ) async -> (image: UIImage, source: URL)? {
+        guard let backdrop else {
+            guard let poster else { return nil }
+            if let image = await JoeImagePipeline.shared.image(
+                for: poster, targetPixels: 1920) {
+                return (image, poster)
+            }
+            return nil
+        }
+        if backdrop == poster {
+            if let image = await JoeImagePipeline.shared.image(
+                for: backdrop, targetPixels: 1920) {
+                return (image, backdrop)
+            }
+            return nil
+        }
+        let box = JoeBackdropRaceBox(posterLegExists: poster != nil)
+        let backdropTask = Task {
+            await Self.runBackdropLeg(box: box,
+                                      backdrop: backdrop,
+                                      poster: poster)
+        }
+        let hedgeTask = Task {
+            await Self.runBackdropHedgeLeg(box: box, poster: poster)
+        }
+        defer { backdropTask.cancel(); hedgeTask.cancel() }
+        while !box.settled {
+            if Task.isCancelled { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if let win = box.winner {
+            return (win.image, win.source)
+        }
+        return nil
+    }
+
+    /// The backdrop leg of the loadBackdrop race
+    /// (FIX-8): load the backdrop URL at once; publish
+    /// a bitmap through the box, and on failure settle
+    /// the leg in the box BEFORE handing off to the
+    /// poster leg, so the box can settle the moment the
+    /// poster outcome is also known — without waiting
+    /// for the hedge timer.
+    private static func runBackdropLeg(
+        box: JoeBackdropRaceBox, backdrop: URL, poster: URL?
+    ) async {
+        if let image = await JoeImagePipeline.shared.image(
+            for: backdrop, targetPixels: 1920) {
+            box.complete(image: image, source: backdrop, leg: .backdrop)
+            return
+        }
+        box.backdropLegFinished()
+        await runBackdropPosterLeg(box: box, poster: poster)
+    }
+
+    /// The hedge leg of the loadBackdrop race (FIX-8):
+    /// sleep 5 s, then start the SAME poster leg if no
+    /// bitmap exists yet. A cancelled wrapper never
+    /// starts new poster work (the JoeResolveRaceBox
+    /// runFallbackLeg entry gate, mirrored).
+    private static func runBackdropHedgeLeg(
+        box: JoeBackdropRaceBox, poster: URL?
+    ) async {
+        try? await Task.sleep(nanoseconds: 5_000_000_000)
+        if Task.isCancelled { return }
+        await runBackdropPosterLeg(box: box, poster: poster)
+    }
+
+    /// The ONE poster leg of the loadBackdrop race
+    /// (FIX-8), shared by the backdrop leg (on failure)
+    /// and the hedge leg (on deadline): claimed exactly
+    /// once through the box — the second caller stands
+    /// down and settles nothing; the claiming leg alone
+    /// marks the poster leg done. A nil poster (no
+    /// poster leg exists) counts as done the moment the
+    /// claiming call determines that.
+    private static func runBackdropPosterLeg(
+        box: JoeBackdropRaceBox, poster: URL?
+    ) async {
+        guard !Task.isCancelled else { return }
+        guard box.claimPosterLeg() else { return }
+        guard let poster else {
+            box.posterLegFinished()
+            return
+        }
+        if let image = await JoeImagePipeline.shared.image(
+            for: poster, targetPixels: 1920) {
+            box.complete(image: image, source: poster, leg: .poster)
+            return
+        }
+        box.posterLegFinished()
+    }
+}
+
+/// Lock-guarded race box for the backdrop controller's
+/// hedged load (v2.1.1, FIX-8 — the JoeResolveRaceBox
+/// pattern, JoeImagePipeline.swift:898, mirrored for
+/// the backdrop/poster leg pair): the backdrop leg and
+/// the poster leg publish here; the FIRST bitmap wins
+/// and later publications are dropped. The poster leg
+/// is claimed exactly once. A race is settled as soon
+/// as its outcome is DECIDED: a winner exists, OR the
+/// backdrop leg has finished with no bitmap AND the
+/// poster leg has finished with no bitmap — where a
+/// poster leg that does not exist counts as finished
+/// from the start, so a win (or a double failure)
+/// returns immediately instead of waiting on a losing
+/// leg still in flight. The two legs are tracked
+/// SEPARATELY (backdropDone / posterDone), exactly as
+/// the poster pipeline's box tracks its legs.
+/// @unchecked Sendable — every field is touched only
+/// under `lock`.
+private final class JoeBackdropRaceBox: @unchecked Sendable {
+    enum Leg { case backdrop, poster }
+
+    struct Win {
+        let image: UIImage
+        let source: URL
+    }
+
+    private let lock = NSLock()
+    private var win: Win?
+    private var posterClaimed = false
+    private var backdropDone = false
+    private var posterDone: Bool
+
+    init(posterLegExists: Bool) {
+        posterDone = !posterLegExists
+    }
+
+    func complete(image: UIImage, source: URL, leg: Leg) {
+        lock.lock()
+        if win == nil { win = Win(image: image, source: source) }
+        if leg == .backdrop { backdropDone = true }
+        if leg == .poster { posterDone = true }
+        lock.unlock()
+    }
+
+    /// The backdrop leg finished with NO bitmap. Its
+    /// poster hand-off is a separate leg, tracked by
+    /// posterLegFinished — this flag is what lets the
+    /// box settle immediately once the poster outcome
+    /// is also known.
+    func backdropLegFinished() {
+        lock.lock()
+        backdropDone = true
+        lock.unlock()
+    }
+
+    /// The CLAIMED poster leg finished with NO bitmap
+    /// (load failure, or no poster URL exists at all).
+    /// Only the claiming leg calls this — a claim
+    /// stand-down settles nothing.
+    func posterLegFinished() {
+        lock.lock()
+        posterDone = true
+        lock.unlock()
+    }
+
+    /// True exactly once — for the leg that runs the
+    /// poster load; every other caller gets false.
+    func claimPosterLeg() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if posterClaimed { return false }
+        posterClaimed = true
+        return true
+    }
+
+    var winner: Win? {
+        lock.lock()
+        defer { lock.unlock() }
+        return win
+    }
+
+    var settled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return win != nil || (backdropDone && posterDone)
+    }
+}
+
+/// The controller's backdrop layer (v2.1.1, WS-I): the
+/// base bitmap, with the incoming bitmap fading over it
+/// during a crossfade. Paints NOTHING while no bitmap
+/// exists — the surface's own Ink ground + scrims are
+/// the painted surface then (never a placeholder). Each
+/// bitmap gets the hero band's treatment (the
+/// JoeBandImage discipline, JoeImagePipeline.swift:1011):
+/// a landscape bitmap is cover-sliced at the 0.20 top
+/// anchor; a portrait bitmap (a poster standing in as
+/// the backdrop) paints as a SHARP cover-slice at the
+/// 0.35 anchor (FIX-12 / R7 C-F2 — the many-rail spec's
+/// poster fallback: "poster crop cover center35% cùng
+/// scrim", the poster-only state PNGs show the poster
+/// sharp and legible under the heroes' fixed scrims;
+/// no blur, no extra dark overlay of its own).
+struct JoeCinemaBackdropLayer: View {
+    @ObservedObject var controller: JoeCinemaBackdropController
+    var anchor: CGFloat = 0.20
+
+    var body: some View {
+        ZStack {
+            if let base = controller.baseImage {
+                JoeCinemaBackdropImage(image: base, anchor: anchor)
+            }
+            if let top = controller.topImage {
+                JoeCinemaBackdropImage(image: top, anchor: anchor)
+                    .opacity(controller.topOpacity)
+            }
+        }
+    }
+}
+
+/// One backdrop bitmap with the band treatment (the
+/// JoeBandImage slice math, mirrored so the
+/// controller's decoded bitmaps — not URLs — can paint
+/// through the identical geometry).
+private struct JoeCinemaBackdropImage: View {
+    let image: UIImage
+    var anchor: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            if image.size.width >= image.size.height {
+                slice(image, in: geo.size)
+            } else {
+                // FIX-12 / R7 C-F2: a portrait bitmap (a
+                // poster standing in as the backdrop) takes
+                // the SAME sharp slice, anchored at the
+                // spec's 0.35 centre — never the blurred,
+                // darkened field it used to take. Both
+                // crossfade layers route through this one
+                // view, so a poster-only swap keeps the
+                // same character through the fade.
+                slice(image, in: geo.size, anchor: 0.35)
+            }
+        }
+    }
+
+    /// Cover-slice anchored near the top (JoeBandImage
+    /// .slice): scale to cover, shift up by anchor × the
+    /// vertical overflow. `anchor` overrides the view's
+    /// own anchor for this one slice (the portrait
+    /// poster's 0.35, FIX-12 / R7 C-F2).
+    private func slice(_ image: UIImage, in size: CGSize,
+                       anchor sliceAnchor: CGFloat? = nil) -> some View {
+        let scale = max(size.width / image.size.width,
+                        size.height / image.size.height)
+        let w = image.size.width * scale
+        let h = image.size.height * scale
+        let overflow = max(h - size.height, 0)
+        return Image(uiImage: image)
+            .resizable()
+            .frame(width: w, height: h)
+            .offset(x: (size.width - w) / 2,
+                    y: -overflow * (sliceAnchor ?? anchor))
+    }
+}
+
 // MARK: - Trailer chain for non-detail surfaces
 
 /// The trailer attempt for surfaces outside

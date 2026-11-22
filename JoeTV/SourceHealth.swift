@@ -212,6 +212,20 @@ enum SourceHealth {
         if isNew { evictLocked(now: now) }
         saveLocked(force: latchChanged)
         lock.unlock()
+        // v2.1.1 (WS-E, parity J-25): a record against the
+        // CacheVideo CDN host also settles the demote's
+        // re-probe claim (see the CacheVideo section
+        // below): an answering success may restore (window-
+        // guarded in cvRestored); a timeout or an answered
+        // failure is inconclusive — it releases the claim
+        // without restoring and without re-demoting (the
+        // Sony 2.3.52 record-hook semantics, verbatim).
+        if hostKey(for: url) == cvHost {
+            switch outcome {
+            case .success: cvRestored()
+            case .timeout, .instantFail: cvReleaseProbe()
+            }
+        }
     }
 
     /// The measured-call wrapper the clients use: computes
@@ -325,6 +339,112 @@ enum SourceHealth {
         }
         lock.unlock()
         return demoted
+    }
+
+    // MARK: - CacheVideo CDN contract demote (v2.1.1, WS-E,
+    // parity J-25 — port of Sony SourceHealth.java's
+    // v2.3.52 demote, semantics matched exactly)
+    //
+    // The CDN answers the app's playlist fetches HTTP 400
+    // ("Invalid or missing Referer") while the resolver
+    // stays alive, so every carried title pays a fail-first
+    // tax at play time. The demote: an HTTP 400 observed
+    // from host cachevideo.com — and ONLY that — demotes
+    // the provider for 6 h, PERSISTED (its own UserDefaults
+    // key below, outside the health snapshot). After the
+    // window, exactly ONE fresh attempt (the re-probe) is
+    // let through; its success fully restores the
+    // provider; a fresh 400 re-demotes for a new window;
+    // timeout / DNS / 5xx are inconclusive and NEVER
+    // demote. This replaces the generic 15-minute latch
+    // for this one failure class (the latch still governs
+    // the resolver host and every other key).
+
+    /// The only host whose HTTP 400 convicts.
+    private static let cvHost = "cachevideo.com"
+    /// Persisted demote-until (epoch seconds) key.
+    private static let cvDemoteKey = "cv_cdn_contract_demote_until"
+    /// Demote window: 6 h, exactly Sony's CV_DEMOTE_MS.
+    private static let cvDemoteWindow: TimeInterval = 6 * 60 * 60
+    /// A re-probe claim older than this is stale (Sony's
+    /// CV_PROBE_STALE_MS = 600_000): a prober whose handed-
+    /// out CDN URL is never fetched produces no CDN record
+    /// at all, so nothing would ever settle the claim —
+    /// the stale backstop keeps the demote from outliving
+    /// its window for the rest of the process.
+    private static let cvProbeStale: TimeInterval = 600
+
+    enum CvState {
+        case ok
+        case demoted
+        case probe
+    }
+
+    private static let cvLock = NSLock()
+    // Swift 6: nonisolated(unsafe) — both fields are
+    // touched only under cvLock (cvState / cvReleaseProbe).
+    private nonisolated(unsafe) static var cvProbeInFlight = false
+    private nonisolated(unsafe) static var cvProbeClaimedAt: Double = 0
+
+    /// An HTTP status observed for a finished request.
+    /// Only a 400 from the CacheVideo CDN convicts; every
+    /// other host/status is ignored here. The host arrives
+    /// as a host KEY (hostKey(for:) output) and is compared
+    /// against cvHost directly — it must NOT be re-keyed:
+    /// hostKey parses a URL, and a bare key is not one
+    /// (Sony's 2.3.52 gate lesson, carried over).
+    static func noteHttpStatus(hostKey: String, code: Int) {
+        guard code == 400, hostKey == cvHost else { return }
+        UserDefaults.standard.set(
+            Date().timeIntervalSince1970 + cvDemoteWindow,
+            forKey: cvDemoteKey)
+        cvReleaseProbe()
+    }
+
+    /// The demote state CacheVideo.resolve consults:
+    /// .demoted while the persisted window stands (resolve
+    /// answers "not carried" without touching the
+    /// network); .probe for exactly ONE caller once the
+    /// window lapses — the re-probe, whose claim the
+    /// CDN-side records settle (a success restores, a 400
+    /// re-demotes, a timeout releases); .ok otherwise.
+    static func cvState() -> CvState {
+        let until = UserDefaults.standard.double(forKey: cvDemoteKey)
+        guard until > 0 else { return .ok }
+        let now = Date().timeIntervalSince1970
+        if now < until { return .demoted }
+        return cvLock.withLock {
+            if cvProbeInFlight, now - cvProbeClaimedAt < cvProbeStale {
+                return .demoted
+            }
+            cvProbeInFlight = true
+            cvProbeClaimedAt = now
+            return .probe
+        }
+    }
+
+    /// Release the re-probe claim (see cvState). Called by
+    /// CacheVideo.resolve when a granted probe hands out
+    /// no CDN URL, and by the record paths when a CDN
+    /// answer settles the probe.
+    static func cvReleaseProbe() {
+        cvLock.withLock {
+            cvProbeInFlight = false
+            cvProbeClaimedAt = 0
+        }
+    }
+
+    /// A CacheVideo answer may restore the provider — but
+    /// only once the standing window has lapsed (the
+    /// re-probe's success, or a late success landing after
+    /// it). A mid-window answer never shortens a standing
+    /// demote.
+    private static func cvRestored() {
+        let until = UserDefaults.standard.double(forKey: cvDemoteKey)
+        guard until > 0,
+              until <= Date().timeIntervalSince1970 else { return }
+        UserDefaults.standard.removeObject(forKey: cvDemoteKey)
+        cvReleaseProbe()
     }
 
     // MARK: - Store (lock-guarded; every entry point above

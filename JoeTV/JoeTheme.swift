@@ -98,7 +98,14 @@ struct ThemeTokens {
                               startPoint: .top, endPoint: .bottom)
     }
     var cardWidth: CGFloat { cardArtW + artInset * 2 }
-    var cardArtH: CGFloat { cardArtW * 1.5 }
+    /// Card art height. Every theme's posters are 2:3
+    /// (× 1.5) EXCEPT Private Cinema, whose drawing sizes
+    /// the poster 205×263 (× 263/205 ≈ 1.283) — the PC
+    /// ratio lives here, keyed on the id, so no other
+    /// theme's height moves (v2.1.1 fix round, Lens C F1).
+    var cardArtH: CGFloat {
+        id == .privateCinema ? cardArtW * 263.0 / 205.0 : cardArtW * 1.5
+    }
 
     // Light-by-design fields — identical in all three themes (UI-1 law).
     static let fieldBg = Color(red: 0.961, green: 0.961, blue: 0.969)      // #F5F5F7
@@ -201,27 +208,37 @@ struct ThemeTokens {
 
     /// Private Cinema (v2.1.0 (Private Cinema)) — deep pine
     /// background #0C1215, pale sage-cream accents, ivory text
-    /// and focus, bare posters (inset 0) at radius 12.
+    /// and focus, bare posters (inset 0) at radius 6
+    /// (v2.1.1 fix round, Lens C F1: card anatomy set to the
+    /// drawing — poster 205×263, title 18 regular, meta 14,
+    /// rail gap 25; the badge dressing is branched in the
+    /// shared art block, not tokenised).
+    /// v2.1.1 (RECONCILIATION-211): surfaces corrected to the
+    /// design's Panel #182024 family (the shipped green-pine
+    /// gradients #182523/#101A18 were sampled from Detail art,
+    /// NOT the design value), text to Ivory #F2EEE5 exact and
+    /// meta to Muted #ACB7B8 exact. Accent #C9DDB2 / accent2
+    /// #D8E6BB were already exact and are unchanged.
     static let privateCinema = ThemeTokens(
         id: .privateCinema,
         bg: Color(red: 0.047, green: 0.070, blue: 0.082),                  // #0C1215
-        surfaceTop: Color(red: 0.094, green: 0.145, blue: 0.137),
-        surfaceBottom: Color(red: 0.063, green: 0.102, blue: 0.094),
-        surface2: Color(red: 0.110, green: 0.165, blue: 0.157),
+        surfaceTop: Color(red: 0.094, green: 0.125, blue: 0.141),          // #182024 Panel
+        surfaceBottom: Color(red: 0.063, green: 0.086, blue: 0.102),       // #10161A (Panel family, darker stop)
+        surface2: Color(red: 0.094, green: 0.125, blue: 0.141),            // #182024 Panel
         stroke: Color.white.opacity(0.16),
-        fieldBar: Color(red: 0.133, green: 0.192, blue: 0.180),
+        fieldBar: Color(red: 0.133, green: 0.180, blue: 0.200),            // #222E33 (Panel family)
         accent: Color(red: 0.788, green: 0.867, blue: 0.698),
         accent2: Color(red: 0.847, green: 0.902, blue: 0.733),
         onAccent: Color(red: 0.075, green: 0.106, blue: 0.090),
         focus: Color(red: 0.957, green: 0.945, blue: 0.894),
         focusTitle: Color(red: 0.957, green: 0.945, blue: 0.894),
-        text: Color(red: 0.949, green: 0.937, blue: 0.902),
-        meta: Color(red: 0.608, green: 0.655, blue: 0.612),
+        text: Color(red: 0.949, green: 0.933, blue: 0.898),                // #F2EEE5
+        meta: Color(red: 0.675, green: 0.718, blue: 0.722),                // #ACB7B8
         heroMeta: Color(red: 0.847, green: 0.902, blue: 0.733),
         badgeBg: Color.black.opacity(0.70),
-        badgeText: Color(red: 0.949, green: 0.937, blue: 0.902),
-        rCard: 12, rField: 12, artInset: 0, cardArtW: 240, railGap: 26,
-        ringWidth: 4, cardTitleSize: 24, cardMetaSize: 22,
+        badgeText: Color(red: 0.949, green: 0.933, blue: 0.898),           // #F2EEE5
+        rCard: 6, rField: 12, artInset: 0, cardArtW: 205, railGap: 25,
+        ringWidth: 4, cardTitleSize: 18, cardMetaSize: 14,
         scrimFloor: 0.55)
 
     static func tokens(for id: JoeThemeID) -> ThemeTokens {
@@ -852,7 +869,11 @@ struct PosterCard: View {
             } else {
                 Color.black.opacity(0.35)
             }
-            JoeRemoteImage(url: posterURL, targetPixels: 720, fit: !artFill,
+            // v2.1.1 (poster fix set item 5): CARDS load the
+            // 480 bucket — the card art is ~240 pt wide, so the
+            // 720 bucket was pure waste. Hero/band 1920 loads
+            // live at their own call sites and are untouched.
+            JoeRemoteImage(url: posterURL, targetPixels: 480, fit: !artFill,
                            slotClass: artSlotClass,
                            fallbackProvider: tmdbFallback) {
                 if theme.id == .ultra {
@@ -884,13 +905,32 @@ struct PosterCard: View {
                         .padding(10)
                 }
             } else if !quality.isEmpty {
-                Text(quality)
-                    .font(.system(size: 19, weight: .bold))
-                    .foregroundStyle(theme.badgeText)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(theme.badgeBg))
-                    .padding(10)
+                if theme.id == .privateCinema {
+                    // v2.1.1 fix round (Lens C F1): the PC
+                    // drawing's quality badge — 11 pt regular
+                    // in an r3 rect filled #0C1215E8, padding
+                    // 5×7, set top 11 / left 10. PC only; the
+                    // shared capsule below is every other
+                    // theme's badge, byte-for-byte.
+                    Text(quality)
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.badgeText)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 3)
+                            .fill(Color(red: 0.047, green: 0.070,
+                                        blue: 0.082).opacity(0.91)))
+                        .padding(.leading, 10)
+                        .padding(.top, 11)
+                } else {
+                    Text(quality)
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundStyle(theme.badgeText)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(theme.badgeBg))
+                        .padding(10)
+                }
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -919,7 +959,13 @@ struct PosterCard: View {
                         .padding(.leading, 10)
                         .padding(.bottom, progress != nil ? 16 : 10)
                 }
-            } else if let badge {
+            } else if let badge, theme.id != .privateCinema {
+                // v2.1.1 fix round (Lens C F1): under Private
+                // Cinema the drawing's posters carry ONLY the
+                // quality badge (+ the Trending numeral, an
+                // overlay in JoePhimHome) — the provider badge
+                // this block paints for the other themes is
+                // suppressed here, at the paint site.
                 Text(badge)
                     .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(theme.id == .sourceBoard ? theme.focus : .white)
@@ -1014,17 +1060,23 @@ struct PosterCard: View {
                 .overlay(RoundedRectangle(cornerRadius: artRadius)
                     .strokeBorder(isFocused ? theme.focus : .clear,
                                   lineWidth: isFocused ? theme.ringWidth : 0))
+            // v2.1.1 fix round (Lens C F1): the drawing's
+            // card type is REGULAR weight — title 18/400 at
+            // margin-top 13, meta 14/400 at margin-top 4
+            // (sizes ride the PC tokens). This body renders
+            // ONLY under .privateCinema, so the weight and
+            // margins here move no other theme.
             Text(title)
-                .font(.system(size: theme.cardTitleSize, weight: .semibold))
+                .font(.system(size: theme.cardTitleSize, weight: .regular))
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
-                .padding(.top, 12)
+                .padding(.top, 13)
             if !meta.isEmpty {
                 Text(meta)
                     .font(.system(size: theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
-                    .padding(.top, 5)
+                    .padding(.top, 4)
             }
             if let subline {
                 Text(subline)

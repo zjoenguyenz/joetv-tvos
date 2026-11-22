@@ -149,15 +149,15 @@ targets:
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: JoeTV/JoeTV-Bridging-Header.h
-        MARKETING_VERSION: "2.1.0"
-        CURRENT_PROJECT_VERSION: "63"
+        MARKETING_VERSION: "2.1.1"
+        CURRENT_PROJECT_VERSION: "64"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.1.0"
-        CFBundleVersion: "63"
+        CFBundleShortVersionString: "2.1.1"
+        CFBundleVersion: "64"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
@@ -203,6 +203,140 @@ targets:
       - JoeTVTopShelf/bundled/shelf-6.jpg
       - JoeTVTopShelf/bundled/shelf-7.jpg
       - JoeTVTopShelf/bundled/shelf-8.jpg
+      - JoeTVTopShelf/bundled/shelf-9.jpg
+      - JoeTVTopShelf/bundled/shelf-10.jpg
+      - JoeTVTopShelf/bundled/shelf-11.jpg
+      - JoeTVTopShelf/bundled/shelf-12.jpg
+      - JoeTVTopShelf/bundled/shelf-13.jpg
+      - JoeTVTopShelf/bundled/shelf-14.jpg
+      - JoeTVTopShelf/bundled/shelf-15.jpg
+      - JoeTVTopShelf/bundled/shelf-16.jpg
+      - JoeTVTopShelf/bundled/shelf-17.jpg
+      - JoeTVTopShelf/bundled/shelf-18.jpg
+      - JoeTVTopShelf/bundled/shelf-19.jpg
+      - JoeTVTopShelf/bundled/shelf-20.jpg
+      - JoeTVTopShelf/bundled/shelf-21.jpg
+      - JoeTVTopShelf/bundled/shelf-22.jpg
+      - JoeTVTopShelf/bundled/shelf-23.jpg
+      - JoeTVTopShelf/bundled/shelf-24.jpg
+      - JoeTVTopShelf/bundled/shelf-25.jpg
+      - JoeTVTopShelf/bundled/shelf-26.jpg
+      - JoeTVTopShelf/bundled/shelf-27.jpg
+      - JoeTVTopShelf/bundled/shelf-28.jpg
+      - JoeTVTopShelf/bundled/shelf-29.jpg
+      - JoeTVTopShelf/bundled/shelf-30.jpg
+      - JoeTVTopShelf/bundled/shelf-31.jpg
+      - JoeTVTopShelf/bundled/shelf-32.jpg
+      - JoeTVTopShelf/bundled/shelf-33.jpg
+      - JoeTVTopShelf/bundled/shelf-34.jpg
+      - JoeTVTopShelf/bundled/shelf-35.jpg
+      - JoeTVTopShelf/bundled/shelf-36.jpg
+      - JoeTVTopShelf/bundled/shelf-37.jpg
+      - JoeTVTopShelf/bundled/shelf-38.jpg
+      - JoeTVTopShelf/bundled/shelf-39.jpg
+      - JoeTVTopShelf/bundled/shelf-40.jpg
+      - JoeTVTopShelf/bundled/shelf-41.jpg
+      - JoeTVTopShelf/bundled/shelf-42.jpg
+      - JoeTVTopShelf/bundled/shelf-43.jpg
+      - JoeTVTopShelf/bundled/shelf-44.jpg
+      - JoeTVTopShelf/bundled/shelf-45.jpg
+      - JoeTVTopShelf/bundled/shelf-46.jpg
+      - JoeTVTopShelf/bundled/shelf-47.jpg
+      - JoeTVTopShelf/bundled/shelf-48.jpg
+      - JoeTVTopShelf/bundled/shelf-49.jpg
+      - JoeTVTopShelf/bundled/shelf-50.jpg
+      - JoeTVTopShelf/bundled/shelf-51.jpg
+      - JoeTVTopShelf/bundled/shelf-52.jpg
+      - JoeTVTopShelf/bundled/shelf-53.jpg
+      - JoeTVTopShelf/bundled/shelf-54.jpg
+      - JoeTVTopShelf/bundled/shelf-55.jpg
+      - JoeTVTopShelf/bundled/shelf-56.jpg
+      - JoeTVTopShelf/bundled/shelf-57.jpg
+      - JoeTVTopShelf/bundled/shelf-58.jpg
+      - JoeTVTopShelf/bundled/shelf-59.jpg
+      - JoeTVTopShelf/bundled/shelf-60.jpg
+      - JoeTVTopShelf/bundled/shelf-61.jpg
+      - JoeTVTopShelf/bundled/shelf-62.jpg
+      - JoeTVTopShelf/bundled/shelf-63.jpg
+      - JoeTVTopShelf/bundled/shelf-64.jpg
+      - JoeTVTopShelf/bundled/shelf-65.jpg
+      - JoeTVTopShelf/bundled/shelf-66.jpg
+      - JoeTVTopShelf/bundled/shelf-67.jpg
+      - JoeTVTopShelf/bundled/shelf-68.jpg
+      - JoeTVTopShelf/bundled/shelf-69.jpg
+      - JoeTVTopShelf/bundled/shelf-70.jpg
+      - JoeTVTopShelf/bundled/shelf-71.jpg
+      - JoeTVTopShelf/bundled/shelf-72.jpg
+      - JoeTVTopShelf/bundled/shelf-73.jpg
+      - JoeTVTopShelf/bundled/shelf-74.jpg
+      - JoeTVTopShelf/bundled/shelf-75.jpg
+      - JoeTVTopShelf/bundled/shelf-76.jpg
+      - JoeTVTopShelf/bundled/shelf-77.jpg
+      - JoeTVTopShelf/bundled/shelf-78.jpg
+      - JoeTVTopShelf/bundled/shelf-79.jpg
+      - JoeTVTopShelf/bundled/shelf-80.jpg
+      - JoeTVTopShelf/bundled/shelf-81.jpg
+      - JoeTVTopShelf/bundled/shelf-82.jpg
+      - JoeTVTopShelf/bundled/shelf-83.jpg
+      - JoeTVTopShelf/bundled/shelf-84.jpg
+      - JoeTVTopShelf/bundled/shelf-85.jpg
+      - JoeTVTopShelf/bundled/shelf-86.jpg
+      - JoeTVTopShelf/bundled/shelf-87.jpg
+      - JoeTVTopShelf/bundled/shelf-88.jpg
+      - JoeTVTopShelf/bundled/shelf-89.jpg
+      - JoeTVTopShelf/bundled/shelf-90.jpg
+      - JoeTVTopShelf/bundled/shelf-91.jpg
+      - JoeTVTopShelf/bundled/shelf-92.jpg
+      - JoeTVTopShelf/bundled/shelf-93.jpg
+      - JoeTVTopShelf/bundled/shelf-94.jpg
+      - JoeTVTopShelf/bundled/shelf-95.jpg
+      - JoeTVTopShelf/bundled/shelf-96.jpg
+      - JoeTVTopShelf/bundled/shelf-97.jpg
+      - JoeTVTopShelf/bundled/shelf-98.jpg
+      - JoeTVTopShelf/bundled/shelf-99.jpg
+      - JoeTVTopShelf/bundled/shelf-100.jpg
+      - JoeTVTopShelf/bundled/shelf-101.jpg
+      - JoeTVTopShelf/bundled/shelf-102.jpg
+      - JoeTVTopShelf/bundled/shelf-103.jpg
+      - JoeTVTopShelf/bundled/shelf-104.jpg
+      - JoeTVTopShelf/bundled/shelf-105.jpg
+      - JoeTVTopShelf/bundled/shelf-106.jpg
+      - JoeTVTopShelf/bundled/shelf-107.jpg
+      - JoeTVTopShelf/bundled/shelf-108.jpg
+      - JoeTVTopShelf/bundled/shelf-109.jpg
+      - JoeTVTopShelf/bundled/shelf-110.jpg
+      - JoeTVTopShelf/bundled/shelf-111.jpg
+      - JoeTVTopShelf/bundled/shelf-112.jpg
+      - JoeTVTopShelf/bundled/shelf-113.jpg
+      - JoeTVTopShelf/bundled/shelf-114.jpg
+      - JoeTVTopShelf/bundled/shelf-115.jpg
+      - JoeTVTopShelf/bundled/shelf-116.jpg
+      - JoeTVTopShelf/bundled/shelf-117.jpg
+      - JoeTVTopShelf/bundled/shelf-118.jpg
+      - JoeTVTopShelf/bundled/shelf-119.jpg
+      - JoeTVTopShelf/bundled/shelf-120.jpg
+      - JoeTVTopShelf/bundled/shelf-121.jpg
+      - JoeTVTopShelf/bundled/shelf-122.jpg
+      - JoeTVTopShelf/bundled/shelf-123.jpg
+      - JoeTVTopShelf/bundled/shelf-124.jpg
+      - JoeTVTopShelf/bundled/shelf-125.jpg
+      - JoeTVTopShelf/bundled/shelf-126.jpg
+      - JoeTVTopShelf/bundled/shelf-127.jpg
+      - JoeTVTopShelf/bundled/shelf-128.jpg
+      - JoeTVTopShelf/bundled/shelf-129.jpg
+      - JoeTVTopShelf/bundled/shelf-130.jpg
+      - JoeTVTopShelf/bundled/shelf-131.jpg
+      - JoeTVTopShelf/bundled/shelf-132.jpg
+      - JoeTVTopShelf/bundled/shelf-133.jpg
+      - JoeTVTopShelf/bundled/shelf-134.jpg
+      - JoeTVTopShelf/bundled/shelf-135.jpg
+      - JoeTVTopShelf/bundled/shelf-136.jpg
+      - JoeTVTopShelf/bundled/shelf-137.jpg
+      - JoeTVTopShelf/bundled/shelf-138.jpg
+      - JoeTVTopShelf/bundled/shelf-139.jpg
+      - JoeTVTopShelf/bundled/shelf-140.jpg
+      - JoeTVTopShelf/bundled/shelf-141.jpg
+      - JoeTVTopShelf/bundled/shelf-142.jpg
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.joetv.topshelf

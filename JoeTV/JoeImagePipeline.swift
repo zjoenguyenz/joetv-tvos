@@ -46,6 +46,13 @@ final class JoeImagePipeline: @unchecked Sendable {
     /// both guarded by `lock`. See prefetch(_:targetPixels:).
     private var prefetchBacklog: [(url: URL, bucket: Int, key: String)] = []
     private var prefetchActive = 0
+    /// v2.1.1 (WS-E, POSTER-PERF-DIAG §9 fix 4): how many
+    /// userInitiated loads (image(for:) calls) are currently
+    /// awaiting the network. While this is non-zero the
+    /// prefetch pump is paused — first-screen cards stop
+    /// competing with below-the-fold warming for the shared
+    /// 8-per-host pool. Guarded by `lock`, like the rest.
+    private var userInitiatedInFlight = 0
     /// How many prefetch-originated loads may be inside the
     /// network at once. The session allows 8 connections per
     /// host; capping warm-up at 3 leaves the rest of the pool
@@ -163,19 +170,32 @@ final class JoeImagePipeline: @unchecked Sendable {
         // the await on its value happens after the lock has
         // been released, exactly as before.
         let task: Task<UIImage?, Never> = lock.withLock {
+            // v2.1.1 (WS-E, §9 fix 4): every visible load —
+            // a fresh task OR a join of an in-flight one —
+            // counts against the prefetch pause while it is
+            // awaited.
+            userInitiatedInFlight += 1
             if let existing = inFlight[k] {
                 return existing
             }
             let created = Task.detached(priority: .userInitiated) {
                 let img = await Self.load(url: url, bucket: bucket,
-                                          session: self.session, decoded: self.decoded)
+                                          session: self.session, decoded: self.decoded,
+                                          userInitiated: true)
                 self.removeInFlight(k)
                 return img
             }
             inFlight[k] = created
             return created
         }
-        return await task.value
+        let result = await task.value
+        // The visible load settled: release the pause and
+        // give the prefetch pump its chance to resume.
+        lock.withLock {
+            userInitiatedInFlight = max(0, userInitiatedInFlight - 1)
+            pumpPrefetchLocked()
+        }
+        return result
     }
 
     /// Fire-and-forget warm-up at background priority; shares the in-flight
@@ -195,7 +215,13 @@ final class JoeImagePipeline: @unchecked Sendable {
     func prefetch(_ urls: [URL], targetPixels: Int) {
         let bucket = Self.bucket(forPixels: targetPixels)
         lock.withLock {
-            for url in urls {
+            // v2.1.1 (WS-E, §9 fix 4): the backlog takes only
+            // the first ~10 posters of each call (one call =
+            // one rail's posters at every current call site).
+            // A cold install used to enqueue ~500 URLs across
+            // all rails; the cap keeps the warming set near
+            // the owner's actual reading position.
+            for url in urls.prefix(10) {
                 let k = key(url, bucket)
                 if decoded.object(forKey: k as NSString) != nil { continue }
                 if inFlight[k] != nil { continue }
@@ -212,6 +238,11 @@ final class JoeImagePipeline: @unchecked Sendable {
     /// already in flight (a visible load got there first)
     /// are dropped without consuming a worker slot.
     private func pumpPrefetchLocked() {
+        // v2.1.1 (WS-E, §9 fix 4): paused while any
+        // userInitiated load is in flight (see
+        // userInitiatedInFlight). image(for:) re-pumps when
+        // its last visible load settles.
+        guard userInitiatedInFlight == 0 else { return }
         while prefetchActive < Self.prefetchWorkers,
               !prefetchBacklog.isEmpty {
             let item = prefetchBacklog.removeFirst()
@@ -221,7 +252,8 @@ final class JoeImagePipeline: @unchecked Sendable {
             let k = item.key
             inFlight[k] = Task.detached(priority: .background) {
                 let img = await Self.load(url: item.url, bucket: item.bucket,
-                                          session: self.session, decoded: self.decoded)
+                                          session: self.session, decoded: self.decoded,
+                                          userInitiated: false)
                 self.prefetchTaskFinished(k)
                 return img
             }
@@ -260,10 +292,16 @@ final class JoeImagePipeline: @unchecked Sendable {
     }
 
     private static func attempt(url: URL, bucket: Int,
-                                session: URLSession) async -> LoadOutcome {
+                                session: URLSession,
+                                timeout: TimeInterval) async -> LoadOutcome {
         var request = URLRequest(url: url)
         request.cachePolicy = .returnCacheDataElseLoad
-        request.timeoutInterval = 30
+        // v2.1.1 (WS-E, §9 fix 3): the per-attempt request
+        // timeout is the caller's envelope — ~10 s for
+        // userInitiated loads, the patient 30 s for
+        // prefetch (see load(...) below). The session's own
+        // 30 s config stays as the outer bound.
+        request.timeoutInterval = timeout
         let fetched: (Data, URLResponse)
         do {
             fetched = try await session.data(for: request)
@@ -303,10 +341,22 @@ final class JoeImagePipeline: @unchecked Sendable {
     /// view awaiting this (URL, bucket) gets the healed
     /// result, and a success is cached exactly as before.
     private static func load(url: URL, bucket: Int, session: URLSession,
-                             decoded: NSCache<NSString, UIImage>) async -> UIImage? {
-        let backoffs: [UInt64] = [500_000_000, 1_500_000_000]
+                             decoded: NSCache<NSString, UIImage>,
+                             userInitiated: Bool) async -> UIImage? {
+        // v2.1.1 (WS-E, POSTER-PERF-DIAG §9 fix 3): the
+        // visible-load envelope is cut — a userInitiated
+        // load gets ~10 s per attempt and ONE retry (worst
+        // placeholder ≈ 10 + 1.5 + 10 ≈ 21 s, down from
+        // ~92 s); prefetch keeps the patient 30 s × 3
+        // policy verbatim (the [0.5 s, 1.5 s] backoff list
+        // IS the 3-attempt policy).
+        let backoffs: [UInt64] = userInitiated
+            ? [1_500_000_000]
+            : [500_000_000, 1_500_000_000]
+        let timeout: TimeInterval = userInitiated ? 10 : 30
         for i in 0...backoffs.count {
-            switch await attempt(url: url, bucket: bucket, session: session) {
+            switch await attempt(url: url, bucket: bucket, session: session,
+                                 timeout: timeout) {
             case .image(let image):
                 let cost = image.cgImage.map { $0.width * $0.height * 4 } ?? 0
                 decoded.setObject(image, forKey: "\(url.absoluteString)|\(bucket)" as NSString, cost: cost)
@@ -700,31 +750,112 @@ struct JoeRemoteImage<Placeholder: View>: View {
         }
     }
 
-    /// Primary → gate → one fallback level → gate. The first
-    /// paint is never blocked on the fallback: until an
-    /// accepted bitmap exists the placeholder paints, and an
-    /// accepted fallback swaps in when it lands.
+    /// Primary → gate → one fallback level → gate, now
+    /// HEDGED (v2.1.1, WS-E, POSTER-PERF-DIAG §9 fix 2).
+    /// The pre-fix chain was strictly serial: a primary
+    /// grinding through its retry envelope blocked the
+    /// TMDB fallback for its whole duration (worst case
+    /// ~92 s of placeholder). Now two legs race into a
+    /// lock-guarded box and the first ACCEPTED bitmap wins:
+    ///   • the primary leg runs at once; if it fails the
+    ///     gate or the load, it starts the fallback leg
+    ///     immediately (the old behaviour, preserved);
+    ///   • the hedge leg waits ~5 s and then starts the
+    ///     SAME fallback leg concurrently if no accepted
+    ///     bitmap exists yet.
+    /// The fallback leg itself is claimed exactly once
+    /// (box.claimFallback), so the two starters can never
+    /// double-run it. The race is structured: the winning
+    /// bitmap is published only through the box's lock
+    /// (first write wins — no data race), and nothing here
+    /// cancels the pipeline's own in-flight task, so a
+    /// losing primary still lands in cache when it lands.
+    /// The first paint is never blocked: until an accepted
+    /// bitmap exists the placeholder paints.
     private func resolve() async -> UIImage? {
-        if let img = await JoeImagePipeline.shared.image(
-               for: url, targetPixels: targetPixels),
-           slotClass.accepts(img) {
-            logResolve(leg: "primary", source: url, image: img)
-            return img
+        let box = JoeResolveRaceBox()
+        // Gate R2 fix (Lens A MINOR 2): the primary task
+        // is STORED and cancelled by the same defer as the
+        // hedge, so a caller that has gone away cannot let
+        // this leg spawn fresh fallback work into an
+        // orphaned box (runFallbackLeg also gates on
+        // cancellation at entry). Cancelling this wrapper
+        // does NOT cancel the pipeline's own detached
+        // in-flight load — a losing primary still lands
+        // in cache when it lands, exactly as before.
+        let primary = Task {
+            if let img = await JoeImagePipeline.shared.image(
+                   for: url, targetPixels: targetPixels),
+               slotClass.accepts(img) {
+                box.complete(image: img, leg: "primary", source: url)
+            } else {
+                // The primary leg's own outcome is decided
+                // NOW (no accepted bitmap): settle it before
+                // the fallback hand-off, so the box can
+                // settle the moment the fallback leg is also
+                // known done — without waiting for the hedge
+                // timer (Gate R2 fix, Lens A MAJOR 1).
+                box.primaryLegFinished()
+                await runFallbackLeg(box: box)
+            }
+        }
+        let hedge = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if Task.isCancelled { return }
+            await runFallbackLeg(box: box)
+        }
+        defer { hedge.cancel(); primary.cancel() }
+        while !box.settled {
+            if Task.isCancelled { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if let win = box.winner {
+            logResolve(leg: win.leg, source: win.source, image: win.image)
+            return win.image
+        }
+        logResolve(leg: "placeholder", source: box.fallbackSource ?? url,
+                   image: nil)
+        return nil
+    }
+
+    /// The ONE fallback level, shared by the primary leg
+    /// (on failure) and the hedge leg (on deadline): the
+    /// fixed alternate URL, else the async provider (the
+    /// TMDB poster leg). Claimed once per resolve — the
+    /// second caller stands down and settles nothing; the
+    /// claiming leg alone marks the fallback done.
+    private func runFallbackLeg(box: JoeResolveRaceBox) async {
+        // Gate R2 fix (Lens A MINOR 2): a cancelled caller
+        // (its wrapper task was cancelled by resolve's
+        // defer) never starts NEW fallback work — no claim,
+        // no provider lookup, no load — for a poster nobody
+        // is waiting for.
+        guard !Task.isCancelled else { return }
+        guard box.claimFallback() else {
+            // Stand-down: the claiming leg owns the
+            // fallback's done-flag; this caller settles
+            // nothing here (Gate R2 fix, Lens A MAJOR 1 —
+            // the old code counted this stand-down as a
+            // finished leg, which is what held every
+            // double failure to the 5 s hedge wake).
+            return
         }
         var fb = fallbackURL
         if fb == nil { fb = await fallbackProvider?() }
+        box.noteFallbackSource(fb ?? url)
         guard let fb, fb != url else {
-            logResolve(leg: "placeholder", source: url, image: nil)
-            return nil
+            // No fallback leg exists/will run: the fallback
+            // outcome is decided, so the leg is done NOW.
+            box.fallbackLegFinished()
+            return
         }
         if let img = await JoeImagePipeline.shared.image(
                for: fb, targetPixels: targetPixels),
            slotClass.accepts(img) {
-            logResolve(leg: "fallback", source: fb, image: img)
-            return img
+            box.complete(image: img, leg: "fallback", source: fb)
+            return
         }
-        logResolve(leg: "placeholder", source: fb, image: nil)
-        return nil
+        box.fallbackLegFinished()
     }
 
     /// One diagnostic line per resolve (v2.0.7, Team
@@ -742,6 +873,109 @@ struct JoeRemoteImage<Placeholder: View>: View {
         let px = image?.cgImage.map { "\($0.width)x\($0.height)" } ?? "none"
         PlaybackLog.logger.info(
             "image resolve leg=\(leg, privacy: .public) host=\(host, privacy: .public) tail=\(tail, privacy: .public) px=\(px, privacy: .public)")
+    }
+}
+
+/// Lock-guarded race box for JoeRemoteImage's hedged
+/// resolve (v2.1.1, WS-E — the SourceHealth RunRaceBox
+/// pattern): the primary leg and the hedge leg publish
+/// here; the FIRST accepted bitmap wins and later
+/// publications are dropped. The fallback leg is claimed
+/// exactly once. A resolve is settled as soon as its
+/// outcome is DECIDED (Gate R2 fix, Lens A MAJOR 1): a
+/// winner exists, OR the primary leg has finished with
+/// no accepted bitmap AND the fallback leg has finished
+/// with no accepted bitmap — where a fallback that does
+/// not exist / will not run counts as finished the
+/// moment the claimed fallback leg determines that, so
+/// a double failure settles when both real legs are
+/// done instead of at the hedge deadline. The two legs
+/// are tracked SEPARATELY (primaryDone / fallbackDone):
+/// the pre-fix single counter counted fallback
+/// completions (claim stand-downs included), not legs.
+/// @unchecked Sendable — every field is touched only
+/// under `lock`.
+private final class JoeResolveRaceBox: @unchecked Sendable {
+    struct Win {
+        let image: UIImage
+        let leg: String
+        let source: URL?
+    }
+
+    private let lock = NSLock()
+    private var win: Win?
+    private var fallbackClaimed = false
+    private var primaryDone = false
+    private var fallbackDone = false
+    private var fbSource: URL?
+
+    func complete(image: UIImage, leg: String, source: URL?) {
+        lock.lock()
+        if win == nil { win = Win(image: image, leg: leg, source: source) }
+        if leg == "primary" { primaryDone = true }
+        if leg == "fallback" { fallbackDone = true }
+        lock.unlock()
+    }
+
+    /// The primary leg finished with NO accepted bitmap
+    /// (load failed or the aspect gate rejected it). Its
+    /// fallback hand-off is a separate leg, tracked by
+    /// fallbackLegFinished — this flag is what lets the
+    /// box settle immediately once the fallback outcome
+    /// is also known (including "already finished via
+    /// the hedge leg" and "no fallback exists").
+    func primaryLegFinished() {
+        lock.lock()
+        primaryDone = true
+        lock.unlock()
+    }
+
+    /// The CLAIMED fallback leg finished with NO accepted
+    /// bitmap (load/gate failure, or no fallback URL
+    /// exists at all). Only the claiming leg calls this —
+    /// a claim stand-down settles nothing.
+    func fallbackLegFinished() {
+        lock.lock()
+        fallbackDone = true
+        lock.unlock()
+    }
+
+    /// True exactly once — for the leg that runs the
+    /// fallback; every other caller gets false.
+    func claimFallback() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if fallbackClaimed { return false }
+        fallbackClaimed = true
+        return true
+    }
+
+    func noteFallbackSource(_ source: URL?) {
+        lock.lock()
+        fbSource = source
+        lock.unlock()
+    }
+
+    var winner: Win? {
+        lock.lock()
+        defer { lock.unlock() }
+        return win
+    }
+
+    var fallbackSource: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return fbSource
+    }
+
+    var settled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        // Win path unchanged: a claimed winner settles
+        // instantly. Otherwise the outcome is decided
+        // exactly when BOTH legs are known done — never
+        // gated on the hedge timer.
+        return win != nil || (primaryDone && fallbackDone)
     }
 }
 

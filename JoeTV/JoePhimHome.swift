@@ -178,6 +178,12 @@ struct JoePhimHome: View {
     @FocusState private var headerFocused: Bool
     @FocusState private var heroPlayFocused: Bool
     @FocusState private var heroBrowseFocused: Bool
+    /// v2.1.1 (WS-B): focus memory for the Private Cinema
+    /// hero's second action ("ⓘ Thông tin phim") — the PC
+    /// hero's pair is Chọn nguồn phát + Thông tin phim, so the
+    /// browse button's state no longer has a PC hero user;
+    /// it still serves the A/F heroes exactly as before.
+    @FocusState private var heroInfoFocused: Bool
     @FocusState private var bandFocused: String?
     @FocusState private var retryFocused: Bool
     /// v2.0.8 (Phase 5/F5): which of this home's three browse
@@ -234,6 +240,48 @@ struct JoePhimHome: View {
     /// rail renders only when non-empty, so an unmatched
     /// trending title can never surface as a dead card.
     @State private var trendingMovies: [Movie] = []
+    /// v2.1.1 (WS-H): the torrent home's store — a root
+    /// environment object (JoeTVApp) — observed ONLY for
+    /// the Private Cinema home's torrent-provider rails
+    /// (design rails 9–11); no other arm reads it.
+    @EnvironmentObject private var torStore: TorHomeStore
+    /// v2.1.1 (WS-H): the TVB bundled catalogue, loaded
+    /// once for the PC home's two TVB rails (design rails
+    /// 7–8: dangHot / moiCapNhat). PC-only state; the
+    /// by-id map is built once at load, like JoeTVBView's.
+    @State private var pcTVBCatalog: TVBCatalog?
+    @State private var pcTVBById: [Int: TVBTitle] = [:]
+    /// v2.1.1 (WS-I): the Private Cinema home's
+    /// focus-follows-backdrop controller (the shared
+    /// JoeCinemaBackdropController, JoePrivateCinema
+    /// .swift). PC-only: seeded with the featured item,
+    /// then fed by cinemaHeroFocusMoved() from the SAME
+    /// focusedMovie / focusedEntry focus memory the
+    /// context strip derives from — no second tracker.
+    @StateObject private var cinemaBackdrop =
+        JoeCinemaBackdropController()
+    /// v2.1.1 (WS-I): the last hero resolved from an
+    /// ACTUAL card focus. When focus leaves the cards
+    /// for the hero's own action buttons (or the
+    /// header), focusedMovie / focusedEntry read nil —
+    /// the hero must NOT snap back to the featured
+    /// title in that transaction, or its two actions
+    /// would lose the focused title they exist to open
+    /// (the spec: hero actions target the FOCUSED title
+    /// once focus has moved). cinemaHeroFocusMoved
+    /// maintains this; the hero text renders it whenever
+    /// no card is focused.
+    @State private var cinemaHeroMemory: CinemaHeroResolved?
+
+    /// v2.1.1 (FIX-10a / RECON-POWERMAX point 6): the
+    /// context strip's memory — the last RESOLVED strip
+    /// tuple, recorded in cinemaHeroFocusMoved while a
+    /// card is focused. When focus moves up to the tab
+    /// bar (no card focused) the strip RETAINS this
+    /// context instead of resetting to the featured
+    /// title; nil before any card has ever been focused
+    /// (the featured/rest behaviour is unchanged).
+    @State private var cinemaStripMemory: (title: String, meta: String, railName: String, railLine: String)?
 
     var body: some View {
         Group {
@@ -274,6 +322,27 @@ struct JoePhimHome: View {
         // also guards on trendingMovies still being empty.
         .task {
             await loadTrending()
+        }
+        // v2.1.1 (WS-H): PC-only data offers — the TVB
+        // bundled catalogue for the PC home's TVB rails and
+        // the torrent store's load for its provider rails.
+        // Guarded on the PC theme so every other arm's
+        // launch path is byte-for-byte what it was.
+        .task {
+            guard theme.id == .privateCinema else { return }
+            torStore.loadIfNeeded()
+            if pcTVBCatalog == nil {
+                let loaded = await Task.detached(priority: .userInitiated) {
+                    TVBCatalog.loadBundled()
+                }.value
+                if let loaded {
+                    pcTVBCatalog = loaded
+                    pcTVBById = Dictionary(
+                        uniqueKeysWithValues: loaded.titles
+                            .filter { $0.isDisplayed }
+                            .map { ($0.tmdbId, $0) })
+                }
+            }
         }
         // v2.0.45 (leg 3): offer the addon store its load
         // until it takes — the matcher runs against the
@@ -335,6 +404,7 @@ struct JoePhimHome: View {
                 // keeps the confirmation.)
                 if theme.id != .posterWall
                     && !heroPlayFocused && !heroBrowseFocused
+                    && !heroInfoFocused
                     && !headerFocused {
                     topScrollSignal += 1
                     if heroMovie != nil {
@@ -437,7 +507,11 @@ struct JoePhimHome: View {
                         if let band = spec.bandName {
                             bandHeader(name: band, note: spec.bandNote ?? "", scope: spec.scope)
                         }
-                        movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
+                        if spec.scope.hasPrefix("fileTrending:") {
+                            fileTrendingRail(spec)
+                        } else {
+                            movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
+                        }
                     }
                 }
                 // §8/G1: the spinner exists only while a load
@@ -541,7 +615,11 @@ struct JoePhimHome: View {
                         if let band = spec.bandName {
                             bandHeader(name: band, note: spec.bandNote ?? "", scope: spec.scope)
                         }
-                        movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
+                        if spec.scope.hasPrefix("fileTrending:") {
+                            fileTrendingRail(spec)
+                        } else {
+                            movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
+                        }
                     }
                 }
                 if catalogueEmpty && phim.loading && !phim.loadTimedOut {
@@ -587,36 +665,39 @@ struct JoePhimHome: View {
     /// or the slim header's button via headerFocused, exactly as
     /// on the other homes) — opening with the cinema hero block
     /// (or slimHeader when there is no featured film), then the
-    /// shared owner rails in ultraHome's order, then the
-    /// catalogue rails. The one composition difference: the
-    /// rail whose scope is "trending" renders through
-    /// cinemaTrendingRail (numbered items) instead of movieRail.
-    /// Loading / error / empty tails are ultraHome's, verbatim.
+    /// Trending rail directly under the hero, then the shared
+    /// owner rails and the catalogue rails as the provisional
+    /// stack (cinemaRailStack). Loading / error / empty tails
+    /// are ultraHome's, verbatim.
     private var cinemaHome: some View {
         ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 40) {
+            // v2.1.1 (WS-H): the Many-Rails composition —
+            // the hero stays the scroll's first element;
+            // the rails move into a Section whose header is
+            // the 88 px context strip, pinned by the OS
+            // (pinnedViews: [.sectionHeaders]) once the
+            // scroll passes it, so from the second rail
+            // onward the strip rides under the shell's
+            // fixed tab bar exactly as the design draws.
+            // No scroll-offset APIs are used anywhere.
+            LazyVStack(alignment: .leading, spacing: 8,
+                       pinnedViews: [.sectionHeaders]) {
                 if heroMovie != nil {
                     cinemaHeroBlock
                 } else {
                     slimHeader
                 }
-                cwRail
-                tvbCwRail
-                favRail
-                followRail
-                addonSection
-                ForEach(railSpecs) { spec in
-                    if !spec.movies.isEmpty {
-                        if let band = spec.bandName {
-                            bandHeader(name: band, note: spec.bandNote ?? "", scope: spec.scope)
-                        }
-                        if spec.scope == "trending" {
-                            cinemaTrendingRail(spec)
-                        } else {
-                            movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
-                        }
-                    }
+                Section {
+                // v2.1.1 (WS-H): below the hero, the home is
+                // a discrete ordered array of rail builders
+                // (cinemaRailStack) in the MANY-RAIL design
+                // order. See the note on cinemaRailStack.
+                ForEach(cinemaRailStack, id: \.self) { item in
+                    cinemaRailStackItem(item)
+                }
+                } header: {
+                    cinemaContextStrip
                 }
                 if catalogueEmpty && phim.loading && !phim.loadTimedOut {
                     ProgressView("Đang tải thư viện phim…")
@@ -649,46 +730,979 @@ struct JoePhimHome: View {
             proxy.scrollTo("joePhimHomeTop", anchor: .top)
         }
         }
+        // v2.1.1 (WS-I): focus-follows backdrop — the
+        // backdrop leg is driven from the SAME focus
+        // memory the context strip reads (focusedMovie /
+        // focusedEntry), plus the featured item's own
+        // arrivals (the catalogue landing, the hero
+        // task's TMDB backdrop). These hooks only call
+        // the resolver + the controller's focusChanged
+        // (FL-017: the debounce task inside the
+        // controller is the only scheduled work).
+        .onAppear { cinemaHeroFocusMoved() }
+        .onChange(of: focusedMovie) { _, _ in cinemaHeroFocusMoved() }
+        .onChange(of: focusedEntry) { _, _ in cinemaHeroFocusMoved() }
+        .onChange(of: heroMovie?.id) { _, _ in cinemaHeroFocusMoved() }
+        .onChange(of: heroBackdropURL) { _, _ in cinemaHeroFocusMoved() }
     }
 
-    /// The Private Cinema hero block (v2.1.0): the Billboard
-    /// hero's three-stage backdrop stack (poster blurred field,
-    /// provider thumb, TMDB backdrop slice) at the hero's 668
-    /// height with its scrims, then the cinema text block at
-    /// the bottom left — genre eyebrow, serif typeset title
-    /// (the design typesets the title; no logo art here),
-    /// meta row, synopsis, and the SAME action buttons
-    /// ultraHeroBlock renders (the identical nav.movie
-    /// detail-open call, the identical favourite toggle and
-    /// browse entry; the shared labels pick up the Private
-    /// Cinema tokens automatically). Its resolve task is
-    /// ultraHeroBlock's task verbatim, so heroDetail /
-    /// heroBackdropURL / heroRating publish identically.
+    // MARK: - Private Cinema rail stack (v2.1.1, WS-B)
+
+    /// One slot in the Private Cinema home's rail stack.
+    /// The stack is a discrete ordered array of these slots
+    /// (cinemaRailStack), each rendered by its own named
+    /// builder (cinemaRailStackItem), so a later spec can
+    /// re-order or re-skin the stack by editing the array
+    /// alone — no restructuring of cinemaHome.
+    private enum CinemaRailStackItem: Hashable {
+        case continueWatching
+        case trending
+        case providerNewest(String)
+        case tvbHot
+        case tvbNew
+        case torrentProviders
+        case tvbContinueWatching
+        case favourites
+        case following
+        case addon
+        case catalogue
+    }
+
+    /// v2.1.1 (WS-H): the MANY-RAIL order (owner-ordered
+    /// design amendment, 2026-11-22 02:03 CST) — the
+    /// design's 11 rails first: Xem tiếp → Trending →
+    /// KKPhim · Mới cập nhật → VSMOV · Mới cập nhật →
+    /// Film4K · Mới cập nhật → Tủ Phim · Mới cập nhật →
+    /// TVB · Đang được quan tâm → TVB · Mới trong thư
+    /// viện → the torrent-provider rails. The app's extra
+    /// rails (TVB CW, Favourites, Following, addon, the
+    /// remaining catalogue) APPEND after the design's
+    /// rails in their existing relative order — never
+    /// interleaved, never dropped (WS-H mapping §3).
+    private var cinemaRailStack: [CinemaRailStackItem] {
+        [.continueWatching, .trending,
+         .providerNewest("kkNew"), .providerNewest("vsNew"),
+         .providerNewest("f4kNew"), .providerNewest("tpNew"),
+         .tvbHot, .tvbNew, .torrentProviders,
+         .tvbContinueWatching, .favourites, .following,
+         .addon, .catalogue]
+    }
+
+    /// Render one stack slot. Every builder is a named
+    /// rail view — this switch adds no rendering of its
+    /// own.
+    @ViewBuilder
+    private func cinemaRailStackItem(_ item: CinemaRailStackItem) -> some View {
+        switch item {
+        case .continueWatching:
+            cinemaCwRail
+        case .trending:
+            cinemaTrendingStackRail
+        case .providerNewest(let scope):
+            cinemaProviderStackRail(scope)
+        case .tvbHot:
+            cinemaTVBStackRail(hot: true)
+        case .tvbNew:
+            cinemaTVBStackRail(hot: false)
+        case .torrentProviders:
+            cinemaTorrentStackRails
+        case .tvbContinueWatching:
+            tvbCwRail
+        case .favourites:
+            favRail
+        case .following:
+            followRail
+        case .addon:
+            addonSection
+        case .catalogue:
+            cinemaCatalogueRails
+        }
+    }
+
+    /// The stack's Trending slot: the railSpecs entry whose
+    /// scope is "trending" (the TMDB trending/week rail,
+    /// catalogue-matched in loadTrending), rendered through
+    /// cinemaTrendingRail — design rail 2, directly under
+    /// Continue Watching.
+    @ViewBuilder
+    private var cinemaTrendingStackRail: some View {
+        if let railSpec = railSpecs.first(where: { $0.scope == "trending" }),
+           !railSpec.movies.isEmpty {
+            cinemaTrendingRail(railSpec)
+        }
+    }
+
+    /// One per-provider "Mới cập nhật" slot (design rails
+    /// 3–6): the railSpecs entry for the scope, presented
+    /// under the design's provider title and rendered with
+    /// the PC local poster card (cinemaMovieRail).
+    @ViewBuilder
+    private func cinemaProviderStackRail(_ scope: String) -> some View {
+        if let railSpec = railSpecs.first(where: { $0.scope == scope }),
+           !railSpec.movies.isEmpty {
+            cinemaMovieRail(title: cinemaProviderRailTitle(scope),
+                            movies: railSpec.movies, scope: scope)
+        }
+    }
+
+    /// The design's provider rail titles, by scope.
+    private func cinemaProviderRailTitle(_ scope: String) -> String {
+        switch scope {
+        case "kkNew": return "KKPhim · Mới cập nhật"
+        case "vsNew": return "VSMOV · Mới cập nhật"
+        case "f4kNew": return "Film4K · Mới cập nhật"
+        case "tpNew": return "Tủ Phim · Mới cập nhật"
+        default: return "Mới cập nhật"
+        }
+    }
+
+    /// The stack's catalogue slot: every railSpecs entry
+    /// EXCEPT the ones with their own design slots above
+    /// (trending + the four provider-newest scopes), in
+    /// railSpecs order — band headers, the trending file
+    /// rails (fileTrendingRail) and the provider / genre /
+    /// country rails (movieRail). Appended extras keep the
+    /// shared construction (WS-H mapping §3).
+    @ViewBuilder
+    private var cinemaCatalogueRails: some View {
+        ForEach(railSpecs) { railSpec in
+            if !railSpec.movies.isEmpty,
+               !cinemaDesignScopes.contains(railSpec.scope) {
+                if let band = railSpec.bandName {
+                    bandHeader(name: band, note: railSpec.bandNote ?? "", scope: railSpec.scope)
+                }
+                if railSpec.scope.hasPrefix("fileTrending:") {
+                    fileTrendingRail(railSpec)
+                } else {
+                    movieRail(railSpec.title, railSpec.movies, badges: railSpec.badges, scope: railSpec.scope)
+                }
+            }
+        }
+    }
+
+    /// The railSpecs scopes that hold design slots 2–6 of
+    /// the PC stack (rendered by their own builders above,
+    /// so the appended catalogue slot must skip them).
+    private var cinemaDesignScopes: Set<String> {
+        ["trending", "kkNew", "vsNew", "f4kNew", "tpNew"]
+    }
+
+    // MARK: - Private Cinema Many-Rails builders (v2.1.1, WS-H)
+
+    /// The PC rail shell (WS-H): the shared Rail's
+    /// construction mirrored (own horizontal ScrollView +
+    /// LazyHStack, scrollClipDisabled, .focusSection()) at
+    /// the design's rhythm — heading 27 pt medium, card
+    /// gap 25, side margin 94 total (the shell's 80 pt
+    /// safe area + the 14 pt leading padding here).
+    /// Per-card focus identity stays the caller's stable
+    /// .focused binding, so the focus engine's per-rail
+    /// horizontal memory works exactly as on the shared
+    /// rails (WS-H mapping §6).
+    private func cinemaRailShell<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 27, weight: .medium))
+                .foregroundStyle(theme.text)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 25) { content() }
+                    .padding(.horizontal, 4)
+                    // FIX-4 / C5: spec row padding 8 top / 9 bottom.
+                    .padding(.top, 8)
+                    .padding(.bottom, 9)
+            }
+            .scrollClipDisabled()
+        }
+        .focusSection()
+        .padding(.leading, 14)
+    }
+
+    /// Design rail 1 (WS-H): Continue Watching FIRST, as
+    /// landscape cards 320×180 with progress bars; the
+    /// rail's total height is the design's 312 (heading +
+    /// 180 art + title/subline lines + the shell's
+    /// vertical padding). Data + tap + context menu are
+    /// cwRail's own (movieProgress); only the PC card is
+    /// local (JoeCinemaCwCard).
+    @ViewBuilder
+    private var cinemaCwRail: some View {
+        if !movieProgress.isEmpty {
+            cinemaRailShell(title: "Xem tiếp") {
+                ForEach(movieProgress) { entry in
+                    Button { nav.movie = MovieRoute(
+                        provider: entry.source, slug: entry.slug,
+                        name: entry.title, poster: entry.poster,
+                        year: entry.year, preselectEp: entry.ep,
+                        tvb: entry.tvbRouteContext) } label: {
+                        JoeCinemaCwCard(entry: entry)
+                    }
+                    .joeCardButton()
+                    .focused($focusedEntry, equals: "cw|" + entry.key)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            watch.removeProgress(key: entry.key)
+                        } label: {
+                            Text("Xoá khỏi Đang xem dở")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A PC poster rail over catalogue movies (design
+    /// rails 3–6): the local 205×263 card (JoeCinemaPoster
+    /// Card), NO provider badge (the drawing's posters are
+    /// bare), the movieRail tap and focus binding verbatim.
+    private func cinemaMovieRail(title: String, movies: [Movie],
+                                 scope: String) -> some View {
+        cinemaRailShell(title: title) {
+            ForEach(movies) { movie in
+                Button {
+                    nav.movie = MovieRoute(
+                    provider: movie.provider, slug: movie.slug,
+                    name: movie.name, poster: movie.poster, year: movie.year) } label: {
+                    JoeCinemaPosterCard(movie: movie)
+                }
+                .joeCardButton()
+                .focused($focusedMovie, equals: scope + "|" + movie.id)
+            }
+        }
+    }
+
+    /// Design rails 7–8 (WS-H): the TVB bundled
+    /// catalogue's dangHot ("TVB · Đang được quan tâm")
+    /// and moiCapNhat ("TVB · Mới trong thư viện") rails,
+    /// resolved through the PC-only catalogue load; the
+    /// tap is JoeTVBView.open's own mint (routeTarget).
+    @ViewBuilder
+    private func cinemaTVBStackRail(hot: Bool) -> some View {
+        if let catalog = pcTVBCatalog {
+            let ids = hot ? catalog.rails.dangHot : catalog.rails.moiCapNhat
+            let titles = ids.compactMap { pcTVBById[$0] }
+            if !titles.isEmpty {
+                cinemaRailShell(title: hot ? "TVB · Đang được quan tâm"
+                                           : "TVB · Mới trong thư viện") {
+                    ForEach(titles) { title in
+                        Button {
+                            if let target = title.routeTarget {
+                                nav.movie = MovieRoute(
+                                    provider: target.provider, slug: target.slug,
+                                    name: title.titleVi, poster: title.posterURLString,
+                                    year: title.yearString,
+                                    tvb: title.routeContext)
+                            }
+                        } label: {
+                            JoeCinemaTVBCard(title: title)
+                        }
+                        .joeCardButton()
+                        .focused($focusedMovie,
+                                 equals: (hot ? "tvbHot|" : "tvbNew|") + "\(title.tmdbId)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Design rails 9–11 (WS-H): the torrent-provider
+    /// rails — the first three TorHomeStore catalogues
+    /// with landed rails, in store order, each under its
+    /// catalogue's own name; the tap is the torrent
+    /// home's own TorRoute mint.
+    @ViewBuilder
+    private var cinemaTorrentStackRails: some View {
+        ForEach(Array(cinemaTorrentCatalogs.enumerated()), id: \.offset) { _, cat in
+            if let metas = torStore.rails[cat.id + "|" + cat.type], !metas.isEmpty {
+                cinemaRailShell(title: cat.name) {
+                    ForEach(metas) { meta in
+                        Button { nav.tor = TorRoute(meta: meta, base: cat.base) } label: {
+                            JoeCinemaTorCard(meta: meta)
+                        }
+                        .joeCardButton()
+                        .focused($focusedMovie,
+                                 equals: "torCat:\(cat.id)|\(cat.type)|" + meta.id)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The first three landed torrent catalogues (design
+    /// rails 9–11's feeders).
+    private var cinemaTorrentCatalogs: [TorCatalog] {
+        Array(torStore.catalogs.filter {
+            !(torStore.rails[$0.id + "|" + $0.type]?.isEmpty ?? true)
+        }.prefix(3))
+    }
+
+    // MARK: - Private Cinema context strip (v2.1.1, WS-H)
+
+    /// The 88 px context strip (WS-H): the Section header
+    /// the OS pins once the hero scrolls away — title ·
+    /// year · duration · source rail name · "Dãy NN/TT ·
+    /// ↑ để trở lại", derived from the EXISTING focus
+    /// memory (the last focused card), falling back to
+    /// the hero title at rest. Height 88 pt (FIX-3: the
+    /// settled convention is design px = pt 1:1 and the
+    /// many-rails spec gives the strip h88 — WS-H's 44 pt
+    /// was a ÷2 value), Panel-family bar over the Ink
+    /// background so the pinned strip stays legible over
+    /// scrolling art.
+    private var cinemaContextStrip: some View {
+        let info = cinemaContextInfo
+        return HStack(alignment: .center, spacing: 14) {
+            // FIX-8 / C-R4-2: the drawn composition
+            // (delivery-joetv-PhimManyRails-browse.png) —
+            // left column: the surface eyebrow in small
+            // caps ABOVE the title, the meta riding the
+            // title's baseline beside it.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("TRANG CHỦ / ĐANG KHÁM PHÁ")
+                    .font(.system(size: 15, weight: .medium))
+                    .tracking(3.6)
+                    .foregroundStyle(theme.heroMeta)
+                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 14) {
+                    // FIX-4 / C4: the spec's strip title is 34/500.
+                    Text(info.title)
+                        .font(.system(size: 34, weight: .medium))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    if !info.meta.isEmpty {
+                        Text(info.meta)
+                            .font(.system(size: 22))
+                            .foregroundStyle(theme.meta)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Spacer()
+            // FIX-8 / C-R4-2: right side is the drawing's
+            // TWO-LINE block — rail name over the Dãy
+            // line, right-aligned (values unchanged from
+            // cinemaContextInfo's derivations).
+            VStack(alignment: .trailing, spacing: 4) {
+                if !info.railName.isEmpty {
+                    Text(info.railName)
+                        .font(.system(size: 22))
+                        .foregroundStyle(theme.heroMeta)
+                        .lineLimit(1)
+                }
+                Text(info.railLine)
+                    .font(.system(size: 22))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 14)
+        .frame(height: 88)
+        .frame(maxWidth: .infinity)
+        .background(theme.bg)
+    }
+
+    /// The strip's content: (title, meta line, rail line)
+    /// for the currently focused card, resolved from the
+    /// focus-memory values — a catalogue card
+    /// ("scope|provider|slug"), a CW/favourite entry
+    /// ("cw|key" / "fav|key"), or the hero at rest.
+    private var cinemaContextInfo: (title: String, meta: String, railName: String, railLine: String) {
+        let total = cinemaVisibleRailTitles.count
+        if let focusedMovie {
+            let parts = focusedMovie.split(separator: "|", maxSplits: 1)
+            let scope = parts.isEmpty ? "" : String(parts[0])
+            let remainder = parts.count > 1 ? String(parts[1]) : ""
+            if let movie = railSpecs.flatMap({ $0.movies })
+                .first(where: { $0.id == remainder }) {
+                let rail = cinemaRailPosition(ofScope: scope)
+                var meta: [String] = []
+                if !movie.year.isEmpty { meta.append(movie.year) }
+                if !movie.time.isEmpty { meta.append(movie.time) }
+                return (movie.name, meta.joined(separator: " · "),
+                        rail.name,
+                        "Dãy \(rail.pos) / \(total) · ↑ để trở lại")
+            }
+            if let title = pcTVBById.values.first(where: {
+                focusedMovie.hasSuffix("|\($0.tmdbId)")
+            }) {
+                let rail = cinemaRailPosition(ofScope: scope)
+                return (title.titleVi, title.cardMeta,
+                        rail.name,
+                        "Dãy \(rail.pos) / \(total) · ↑ để trở lại")
+            }
+            if let meta = torStore.rails.values.flatMap({ $0 })
+                .first(where: { focusedMovie.hasSuffix("|" + $0.id) }) {
+                // FIX-4 / B1: the rail is the focused meta's
+                // OWN catalogue (its "torCat:" focus ID),
+                // resolved by name in the visible-rail list
+                // — never the literal "Torrent".
+                let rail = cinemaTorrentRailPosition(forFocusedMovie: focusedMovie)
+                return (meta.name, meta.year,
+                        rail.name,
+                        "Dãy \(rail.pos) / \(total) · ↑ để trở lại")
+            }
+            // FIX-5 / Lens B Finding 1: Following-rail cards
+            // bind "following|<movie.id>", but followedMovies
+            // are FollowStore copies — a followed title need
+            // not appear in any catalogue rail above, so it
+            // fell through to the hero fallback. Resolve the
+            // scope against followedMovies itself (its own
+            // entry list, as CW/Favourites do), in the
+            // Following branch's position before the hero
+            // fallback; cinemaRailPosition already names the
+            // "following" scope "Đang theo dõi".
+            if scope == "following",
+               let movie = followedMovies.first(where: { $0.id == remainder }) {
+                let rail = cinemaRailPosition(ofScope: scope)
+                return (movie.name, movie.cardMeta,
+                        rail.name,
+                        "Dãy \(rail.pos) / \(total) · ↑ để trở lại")
+            }
+        }
+        if let focusedEntry {
+            if let entry = movieProgress.first(where: { "cw|" + $0.key == focusedEntry }) {
+                let rail = cinemaRailPosition(ofScope: "cw")
+                return (entry.title, entry.epLabel,
+                        rail.name,
+                        "Dãy \(rail.pos) / \(total) · ↑ để trở lại")
+            }
+            if let entry = movieFavorites.first(where: { "fav|" + $0.key == focusedEntry }) {
+                let rail = cinemaRailPosition(ofScope: "favourites")
+                return (entry.title, entry.year,
+                        rail.name,
+                        "Dãy \(rail.pos) / \(total) · ↑ để trở lại")
+            }
+            // FIX-4 / B2: the appended TVB Continue Watching
+            // rail binds "tvbcw|<key>" — resolve it to its
+            // own rail instead of falling through to the hero.
+            if let entry = tvbProgress.first(where: { "tvbcw|" + $0.key == focusedEntry }) {
+                let rail = cinemaRailPosition(ofScope: "tvbCw")
+                return (entry.title, entry.epLabel,
+                        rail.name,
+                        "Dãy \(rail.pos) / \(total) · ↑ để trở lại")
+            }
+            // FIX-4 / B2: addon rails bind
+            // "addon|<rail>|<metaId>" — resolve the meta and
+            // its rail's catalogue name.
+            if focusedEntry.hasPrefix("addon|"),
+               let resolved = cinemaAddonFocus(focusedEntry) {
+                return (resolved.meta.name, resolved.meta.year,
+                        resolved.railName,
+                        "Dãy \(resolved.pos) / \(total) · ↑ để trở lại")
+            }
+        }
+        // FIX-10a / RECON-POWERMAX point 6 (+ Pass-2
+        // Lens B F2): no card focused — return the last
+        // resolved strip tuple when one exists, so the
+        // strip agrees with cinemaHeroMemory (the hero
+        // keeps the last focused title in this state).
+        // Before any focus ever, memory is nil and the
+        // featured/rest behaviour below is unchanged.
+        if focusedMovie == nil, focusedEntry == nil,
+           let memory = cinemaStripMemory {
+            return memory
+        }
+        if let hero = heroMovie {
+            var meta: [String] = []
+            if !hero.year.isEmpty { meta.append(hero.year) }
+            if !hero.time.isEmpty { meta.append(hero.time) }
+            return (hero.name, meta.joined(separator: " · "),
+                    "",
+                    "Dãy 01 / \(total) · ↑ để trở lại")
+        }
+        return ("", "", "", "Dãy 01 / \(total) · ↑ để trở lại")
+    }
+
+    // MARK: - Focus-follows hero (v2.1.1, WS-I)
+
+    /// What the PC hero's two actions open for the
+    /// currently focused title: EXACTLY the focused
+    /// card's own tap mint, per surface (the catalogue
+    /// MovieRoute, the TVB routeTarget mint, the torrent
+    /// TorRoute, the addon route, the CW/favourite
+    /// reopen, the TVB-CW YouTube route, the file-
+    /// trending tap resolution). Before any focus, the
+    /// featured title's own mint.
+    private enum CinemaHeroTarget {
+        case movie(Movie, scope: String)
+        case fileTrending(Movie)
+        case tvb(TVBTitle)
+        case tor(TorMeta, base: String)
+        case addon(TorMeta)
+        case movieEntry(WatchStore.Entry, preselect: Bool)
+        case tvbEntry(WatchStore.Entry)
+    }
+
+    /// A resolved hero: the controller's item (text +
+    /// art ladder) and the actions' target.
+    private struct CinemaHeroResolved {
+        var item: JoeCinemaHeroItem
+        var target: CinemaHeroTarget
+    }
+
+    /// Feed the backdrop controller from the current
+    /// focus memory (WS-I): called by cinemaHome's
+    /// onAppear / onChange hooks ONLY (never in body —
+    /// the controller's debounce task is the only work
+    /// this schedules, FL-017). A card focus resolves +
+    /// remembers the hero; NO card focus keeps the
+    /// remembered hero (focus is on the hero's actions
+    /// or the header — the hero stays on the last
+    /// focused title), except that a remembered FEATURED
+    /// hero refreshes when the hero task's enrichment
+    /// (TMDB backdrop / detail) lands.
+    private func cinemaHeroFocusMoved() {
+        if focusedMovie != nil || focusedEntry != nil {
+            if let resolved = cinemaHeroResolved() {
+                // FIX-12 / R7 B-1: record the strip's
+                // resolved tuple ONLY when the hero
+                // resolution actually resolved the FOCUSED
+                // card (this existing hook only — FL-017;
+                // no new per-focus work). The focused
+                // branches key the resolved item by the
+                // focus ID itself; cinemaHeroResolved()
+                // falls back to the FEATURED title when a
+                // focused card no longer resolves (a reload
+                // removed it), and letting any of the
+                // three writes through then would
+                // overwrite that memory with the featured
+                // tuple. FIX-13 / R8 Lens B B-1: the hero
+                // write and the backdrop push are gated on
+                // the SAME key test as the strip record, so
+                // the hero and strip memories can never
+                // disagree — in the fallback case this
+                // branch now writes nothing at all and both
+                // memories keep the last focused title.
+                if resolved.item.key == focusedMovie
+                    || resolved.item.key == focusedEntry {
+                    cinemaStripMemory = cinemaContextInfo
+                    cinemaHeroMemory = resolved
+                    cinemaBackdrop.focusChanged(to: resolved.item)
+                }
+            }
+            return
+        }
+        if let memory = cinemaHeroMemory {
+            if case .movie(let remembered, _) = memory.target,
+               remembered.id == heroMovie?.id,
+               let resolved = cinemaHeroResolved() {
+                cinemaHeroMemory = resolved
+                cinemaBackdrop.focusChanged(to: resolved.item)
+            }
+            return
+        }
+        if let resolved = cinemaHeroResolved() {
+            cinemaHeroMemory = resolved
+            cinemaBackdrop.focusChanged(to: resolved.item)
+        }
+    }
+
+    /// The hero the block renders: the live resolution
+    /// while a card is focused; the remembered hero once
+    /// focus has left the cards (see cinemaHeroMemory);
+    /// the featured resolution before either exists.
+    private func cinemaHeroDisplayResolved() -> CinemaHeroResolved? {
+        if focusedMovie != nil || focusedEntry != nil {
+            return cinemaHeroResolved()
+        }
+        return cinemaHeroMemory ?? cinemaHeroResolved()
+    }
+
+    /// The hero for the current focus, resolved from the
+    /// SAME focus memory + lookups cinemaContextInfo
+    /// uses (its branches, in its order), extended with
+    /// each surface's art ladder and tap target:
+    ///  - chain titles (Movie): the current hero's own
+    ///    backdrop ladder — TMDB backdrop slice first
+    ///    (heroBackdropURL, resolved by the hero task —
+    ///    the featured title is the only one whose TMDB
+    ///    backdrop is resolved, the focus path fetches
+    ///    NOTHING), then the provider thumb, then the
+    ///    poster;
+    ///  - TVB titles: the snapshot's TMDB backdrop path
+    ///    at w1280 (the TMDBClient backdrop convention),
+    ///    then the title's posterURL (the art its cards
+    ///    carry);
+    ///  - torrent titles (TorMeta): background, then
+    ///    poster;
+    ///  - WatchStore entries: the entry's own background,
+    ///    then its poster (TVB-CW rows: the YT series'
+    ///    poster by pid, as tvbCwRail resolves it);
+    ///  - addon metas: background, then poster.
+    /// Synopsis comes only from fields the record
+    /// carries (the featured detail's content, a
+    /// TorMeta/entry desc) — never fetched on focus.
+    private func cinemaHeroResolved() -> CinemaHeroResolved? {
+        if let focusedMovie {
+            let parts = focusedMovie.split(separator: "|", maxSplits: 1)
+            let scope = parts.isEmpty ? "" : String(parts[0])
+            let remainder = parts.count > 1 ? String(parts[1]) : ""
+            if let movie = railSpecs.flatMap({ $0.movies })
+                .first(where: { $0.id == remainder }) {
+                let isFeatured = movie.id == heroMovie?.id
+                let item = JoeCinemaHeroItem(
+                    key: focusedMovie,
+                    title: movie.name,
+                    meta: isFeatured ? cinemaHeroMetaLine(movie)
+                        : [movie.year, movie.time]
+                            .filter { !$0.isEmpty }
+                            .joined(separator: " · "),
+                    synopsis: isFeatured
+                        ? (heroDetail?.content ?? "") : "",
+                    backdropURL: isFeatured
+                        ? (heroBackdropURL ?? movie.thumbURL)
+                        : movie.thumbURL,
+                    posterURL: movie.posterURL)
+                if scope.hasPrefix("fileTrending:") {
+                    return CinemaHeroResolved(
+                        item: item, target: .fileTrending(movie))
+                }
+                return CinemaHeroResolved(
+                    item: item, target: .movie(movie, scope: scope))
+            }
+            if let title = pcTVBById.values.first(where: {
+                focusedMovie.hasSuffix("|\($0.tmdbId)")
+            }) {
+                return CinemaHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedMovie,
+                        title: title.titleVi,
+                        meta: title.cardMeta,
+                        synopsis: "",
+                        backdropURL: title.cinemaBackdropURL,
+                        posterURL: title.posterURL),
+                    target: .tvb(title))
+            }
+            if let meta = torStore.rails.values.flatMap({ $0 })
+                .first(where: { focusedMovie.hasSuffix("|" + $0.id) }) {
+                let base = cinemaTorrentCatalogs.first(where: { cat in
+                    torStore.rails[cat.id + "|" + cat.type]?
+                        .contains(where: { $0.id == meta.id }) == true
+                })?.base ?? TorrentSettings.cinemeta
+                return CinemaHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedMovie,
+                        title: meta.name,
+                        meta: meta.year,
+                        synopsis: meta.desc,
+                        backdropURL: meta.background.isEmpty
+                            ? nil : URL(string: meta.background),
+                        posterURL: meta.posterURL),
+                    target: .tor(meta, base: base))
+            }
+            if scope == "following",
+               let movie = followedMovies.first(where: { $0.id == remainder }) {
+                return CinemaHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedMovie,
+                        title: movie.name,
+                        meta: [movie.year, movie.time]
+                            .filter { !$0.isEmpty }
+                            .joined(separator: " · "),
+                        synopsis: "",
+                        backdropURL: movie.thumbURL,
+                        posterURL: movie.posterURL),
+                    target: .movie(movie, scope: scope))
+            }
+        }
+        if let focusedEntry {
+            if let entry = movieProgress.first(where: { "cw|" + $0.key == focusedEntry }) {
+                return CinemaHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedEntry,
+                        title: entry.title,
+                        meta: entry.epLabel,
+                        synopsis: entry.desc,
+                        backdropURL: entry.background.isEmpty
+                            ? nil : URL(string: entry.background),
+                        posterURL: entry.posterURL),
+                    target: .movieEntry(entry, preselect: true))
+            }
+            if let entry = movieFavorites.first(where: { "fav|" + $0.key == focusedEntry }) {
+                return CinemaHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedEntry,
+                        title: entry.title,
+                        meta: entry.year,
+                        synopsis: entry.desc,
+                        backdropURL: entry.background.isEmpty
+                            ? nil : URL(string: entry.background),
+                        posterURL: entry.posterURL),
+                    target: .movieEntry(entry, preselect: false))
+            }
+            if let entry = tvbProgress.first(where: { "tvbcw|" + $0.key == focusedEntry }) {
+                let poster = entry.posterURL
+                    ?? ytStore.snapshot?.byPid[entry.slug]?.posterURL
+                return CinemaHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedEntry,
+                        title: entry.title,
+                        meta: entry.epLabel,
+                        synopsis: entry.desc,
+                        backdropURL: entry.background.isEmpty
+                            ? nil : URL(string: entry.background),
+                        posterURL: poster),
+                    target: .tvbEntry(entry))
+            }
+            if focusedEntry.hasPrefix("addon|"),
+               let resolved = cinemaAddonFocus(focusedEntry) {
+                let meta = resolved.meta
+                return CinemaHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedEntry,
+                        title: meta.name,
+                        meta: meta.year,
+                        synopsis: meta.desc,
+                        backdropURL: meta.background.isEmpty
+                            ? nil : URL(string: meta.background),
+                        posterURL: meta.posterURL),
+                    target: .addon(meta))
+            }
+        }
+        if let featured = heroMovie {
+            return CinemaHeroResolved(
+                item: JoeCinemaHeroItem(
+                    key: "hero|" + featured.id,
+                    title: featured.name,
+                    meta: cinemaHeroMetaLine(featured),
+                    synopsis: heroDetail?.content ?? "",
+                    backdropURL: heroBackdropURL ?? featured.thumbURL,
+                    posterURL: featured.posterURL),
+                target: .movie(featured, scope: ""))
+        }
+        return nil
+    }
+
+    /// The hero actions' tap (WS-I): perform the focused
+    /// title's OWN card tap — the identical route mint
+    /// each rail builder above performs, nothing new.
+    private func cinemaOpenHeroTarget(_ target: CinemaHeroTarget) {
+        switch target {
+        case .movie(let movie, let scope):
+            if scope == "following" {
+                FollowStore.shared.markSeen(provider: movie.provider,
+                                            slug: movie.slug)
+            }
+            nav.movie = MovieRoute(
+                provider: movie.provider, slug: movie.slug,
+                name: movie.name, poster: movie.poster,
+                year: movie.year)
+        case .fileTrending(let movie):
+            Task { await resolveFileTrendingTap(movie) }
+        case .tvb(let title):
+            if let route = title.routeTarget {
+                nav.movie = MovieRoute(
+                    provider: route.provider, slug: route.slug,
+                    name: title.titleVi, poster: title.posterURLString,
+                    year: title.yearString,
+                    tvb: title.routeContext)
+            }
+        case .tor(let meta, let base):
+            nav.tor = TorRoute(meta: meta, base: base)
+        case .addon(let meta):
+            if let base = addonStore.servingBase {
+                nav.addonDetail = JoeAddonRoute(
+                    base: base,
+                    type: meta.type,
+                    metaId: meta.id,
+                    name: meta.name,
+                    poster: meta.poster,
+                    year: meta.year,
+                    addonName: addonStore.addonName)
+            }
+        case .movieEntry(let entry, let preselect):
+            nav.movie = MovieRoute(
+                provider: entry.source, slug: entry.slug,
+                name: entry.title, poster: entry.poster,
+                year: entry.year,
+                preselectEp: preselect ? entry.ep : "",
+                tvb: entry.tvbRouteContext)
+        case .tvbEntry(let entry):
+            nav.ytDetail = JoeYtRoute(pid: entry.slug)
+        }
+    }
+
+    /// The visible PC rails' titles in stack order — the
+    /// strip's NN/TT denominator and the rail-name source.
+    /// A rail counts only when it would render (non-empty
+    /// data), mirroring each builder's own gate.
+    private var cinemaVisibleRailTitles: [String] {
+        var titles: [String] = []
+        if !movieProgress.isEmpty { titles.append("Xem tiếp") }
+        if let railSpec = railSpecs.first(where: { $0.scope == "trending" }),
+           !railSpec.movies.isEmpty { titles.append("Trending") }
+        for scope in ["kkNew", "vsNew", "f4kNew", "tpNew"] {
+            if let railSpec = railSpecs.first(where: { $0.scope == scope }),
+               !railSpec.movies.isEmpty {
+                titles.append(cinemaProviderRailTitle(scope))
+            }
+        }
+        if let catalog = pcTVBCatalog {
+            if !catalog.rails.dangHot.compactMap({ pcTVBById[$0] }).isEmpty {
+                titles.append("TVB · Đang được quan tâm")
+            }
+            if !catalog.rails.moiCapNhat.compactMap({ pcTVBById[$0] }).isEmpty {
+                titles.append("TVB · Mới trong thư viện")
+            }
+        }
+        for cat in cinemaTorrentCatalogs {
+            titles.append(cat.name)
+        }
+        if !tvbProgress.isEmpty { titles.append("TVB · Đang xem dở") }
+        if !movieFavorites.isEmpty { titles.append("Yêu thích") }
+        if !followStore.followed.isEmpty { titles.append("Đang theo dõi") }
+        for rail in addonStore.rails where !rail.metas.isEmpty {
+            titles.append(rail.catalog.name)
+        }
+        for railSpec in railSpecs
+        where !railSpec.movies.isEmpty && !cinemaDesignScopes.contains(railSpec.scope) {
+            titles.append(railSpec.title)
+        }
+        return titles
+    }
+
+    /// A scope's (position, name) inside the visible PC
+    /// rail list, for the strip's "Dãy NN/TT" line.
+    private func cinemaRailPosition(ofScope scope: String)
+        -> (pos: String, name: String) {
+        let titles = cinemaVisibleRailTitles
+        let name: String
+        switch scope {
+        case "trending": name = "Trending"
+        case "kkNew", "vsNew", "f4kNew", "tpNew":
+            name = cinemaProviderRailTitle(scope)
+        case "tvbHot": name = "TVB · Đang được quan tâm"
+        case "tvbNew": name = "TVB · Mới trong thư viện"
+        case "cw": name = "Xem tiếp"
+        case "tvbCw": name = "TVB · Đang xem dở"
+        case "favourites": name = "Yêu thích"
+        // FIX-4 / B2: the Following rail has no railSpecs
+        // entry — name it from the visible list directly.
+        case "following": name = "Đang theo dõi"
+        default: name = railSpecs.first(where: { $0.scope == scope })?.title ?? ""
+        }
+        if let idx = titles.firstIndex(of: name) {
+            return (String(format: "%02d", idx + 1), name)
+        }
+        return ("01", name)
+    }
+
+    /// FIX-4 / B1 (Gate R2 Lens B): a torrent rail's
+    /// (position, name) for the strip — the focused meta's
+    /// OWN catalogue, parsed from its "torCat:<id>|<type>"
+    /// focus ID and looked up by the catalogue's real name
+    /// in the visible-rail list, mirroring the Torrent
+    /// home's own strip resolution (JoeTorrent's
+    /// torContextInfo). The pre-fix code looked the literal
+    /// "Torrent" up in a list that only ever carries
+    /// catalogue names, so rails 9–11 always painted
+    /// "Dãy 01 · Torrent".
+    private func cinemaTorrentRailPosition(forFocusedMovie focused: String)
+        -> (pos: String, name: String) {
+        let titles = cinemaVisibleRailTitles
+        if focused.hasPrefix("torCat:") {
+            let catId = focused.dropFirst("torCat:".count)
+                .split(separator: "|").first.map(String.init) ?? ""
+            if let cat = cinemaTorrentCatalogs.first(where: { $0.id == catId }),
+               let idx = titles.firstIndex(of: cat.name) {
+                return (String(format: "%02d", idx + 1), cat.name)
+            }
+        }
+        return ("01", cinemaTorrentCatalogs.first?.name ?? "")
+    }
+
+    /// FIX-4 / B2: resolve an addon focus ID
+    /// ("addon|<rail>|<metaId>") to its meta and its rail's
+    /// (position, catalogue name) in the visible-rail list.
+    /// Matched by prefix per rail — a rail's own id itself
+    /// contains a "|" ("type|catalogId"), so the ID cannot
+    /// be split on a fixed segment count.
+    private func cinemaAddonFocus(_ focused: String)
+        -> (meta: TorMeta, pos: String, railName: String)? {
+        for rail in addonStore.rails where !rail.metas.isEmpty {
+            let prefix = "addon|" + rail.id + "|"
+            guard focused.hasPrefix(prefix) else { continue }
+            let metaId = String(focused.dropFirst(prefix.count))
+            guard let meta = rail.metas.first(where: { $0.id == metaId })
+            else { continue }
+            let titles = cinemaVisibleRailTitles
+            let idx = titles.firstIndex(of: rail.catalog.name)
+            return (meta, String(format: "%02d", (idx ?? 0) + 1),
+                    rail.catalog.name)
+        }
+        return nil
+    }
+
+    /// The Private Cinema hero block (v2.1.0; v2.1.1 WS-B
+    /// full-bleed stage; v2.1.1 WS-I focus-follows
+    /// backdrop): the backdrop layer is the shared
+    /// controller's crossfade stack (JoeCinemaBackdrop
+    /// Layer — it replaced WS-B's three-stage JoeBandImage
+    /// stack of the featured title's poster field / thumb
+    /// / TMDB slice, whose art ladder the controller's
+    /// load now carries for every focused title) as the
+    /// home scroll's first, full-width stage — every layer framed maxWidth
+    /// .infinity with no inset, so the art bleeds edge to
+    /// edge across the whole content width and, the block
+    /// being the scroll's first element with no top padding,
+    /// paints from the very top of the scroll under the
+    /// shell bar (WS-A makes the PC bar a transparent
+    /// overlay; the top scrim below seats the bar's
+    /// legibility over the art). The stage is 485 tall
+    /// (FIX-3, many-rails spec: hero x94 y158 w850, the
+    /// first rail — Dãy 0 — starts at library y485, so the
+    /// hero zone ends where the first rail starts).
+    /// The text block follows the drawing (hero x93 w850 at
+    /// 1920 wide — the shell's 80 pt safe-area inset plus
+    /// the 13 pt leading padding below): the static
+    /// eyebrow in letterspaced caps, the typeset title (the app's
+    /// serif display face at the design's 72/500 scale with
+    /// wide tracking — the design face itself is not
+    /// available in-app, the standing substitution), the
+    /// original-name line in letterspaced caps when the
+    /// record carries one, the meta row (year · ★ · runtime
+    /// + the quality chip; the design's age chip has no app
+    /// data and is omitted, never invented), the VN
+    /// synopsis (≤2 lines), and EXACTLY TWO actions — the
+    /// design's pair: pale "▶ Chọn nguồn phát" and dark
+    /// "ⓘ Thông tin phim", both wired to the hero's
+    /// existing detail-open call (the one nav.movie
+    /// MovieRoute every hero in this file mints; the
+    /// detail screen is where playback and the favourite
+    /// toggle live — see the WS-B report for where the
+    /// removed hero favourite / browse entries remain
+    /// reachable). Its resolve task is ultraHeroBlock's
+    /// task verbatim, so heroDetail / heroBackdropURL /
+    /// heroRating publish identically.
     @ViewBuilder
     private var cinemaHeroBlock: some View {
         if let featured = heroMovie {
             ZStack(alignment: .bottomLeading) {
-                if let url = featured.posterURL {
-                    JoeBandImage(url: url, targetPixels: 1920,
-                                 anchor: 0.20, portraitMode: .blurField)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 668)
-                    .clipped()
-                }
-                if let url = featured.thumbURL, url != featured.posterURL {
-                    JoeBandImage(url: url, targetPixels: 1920,
-                                 anchor: 0.20, portraitMode: .blurField)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 668)
-                    .clipped()
-                }
-                if let heroBackdropURL {
-                    JoeBandImage(url: heroBackdropURL, targetPixels: 1920,
-                                 anchor: 0.20, portraitMode: .slice)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 668)
-                    .clipped()
-                }
+                // v2.1.1 (WS-I): the hero's backdrop is the
+                // focus-follows layer now — the shared
+                // controller's two-layer crossfade stack
+                // (JoeCinemaBackdropLayer, JoePrivateCinema
+                // .swift), fed from the focus memory by
+                // cinemaHeroFocusMoved(). The pre-WS-I
+                // three-stage JoeBandImage stack (poster
+                // field / thumb / TMDB slice of the FEATURED
+                // title only) is replaced by it: the
+                // controller's load ladder carries the same
+                // art (TMDB backdrop → thumb/poster, hedged)
+                // for EVERY focused title, the previous
+                // backdrop stays up while the next loads,
+                // and a title with no art leaves plain Ink
+                // under the scrims below. The hero task
+                // below still resolves the featured title's
+                // TMDB backdrop / detail / rating — the
+                // resolver reads them for the featured item.
+                JoeCinemaBackdropLayer(controller: cinemaBackdrop)
+                .frame(maxWidth: .infinity)
+                .frame(height: 485)
+                .clipped()
                 LinearGradient(stops: [
                     .init(color: .black.opacity(0.92), location: 0),
                     .init(color: .black.opacity(0.80), location: 0.45),
@@ -700,70 +1714,37 @@ struct JoePhimHome: View {
                     .init(color: .clear, location: 0.55),
                     .init(color: theme.bg, location: 1)
                 ], startPoint: .top, endPoint: .bottom)
-                VStack(alignment: .leading, spacing: 0) {
-                    if !heroGenres.isEmpty {
-                        Text(heroGenres.joined(separator: " · ").uppercased())
-                            .font(.system(size: 22, weight: .bold))
-                            .tracking(4)
-                            .foregroundStyle(theme.heroMeta)
-                            .lineLimit(1)
-                    }
-                    Text(featured.name)
-                        .font(.system(size: 84, weight: .semibold, design: .serif))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(2)
-                        .padding(.top, 10)
-                    if !cinemaHeroMetaLine(featured).isEmpty {
-                        Text(cinemaHeroMetaLine(featured))
-                            .font(.system(size: 27, weight: .medium))
-                            .foregroundStyle(theme.heroMeta)
-                            .lineLimit(1)
-                            .padding(.top, 12)
-                    }
-                    if let synopsis = heroDetail?.content, !synopsis.isEmpty {
-                        Text(synopsis)
-                            .font(.system(size: 26))
-                            .foregroundStyle(theme.text.opacity(0.92))
-                            .lineSpacing(6)
-                            .lineLimit(3)
-                            .frame(maxWidth: 1150, alignment: .leading)
-                            .padding(.top, 16)
-                    }
-                    HStack(spacing: 18) {
-                        Button {
-                            nav.movie = MovieRoute(provider: featured.provider,
-                                                   slug: featured.slug,
-                                                   name: featured.name,
-                                                   poster: featured.poster,
-                                                   year: featured.year)
-                        } label: {
-                            JoePrimaryLabel(title: "Xem ngay", systemImage: "play.fill")
-                        }
-                        .joeCardButton()
-                        .focused($heroPlayFocused)
-                        Button {
-                            toggleHeroFavorite(featured)
-                        } label: {
-                            JoeSecondaryLabel(title: isHeroFavorite(featured)
-                                              ? "♥ Đã thích" : "♡ Yêu thích")
-                        }
-                        .joeCardButton()
-                        Button {
-                            browseReturnTarget = .heroBrowse
-                            nav.browseOpen = true
-                        } label: {
-                            JoeSecondaryLabel(title: "Tất cả phim",
-                                              systemImage: "square.grid.2x2")
-                        }
-                        .joeCardButton()
-                        .focused($heroBrowseFocused)
-                    }
-                    .padding(.top, 26)
+                // v2.1.1: the top scrim — the stage now
+                // paints under the shell's transparent PC
+                // bar, so the art darkens toward the top
+                // edge and the bar's pills stay legible.
+                LinearGradient(stops: [
+                    .init(color: theme.bg.opacity(0.55), location: 0),
+                    .init(color: .clear, location: 0.35)
+                ], startPoint: .top, endPoint: .bottom)
+                // v2.1.1 (WS-I): the hero text follows the
+                // FOCUSED title (cinemaHeroResolved — the
+                // featured title before any focus), rendered
+                // from the focus derivation in body, so it
+                // changes in the same transaction as the
+                // focus move, ahead of the debounced
+                // backdrop swap.
+                if let resolved = cinemaHeroDisplayResolved() {
+                    cinemaHeroText(resolved)
                 }
-                .padding(.vertical, 40)
-                .frame(maxWidth: 1150, alignment: .leading)
             }
-            .frame(height: 668)
+            .frame(height: 485)
+            // v2.1.1 (FIX-6): the drawing's right-side
+            // tagline block — it was MISSING from the
+            // built hero (checked first-hand: no tagline
+            // text existed anywhere in this file); added
+            // here at the same geometry as the TVB /
+            // Torrent heroes built in the same round.
+            .overlay(alignment: .bottomTrailing) {
+                cinemaHeroTagline
+                    .padding(.trailing, 14)
+                    .padding(.bottom, 72)
+            }
             .defaultFocus($heroPlayFocused, true)
             .task(id: featured.id) {
                 heroDetail = nil
@@ -822,6 +1803,170 @@ struct JoePhimHome: View {
         }
     }
 
+    /// The Private Cinema hero's text block (v2.1.1, WS-B —
+    /// a named helper per FL-390, not an inline chain in
+    /// cinemaHeroBlock): eyebrow, typeset title, original
+    /// name, meta row, synopsis and the design's TWO
+    /// actions, in the design's order and scale.
+    /// v2.1.1 (WS-I): the block renders the RESOLVED item
+    /// — the focused title once focus has moved, the
+    /// featured title before that — and both actions open
+    /// that title through cinemaOpenHeroTarget (the
+    /// focused card's own tap mint per surface; for a
+    /// chain title that is the hero's existing detail-open
+    /// MovieRoute, exactly as the pre-WS-I hero wired its
+    /// featured title).
+    private func cinemaHeroText(_ resolved: CinemaHeroResolved) -> some View {
+        let item = resolved.item
+        return VStack(alignment: .leading, spacing: 0) {
+            // FIX-10a / ADJUDICATION F1: the many-rail
+            // drawing's hero eyebrow is the STATIC line
+            // below (the same pattern as the TVB /
+            // Torrent heroes' static eyebrows) — NOT the
+            // resolved title's genres.
+            Text("TỐI NAY, XEM GÌ? / TRANG CHỦ")
+                .font(.system(size: 15, weight: .medium))
+                .tracking(3.6)
+                .foregroundStyle(theme.heroMeta)
+                .lineLimit(1)
+            Text(item.title)
+                .font(.system(size: 72, weight: .medium, design: .serif))
+                .tracking(-3)
+                .foregroundStyle(theme.text)
+                .lineLimit(2)
+                .padding(.top, 12)
+            if case .movie(let movie, _) = resolved.target,
+               !movie.originName.isEmpty,
+               movie.originName != movie.name {
+                Text(movie.originName.uppercased())
+                    .font(.system(size: 20, weight: .medium))
+                    .tracking(6)
+                    .foregroundStyle(theme.heroMeta)
+                    .lineLimit(1)
+                    .padding(.top, 10)
+            }
+            cinemaHeroMetaRow(resolved)
+            if !item.synopsis.isEmpty {
+                Text(item.synopsis)
+                    .font(.system(size: 18))
+                    .foregroundStyle(theme.text.opacity(0.92))
+                    // FIX-12 / R7 C-F1: spec synopsis is
+                    // 18/400 at line 1.5 → 9 pt extra.
+                    .lineSpacing(9)
+                    .lineLimit(2)
+                    .frame(maxWidth: 850, alignment: .leading)
+                    // FIX-4 / C6: spec synopsis margin-top 10.
+                    .padding(.top, 10)
+            }
+            // FIX-4 / C6: spec actions gap 16.
+            // v2.1.1 (WS-I): BOTH actions open the FOCUSED
+            // title (cinemaOpenHeroTarget — the focused
+            // card's own tap mint); before any focus, the
+            // featured title, exactly as the pre-WS-I hero.
+            HStack(spacing: 16) {
+                Button {
+                    cinemaOpenHeroTarget(resolved.target)
+                } label: {
+                    JoePrimaryLabel(title: "Chọn nguồn phát", systemImage: "play.fill")
+                }
+                .joeCardButton()
+                .focused($heroPlayFocused)
+                Button {
+                    cinemaOpenHeroTarget(resolved.target)
+                } label: {
+                    JoeSecondaryLabel(title: "Thông tin phim",
+                                      systemImage: "info.circle")
+                }
+                .joeCardButton()
+                .focused($heroInfoFocused)
+            }
+            // FIX-4 / C6: spec actions margin-top 16.
+            .padding(.top, 16)
+        }
+        .padding(.leading, 13)
+        .padding(.vertical, 36)
+        .frame(maxWidth: 900, alignment: .leading)
+    }
+
+    /// The hero's right-side tagline block (v2.1.1,
+    /// FIX-6 — the Home/Phim drawings' block, shared by
+    /// all three PC heroes): the italic line over the
+    /// caps line with THIS home's real visible rail
+    /// count (cinemaVisibleRailTitles — the strip's own
+    /// list, so the number is the rails actually on the
+    /// page, never the drawing's sample count).
+    private var cinemaHeroTagline: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Text("Một buổi tối. Một thế giới khác.")
+                .font(.system(size: 28, weight: .regular, design: .serif))
+                .italic()
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+            HStack(spacing: 10) {
+                Text("\(cinemaVisibleRailTitles.count) DÃY PHIM")
+                Text("↓")
+                Text("TIẾP TỤC KHÁM PHÁ")
+            }
+            .font(.system(size: 14, weight: .medium))
+            .tracking(3)
+            .foregroundStyle(theme.heroMeta)
+            .lineLimit(1)
+        }
+    }
+
+    // FIX-10a: cinemaHeroEyebrow is DELETED — its only
+    // caller was cinemaHeroText, whose eyebrow is now
+    // the drawing's static line. heroGenres itself is
+    // NOT orphaned: the non-PC hero surfaces still read
+    // it (see heroGenres' other callers).
+
+    /// The Private Cinema hero meta row (v2.1.1): the meta
+    /// line (year · ★ · runtime, cinemaHeroMetaLine) plus
+    /// the design's quality chip when the record carries a
+    /// quality value. The design's age chip is absent — the
+    /// data model has no age field (RECONCILIATION-211:
+    /// omitted, never invented).
+    @ViewBuilder
+    private func cinemaHeroMetaRow(_ resolved: CinemaHeroResolved) -> some View {
+        // v2.1.1 (WS-I): the meta line is the resolved
+        // item's own (year · ★ · runtime for a chain
+        // title via cinemaHeroMetaLine, the strip's meta
+        // for the other surfaces); the quality chip rides
+        // only a chain title that carries a quality value.
+        let quality: String = {
+            switch resolved.target {
+            case .movie(let movie, _), .fileTrending(let movie):
+                return movie.quality
+            default:
+                return ""
+            }
+        }()
+        if !resolved.item.meta.isEmpty || !quality.isEmpty {
+            HStack(alignment: .center, spacing: 14) {
+                if !resolved.item.meta.isEmpty {
+                    Text(resolved.item.meta)
+                        // FIX-4 / C6: design meta 20/400.
+                        .font(.system(size: 20, weight: .regular))
+                        .foregroundStyle(theme.heroMeta)
+                        .lineLimit(1)
+                }
+                if !quality.isEmpty {
+                    Text(quality)
+                        // FIX-4 / C6: design badges 14/400.
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(theme.text)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.black.opacity(0.35)))
+                        .overlay(RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(theme.stroke, lineWidth: 1))
+                }
+            }
+            .padding(.top, 12)
+        }
+    }
+
     /// The Private Cinema hero meta line (v2.1.0): year ·
     /// ★ rating · runtime (the list item's runtime, the
     /// hero detail's behind it) — only the fields the
@@ -842,42 +1987,121 @@ struct JoePhimHome: View {
         return parts.joined(separator: " · ")
     }
 
-    /// The Private Cinema trending rail (v2.1.0): the shared
-    /// Rail headed by the spec's own title, its items numbered
-    /// (01, 02, … in a big serif numeral beside the card, in
-    /// theme.meta). The card itself is movieRail's own
-    /// PosterCard construction verbatim (same arguments and
-    /// badge behaviour), the tap is movieRail's own action,
-    /// and the focus binding copies movieRail's
-    /// .focused($focusedMovie, equals:) pattern, so focus
-    /// memory works identically.
-    private func cinemaTrendingRail(_ spec: JoeRailSpec) -> some View {
-        Rail(title: spec.title) {
-            ForEach(Array(spec.movies.enumerated()), id: \.offset) { pair in
-                Button {
-                    nav.movie = MovieRoute(
-                    provider: pair.element.provider, slug: pair.element.slug,
-                    name: pair.element.name, poster: pair.element.poster, year: pair.element.year) } label: {
-                    HStack(spacing: 14) {
-                        Text(String(format: "%02d", pair.offset + 1))
-                            .font(.system(size: 44, weight: .semibold, design: .serif))
-                            .foregroundStyle(theme.meta)
-                        PosterCard(
-                            title: pair.element.name,
-                            posterURL: pair.element.posterURL,
-                            tmdbId: pair.element.tmdbId,
-                            tmdbType: pair.element.tmdbType,
-                            meta: pair.element.cardMeta,
-                            badge: spec.badges ? Providers.badge(pair.element.provider) : nil,
-                            quality: pair.element.quality,
-                            timeBadge: pair.element.time,
-                            yearBadge: pair.element.year,
-                            form: .rail)
+    /// The Private Cinema trending rail (v2.1.0; v2.1.1
+    /// WS-B — design presentation): the heading follows the
+    /// drawing — "Trending" with the muted subtitle "Được
+    /// yêu thích hôm nay" beside it and the position counter
+    /// at the right (the spec's own data title stays the
+    /// rail's identity in railSpecs; only the PC
+    /// presentation follows the drawing). The rail body
+    /// mirrors the shared Rail's construction exactly (same
+    /// horizontal ScrollView + LazyHStack spacing/padding,
+    /// scrollClipDisabled, .focusSection) because the
+    /// heading is custom. Items are numbered 01, 02, …
+    /// INSIDE the poster (cinemaTrendingCard) — owner
+    /// ruling 2026-11-22: "Giữ số trong poster như bản
+    /// vẽ". The tap is movieRail's own action and the focus
+    /// binding copies movieRail's .focused($focusedMovie,
+    /// equals:) pattern, so focus memory works identically.
+    private func cinemaTrendingRail(_ railSpec: JoeRailSpec) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                Text("Trending")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(theme.text)
+                Text("Được yêu thích hôm nay")
+                    .font(.system(size: 22))
+                    .foregroundStyle(theme.meta)
+                Spacer()
+                Text(String(format: "%02d / %02d", 1, railSpec.movies.count))
+                    .font(.system(size: 22))
+                    .foregroundStyle(theme.meta)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 25) {
+                    ForEach(Array(railSpec.movies.enumerated()), id: \.offset) { pair in
+                        Button {
+                            nav.movie = MovieRoute(
+                            provider: pair.element.provider, slug: pair.element.slug,
+                            name: pair.element.name, poster: pair.element.poster, year: pair.element.year) } label: {
+                            cinemaTrendingCard(movie: pair.element,
+                                               index: pair.offset)
+                        }
+                        .joeCardButton()
+                        .focused($focusedMovie, equals: railSpec.scope + "|" + pair.element.id)
                     }
                 }
-                .joeCardButton()
-                .focused($focusedMovie, equals: spec.scope + "|" + pair.element.id)
+                .padding(.horizontal, 4)
+                // FIX-4 / C5: spec row padding 8 top / 9 bottom.
+                .padding(.top, 8)
+                .padding(.bottom, 9)
             }
+            .scrollClipDisabled()
+        }
+        .focusSection()
+        .padding(.leading, 14)
+    }
+
+    /// One Private Cinema trending card (v2.1.1): the
+    /// shared PosterCard construction verbatim (same
+    /// arguments and badge behaviour as movieRail's cards —
+    /// the quality badge rides the art's top-left inside
+    /// PosterCard, as drawn), plus the item's number as a
+    /// translucent serif numeral INSIDE the poster, at the
+    /// art's bottom-right corner (owner ruling 2026-11-22
+    /// 01:47 CST: numerals inside the poster, as drawn —
+    /// NOT beside the card). The numeral is a plain overlay
+    /// on the card: the PC card's art starts at the card's
+    /// top edge (cinemaBody, artInset 0) and spans
+    /// theme.cardArtH, so a top-trailing overlay padded
+    /// down by (cardArtH − numeral height) lands the
+    /// numeral inside the art's bottom-right. It carries
+    /// no focus treatment of its own — focus stays the
+    /// card's native treatment (no scaleEffect, no
+    /// hand-drawn focus layer).
+    private func cinemaTrendingCard(movie: Movie, index: Int) -> some View {
+        // v2.1.1 (WS-H): the PC local card at the design's
+        // 205×263 geometry (JoeCinemaPosterCard) — and NO
+        // provider badge: the drawing's Trending posters
+        // carry none (Lens C finding F1; the pre-WS-H card
+        // passed the shared PosterCard's badge through).
+        // The numeral stays INSIDE the poster, bottom-
+        // right, as drawn (owner ruling 2026-11-22).
+        // FIX-3: the drawing's Trending posters DO carry a
+        // type badge top-left ("PHIM LẺ" on the PNG's movie
+        // cards) — passed to the local card, which paints
+        // it in the F1 badge dressing in place of its
+        // quality chip on this rail only.
+        JoeCinemaPosterCard(movie: movie,
+                            typeBadge: cinemaTrendingTypeBadge(movie))
+        .overlay(alignment: .topTrailing) {
+            Text(String(format: "%02d", index + 1))
+                .font(.system(size: 46, weight: .bold, design: .serif))
+                .foregroundStyle(.white.opacity(0.88))
+                .shadow(color: .black.opacity(0.55), radius: 6, x: 0, y: 2)
+                .padding(.top, 263 - 58)
+                .padding(.trailing, 10)
+        }
+    }
+
+    /// FIX-3: the trending card's type badge text, from
+    /// the item's REAL type field — the sources spell it
+    /// series/phim-bo (PHIM BỘ) and single/phim-le/movie
+    /// (PHIM LẺ), the same spellings JoeBrowse.matchesType
+    /// accepts; the item's TMDB type stamp is the fallback
+    /// when the provider type carries none of those. Any
+    /// other value is unknown: the badge is omitted,
+    /// never guessed.
+    private func cinemaTrendingTypeBadge(_ movie: Movie) -> String? {
+        switch movie.type {
+        case "series", "phim-bo": return "PHIM BỘ"
+        case "single", "phim-le", "movie": return "PHIM LẺ"
+        default: break
+        }
+        switch movie.tmdbType {
+        case "tv": return "PHIM BỘ"
+        case "movie": return "PHIM LẺ"
+        default: return nil
         }
     }
 
@@ -1167,6 +2391,66 @@ struct JoePhimHome: View {
                                      movies: trendingMovies, badges: true),
                          at: insertAt)
         }
+        // v2.1.1 (DIAG-2050 §4, steps 3–4): the trending
+        // DATA FILE's rails (PhimStore.trendingFileSpecs —
+        // Movie placeholders, no provider slug) join the
+        // list here, so every home built on railSpecs
+        // renders them after the WatchStore rails (the
+        // homes render cw/tvbCw/fav/follow before this
+        // list) and before the genre / country / provider
+        // rails below this insertion point's tail. Dedupe
+        // is LIVE, against every spec already in the list
+        // (provider rails + the TMDB trending rail above):
+        // an item whose normalised name + year
+        // (Providers.filmKey over Providers.normalizeTitle)
+        // already appears in a published rail is dropped —
+        // the chain rails win, since they open natively.
+        // A file rail deduped to nothing is dropped whole.
+        if !phim.trendingFileSpecs.isEmpty {
+            var publishedKeys = Set<String>()
+            for spec in specs {
+                for m in spec.movies {
+                    publishedKeys.insert(Providers.filmKey(
+                        name: m.name, year: Providers.yearOf(m)))
+                    if !m.originName.isEmpty {
+                        publishedKeys.insert(Providers.filmKey(
+                            name: m.originName, year: Providers.yearOf(m)))
+                    }
+                }
+            }
+            let fileSpecs = phim.trendingFileSpecs.compactMap { spec -> JoeRailSpec? in
+                let kept = spec.movies.filter { m in
+                    if publishedKeys.contains(Providers.filmKey(
+                        name: m.name, year: Providers.yearOf(m))) {
+                        return false
+                    }
+                    if !m.originName.isEmpty, publishedKeys.contains(
+                        Providers.filmKey(name: m.originName,
+                                          year: Providers.yearOf(m))) {
+                        return false
+                    }
+                    return true
+                }
+                guard !kept.isEmpty else { return nil }
+                return JoeRailSpec(scope: spec.scope, title: spec.title,
+                                   movies: kept, badges: spec.badges)
+            }
+            // Insertion point: after the "Mới cập nhật"
+            // group and after the TMDB trending rail when
+            // it landed — the same neighbourhood the IDEA 5
+            // insertion above computes, recomputed here
+            // because that computation is scoped to its own
+            // `if` (and this block must also run when the
+            // TMDB rail is absent).
+            let headScopes: Set<String> = ["merged", "kkNew", "f4kNew",
+                                           "vsNew", "tpNew", "trending"]
+            var fileInsertAt = 0
+            while fileInsertAt < specs.count,
+                  headScopes.contains(specs[fileInsertAt].scope) {
+                fileInsertAt += 1
+            }
+            specs.insert(contentsOf: fileSpecs, at: fileInsertAt)
+        }
         // IDEA 7a: the Following rail is NOT a spec here.
         // v2.0.37 (cluster D): it used to be appended LAST,
         // after every catalogue / genre / country / provider
@@ -1358,7 +2642,13 @@ struct JoePhimHome: View {
     /// order (thumb-bearing sources only — UI-4's cost note),
     /// falling back to the first film's poster as the backdrop.
     private var heroMovie: Movie? {
-        let all = railSpecs.flatMap { $0.movies }
+        // v2.1.1: the trending file's placeholder movies are
+        // NEVER hero candidates — they carry no provider
+        // slug, so the hero's detail fetch could only fail
+        // against them. The pool is the catalogue specs only.
+        let all = railSpecs
+            .filter { !$0.scope.hasPrefix("fileTrending:") }
+            .flatMap { $0.movies }
         return all.first(where: { !$0.thumb.isEmpty }) ?? all.first
     }
 
@@ -2137,6 +3427,85 @@ struct JoePhimHome: View {
         }
     }
 
+    // MARK: - Trending file rails (v2.1.1, DIAG-2050 §4)
+
+    /// One trending DATA FILE rail (scope "fileTrending:…"):
+    /// the same Rail + PosterCard construction as movieRail,
+    /// except the tap — a placeholder Movie has no provider
+    /// slug, so the tap runs resolveFileTrendingTap instead
+    /// of minting a MovieRoute directly (DIAG-2050 §4 step
+    /// 5: a placeholder must never mint a detail route).
+    /// No provider badge: the placeholder's provider is
+    /// empty and Providers.badge("") would lie ("KK").
+    private func fileTrendingRail(_ spec: JoeRailSpec) -> some View {
+        Rail(title: spec.title) {
+            ForEach(spec.movies) { movie in
+                Button {
+                    Task { await resolveFileTrendingTap(movie) }
+                } label: {
+                    PosterCard(
+                        title: movie.name,
+                        posterURL: movie.posterURL,
+                        tmdbId: movie.tmdbId,
+                        tmdbType: movie.tmdbType,
+                        meta: movie.cardMeta,
+                        badge: nil,
+                        quality: movie.quality,
+                        timeBadge: movie.time,
+                        yearBadge: movie.year,
+                        form: .rail)
+                }
+                .joeCardButton()
+                .focused($focusedMovie, equals: spec.scope + "|" + movie.id)
+            }
+        }
+    }
+
+    /// The file-trending tap resolution (DIAG-2050 §4 step
+    /// 5), following the actor page's search-bridge pattern
+    /// (JoeActorPage.resolveAndOpen): search the providers
+    /// in Providers.priority order and open the matched
+    /// record's normal MovieRoute — chain-first, the phim
+    /// home's contract. The acceptance test here is
+    /// Providers.sameFilm (normalised name/origin equality
+    /// + year, the DIAG's name + year rule): the actor
+    /// page's stricter TMDB-id acceptance cannot run —
+    /// the file rail's TorMeta carries no TMDB id (see
+    /// PhimStore.trendingFileSpec). If NO chain record
+    /// matches, the tap falls through to the existing
+    /// torrent route keyed by the item's IMDb id (every
+    /// file item carries one — items without are skipped
+    /// at parse), exactly as the title opens from the
+    /// torrent home today. A tap is therefore never dead:
+    /// chain detail when the chain carries the title,
+    /// torrent detail otherwise.
+    private func resolveFileTrendingTap(_ movie: Movie) async {
+        for code in Providers.priority {
+            guard let results = try? await Providers.search(
+                code, keyword: movie.name)
+            else { continue }
+            if let hit = results.first(where: {
+                !$0.slug.isEmpty && Providers.sameFilm(
+                    $0, name: movie.name, origin: movie.originName,
+                    year: movie.year)
+            }) {
+                nav.movie = MovieRoute(
+                    provider: hit.provider, slug: hit.slug,
+                    name: hit.name, poster: hit.poster, year: hit.year)
+                return
+            }
+        }
+        guard !movie.imdbId.isEmpty else { return }
+        var meta = TorMeta()
+        meta.id = movie.imdbId
+        meta.imdbId = movie.imdbId
+        meta.type = movie.type
+        meta.name = movie.name
+        meta.poster = movie.poster
+        meta.year = movie.year
+        nav.tor = TorRoute(meta: meta, base: TorrentSettings.cinemeta)
+    }
+
 }
 
 // MARK: - Rail specs (file scope — shared with the poster wall)
@@ -2241,6 +3610,267 @@ func joeRailSpecs(phim: PhimStore, themeID: JoeThemeID) -> [JoeRailSpec] {
                                  movies: phim.tpSeries, badges: false))
     }
     return specs
+}
+
+// MARK: - Private Cinema local cards (v2.1.1, WS-H)
+//
+// The Many-Rails PC cards, built LOCALLY at the design's
+// geometry because the shared PosterCard's frame comes
+// from theme tokens (JoeTheme.swift — another workstream's
+// file): portrait art 205×263, CW landscape art 320×180,
+// title/meta below the art, NO provider badge, and the
+// PC family's value-only ivory focus ring on the art
+// (the PosterCard.cinemaBody pattern — no scaleEffect,
+// no hand-drawn focus layer). The WS-E precedent:
+// JoeSearchDiscoveryCard, built locally at 205:263 for
+// the same reason.
+
+/// The PC cards' shared art block: the image slot with
+/// the TMDB poster fallback leg (PosterCard's ladder,
+/// one level) and the placeholder glyph.
+private struct JoeCinemaArt: View {
+    let url: URL?
+    var tmdbId: String = ""
+    var tmdbType: String = ""
+    let width: CGFloat
+    let height: CGFloat
+    var fill: Bool = false
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.isFocused) private var isFocused
+
+    private var tmdbFallback: (() async -> URL?)? {
+        guard !tmdbId.isEmpty else { return nil }
+        let id = tmdbId, type = tmdbType
+        return {
+            await JoeImagePipeline.shared.tmdbPosterURL(
+                tmdbId: id, type: type)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+            JoeRemoteImage(url: url, targetPixels: 480, fit: !fill,
+                           slotClass: fill ? .any : .portrait,
+                           fallbackProvider: tmdbFallback) {
+                Image(systemName: "film")
+                    .font(.system(size: 64))
+                    .foregroundStyle(theme.meta.opacity(0.55))
+            }
+        }
+        .frame(width: width, height: height)
+        // FIX-4 / C1: spec image radius 6 (was 12).
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .strokeBorder(isFocused ? theme.focus : .clear,
+                          lineWidth: isFocused ? theme.ringWidth : 0))
+    }
+}
+
+/// One PC portrait poster card over a catalogue Movie
+/// (design rails 2–6): bare 205×263 art, quality chip
+/// inside the art's top-left (as drawn), title + meta
+/// below, no provider badge. FIX-3: when the caller
+/// passes a typeBadge (the Trending rail only), that
+/// badge occupies the art's top-left corner INSTEAD of
+/// the quality chip — the many-rails drawing's Trending
+/// posters carry the type badge in that corner.
+struct JoeCinemaPosterCard: View {
+    let movie: Movie
+    var typeBadge: String? = nil
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            JoeCinemaArt(url: movie.posterURL,
+                         tmdbId: movie.tmdbId, tmdbType: movie.tmdbType,
+                         width: 205, height: 263)
+                .overlay(alignment: .topLeading) {
+                    if let typeBadge {
+                        // The F1 badge language (Lens C F1 in
+                        // JoeTheme's PC quality badge): 11 pt
+                        // regular, r3 rect filled #0C1215E8,
+                        // padding 5×7, set top 11 / left 10.
+                        Text(typeBadge)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.badgeText)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 3)
+                                .fill(Color(red: 0.047, green: 0.070,
+                                            blue: 0.082).opacity(0.91)))
+                            .padding(.leading, 10)
+                            .padding(.top, 11)
+                    } else if !movie.quality.isEmpty {
+                        // FIX-4 / C1: the F1 dressing, same as
+                        // the type badge above — 11 pt regular,
+                        // r3 rect filled #0C1215E8, padding 5×7,
+                        // set top 11 / left 10 (was 19 pt bold
+                        // in a Capsule).
+                        Text(movie.quality)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.badgeText)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 3)
+                                .fill(Color(red: 0.047, green: 0.070,
+                                            blue: 0.082).opacity(0.91)))
+                            .padding(.leading, 10)
+                            .padding(.top, 11)
+                    }
+                }
+            Text(movie.name)
+                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 10)
+            if !movie.cardMeta.isEmpty {
+                Text(movie.cardMeta)
+                    .font(.system(size: theme.cardMetaSize))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+            }
+        }
+        .frame(width: 205, alignment: .leading)
+    }
+}
+
+/// One PC portrait poster card over a TVB snapshot title
+/// (design rails 7–8 on Home; the TVB home's five rails).
+struct JoeCinemaTVBCard: View {
+    let title: TVBTitle
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            JoeCinemaArt(url: title.posterURL, width: 205, height: 263)
+            Text(title.titleVi)
+                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 10)
+            if !title.cardMeta.isEmpty {
+                Text(title.cardMeta)
+                    .font(.system(size: theme.cardMetaSize))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+            }
+        }
+        .frame(width: 205, alignment: .leading)
+    }
+}
+
+/// One PC portrait poster card over a torrent meta
+/// (design rails 9–11 on Home).
+struct JoeCinemaTorCard: View {
+    let meta: TorMeta
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            JoeCinemaArt(url: meta.posterURL, width: 205, height: 263)
+            Text(meta.name)
+                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 10)
+            if !meta.year.isEmpty {
+                Text(meta.year)
+                    .font(.system(size: theme.cardMetaSize))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+            }
+        }
+        .frame(width: 205, alignment: .leading)
+    }
+}
+
+/// The PC Continue Watching card (design rail 1):
+/// landscape art 320×180 with the progress bar riding
+/// the art's bottom edge (the shared art block's own
+/// bar), title + episode line + remaining line below.
+struct JoeCinemaCwCard: View {
+    let entry: WatchStore.Entry
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            JoeCinemaArt(url: entry.posterURL, width: 320, height: 180,
+                         fill: true)
+                // FIX-4 / C7: the design's CW state badge,
+                // top-left in the F1 dressing (11 pt, r3,
+                // #0C1215E8, pad 5×7, top 11 / left 10). The
+                // episode suffix comes only from the entry's
+                // own episode number (WatchStore.episodeNumber
+                // — the entry's real ep / stream-id fields);
+                // no episode number, no suffix.
+                .overlay(alignment: .topLeading) {
+                    Text(cwStateBadge)
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.badgeText)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 3)
+                            .fill(Color(red: 0.047, green: 0.070,
+                                        blue: 0.082).opacity(0.91)))
+                        .padding(.leading, 10)
+                        .padding(.top, 11)
+                }
+                .overlay(alignment: .bottom) {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            // FIX-4 / C2: the spec's bar — 5 px
+                            // celadon (#D8E6BB) on the #0C1215C9
+                            // track (was white 0.25 / accentRed,
+                            // height 6).
+                            Rectangle().fill(Color(red: 0.047, green: 0.070,
+                                                   blue: 0.082).opacity(0.79))
+                            Rectangle().fill(Color(red: 0.847, green: 0.902,
+                                                   blue: 0.733))
+                                .frame(width: geo.size.width
+                                       * CGFloat(min(max(entry.fraction, 0), 1)))
+                        }
+                    }
+                    .frame(height: 5)
+                }
+            Text(entry.title)
+                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 10)
+            if !entry.epLabel.isEmpty {
+                Text(entry.epLabel)
+                    .font(.system(size: theme.cardMetaSize))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+            }
+            // FIX-4 / C2: the remaining line takes the
+            // muted meta treatment (14 pt, theme.meta) —
+            // was 21 pt in accentRed.
+            Text("Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
+                .font(.system(size: theme.cardMetaSize))
+                .foregroundStyle(theme.meta)
+                .lineLimit(1)
+                .padding(.top, 3)
+        }
+        .frame(width: 320, alignment: .leading)
+    }
+
+    /// FIX-4 / C7: the CW state badge's text — "ĐANG XEM",
+    /// plus " · TẬP <n>" only when the entry itself carries
+    /// an episode number.
+    private var cwStateBadge: String {
+        let ep = WatchStore.episodeNumber(of: entry)
+        return ep > 0 ? "ĐANG XEM · TẬP \(ep)" : "ĐANG XEM"
+    }
 }
 
 // CONVERGENCE RECORD (2026-11-15): this file's duplicated

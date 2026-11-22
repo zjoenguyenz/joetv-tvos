@@ -1032,8 +1032,15 @@ struct JoeWallHomeView: View {
     /// Tủ Phim's newest shelf — a band in F, folded into the
     /// merged rail in A — is inserted before its Phim lẻ shelf
     /// so D carries it too (UI-6's D-1 enumeration names it).
+    /// v2.1.1 (WS-G): the trending DATA FILE's shelves lead
+    /// this list (fileTrendingWallSections below), so on
+    /// screen they sit after the WatchStore shelves (Continue
+    /// Watching / TVB CW / Favourites / Following, rendered
+    /// above wallCategorySections) and before every provider
+    /// catalogue shelf — the same position discipline WS-B
+    /// gave the A/F/Ultra/PC phim home (DIAG-2050 §4).
     private var wallSections: [WallSection] {
-        var out: [WallSection] = []
+        var out: [WallSection] = fileTrendingWallSections
         for spec in joeRailSpecs(phim: phim, themeID: theme.id) {
             if spec.scope == "merged" || spec.scope == "chieuRap"
                 || spec.scope.hasPrefix("genre:") {
@@ -1052,27 +1059,151 @@ struct JoeWallHomeView: View {
         return out
     }
 
+    // MARK: Trending file wall sections (v2.1.1, WS-G)
+
+    /// The trending DATA FILE's shelves for the wall, deduped
+    /// LIVE against the whole published catalogue list —
+    /// WS-B's JoePhimHome discipline verbatim: an item whose
+    /// normalised name + year (Providers.filmKey over
+    /// Providers.normalizeTitle, originName key too when
+    /// carried) already appears in a published catalogue spec
+    /// is dropped — the chain shelves win, since they open
+    /// natively. A file shelf deduped to nothing is dropped
+    /// whole. (JoePhimHome also dedupes against its TMDB
+    /// trending rail; that rail is JoePhimHome-local state
+    /// with no counterpart on this wall, so the catalogue
+    /// list is the whole published set here.)
+    private var fileTrendingWallSections: [WallSection] {
+        dedupedFileTrendingSections(
+            published: joeRailSpecs(phim: phim, themeID: theme.id))
+    }
+
+    private func dedupedFileTrendingSections(
+        published: [JoeRailSpec]
+    ) -> [WallSection] {
+        guard !phim.trendingFileSpecs.isEmpty else { return [] }
+        var publishedKeys = Set<String>()
+        for spec in published {
+            for m in spec.movies {
+                publishedKeys.insert(Providers.filmKey(
+                    name: m.name, year: Providers.yearOf(m)))
+                if !m.originName.isEmpty {
+                    publishedKeys.insert(Providers.filmKey(
+                        name: m.originName, year: Providers.yearOf(m)))
+                }
+            }
+        }
+        return phim.trendingFileSpecs.compactMap { spec -> WallSection? in
+            let kept = spec.movies.filter { m in
+                if publishedKeys.contains(Providers.filmKey(
+                    name: m.name, year: Providers.yearOf(m))) {
+                    return false
+                }
+                if !m.originName.isEmpty, publishedKeys.contains(
+                    Providers.filmKey(name: m.originName,
+                                      year: Providers.yearOf(m))) {
+                    return false
+                }
+                return true
+            }
+            guard !kept.isEmpty else { return nil }
+            return WallSection(scope: spec.scope, title: spec.title,
+                               movies: kept)
+        }
+    }
+
+    /// One trending DATA FILE wall section (scope
+    /// "fileTrending:…"): the wall sections' own Rail +
+    /// PosterCard construction, except the tap — a
+    /// placeholder Movie has no provider slug, so the tap
+    /// runs resolveFileTrendingTap instead of minting a
+    /// MovieRoute directly (a placeholder must never mint a
+    /// detail route). No provider badge: the placeholder's
+    /// provider is empty and Providers.badge("") would lie
+    /// ("KK") — WS-B's fileTrendingRail rule.
+    @ViewBuilder
+    private func fileTrendingWallSection(_ section: WallSection) -> some View {
+        Rail(title: section.title) {
+            ForEach(section.movies) { movie in
+                Button {
+                    Task { await resolveFileTrendingTap(movie) }
+                } label: {
+                    PosterCard(
+                        title: movie.name,
+                        posterURL: movie.posterURL,
+                        tmdbId: movie.tmdbId,
+                        tmdbType: movie.tmdbType,
+                        meta: movie.cardMeta,
+                        badge: nil,
+                        quality: movie.quality,
+                        form: .rail)
+                }
+                .joeCardButton()
+                .focused($entryFocus, equals: "sec|" + section.scope + "|" + movie.id)
+            }
+        }
+    }
+
+    /// The file-trending tap resolution — WS-B's
+    /// resolveFileTrendingTap (JoePhimHome) carried over
+    /// verbatim, as this file has no equivalent resolver:
+    /// chain-first via Providers.search in Providers.priority
+    /// order, first hit passing Providers.sameFilm (normalised
+    /// name/origin + year) opens its normal MovieRoute; no
+    /// chain match falls through to the torrent route keyed
+    /// by the item's IMDb id. A tap is therefore never dead.
+    private func resolveFileTrendingTap(_ movie: Movie) async {
+        for code in Providers.priority {
+            guard let results = try? await Providers.search(
+                code, keyword: movie.name)
+            else { continue }
+            if let hit = results.first(where: {
+                !$0.slug.isEmpty && Providers.sameFilm(
+                    $0, name: movie.name, origin: movie.originName,
+                    year: movie.year)
+            }) {
+                nav.movie = MovieRoute(
+                    provider: hit.provider, slug: hit.slug,
+                    name: hit.name, poster: hit.poster, year: hit.year)
+                return
+            }
+        }
+        guard !movie.imdbId.isEmpty else { return }
+        var meta = TorMeta()
+        meta.id = movie.imdbId
+        meta.imdbId = movie.imdbId
+        meta.type = movie.type
+        meta.name = movie.name
+        meta.poster = movie.poster
+        meta.year = movie.year
+        nav.tor = TorRoute(meta: meta, base: TorrentSettings.cinemeta)
+    }
+
     @ViewBuilder
     private var wallCategorySections: some View {
         ForEach(wallSections) { section in
-            Rail(title: section.title) {
-                ForEach(section.movies) { movie in
-                    Button { nav.movie = MovieRoute(
-                        provider: movie.provider, slug: movie.slug,
-                        name: movie.name, poster: movie.poster,
-                        year: movie.year) } label: {
-                        PosterCard(
-                            title: movie.name,
-                            posterURL: movie.posterURL,
-                            tmdbId: movie.tmdbId,
-                            tmdbType: movie.tmdbType,
-                            meta: movie.cardMeta,
-                            badge: Providers.badge(movie.provider),
-                            quality: movie.quality,
-                            form: .rail)
+            if section.scope.hasPrefix("fileTrending:") {
+                fileTrendingWallSection(section)
+            } else {
+                Rail(title: section.title) {
+                    ForEach(section.movies) { movie in
+                        Button { nav.movie = MovieRoute(
+                            provider: movie.provider, slug: movie.slug,
+                            name: movie.name, poster: movie.poster,
+                            year: movie.year) } label: {
+                            PosterCard(
+                                title: movie.name,
+                                posterURL: movie.posterURL,
+                                tmdbId: movie.tmdbId,
+                                tmdbType: movie.tmdbType,
+                                meta: movie.cardMeta,
+                                badge: Providers.badge(movie.provider),
+                                quality: movie.quality,
+                                form: .rail)
+                        }
+                        .joeCardButton()
+                        .focused($entryFocus, equals: "sec|" + section.scope + "|" + movie.id)
                     }
-                    .joeCardButton()
-                    .focused($entryFocus, equals: "sec|" + section.scope + "|" + movie.id)
                 }
             }
         }

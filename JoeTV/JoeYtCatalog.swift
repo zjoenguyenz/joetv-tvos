@@ -687,7 +687,11 @@ final class JoeYtStore: ObservableObject {
                 try data.write(to: Self.cacheURL, options: .atomic)
                 return "cached \(file.generatedAt)"
             } catch {
-                return "writeFailed"
+                // v2.1.1 (WS-E, DIAG-2050 §1b): the error is
+                // carried into the log line below instead of
+                // being discarded — the pre-fix catch left the
+                // write failure permanently unexplained.
+                return "writeFailed \(error.localizedDescription)"
             }
         }.value
         switch outcome {
@@ -695,8 +699,10 @@ final class JoeYtStore: ObservableObject {
             DiagLog.write("YT", "refresh rejected (decode failed)")
         case "notNewer":
             DiagLog.write("YT", "refresh skipped (hosted not newer)")
-        case "writeFailed":
-            DiagLog.write("YT", "refresh failed (cache write) — keeping loaded copy")
+        case _ where outcome.hasPrefix("writeFailed"):
+            // v2.1.1 (WS-E): the line now carries the write
+            // error itself (see the catch in the task above).
+            DiagLog.write("YT", "refresh failed (cache write) — \(outcome.dropFirst(12)) — keeping loaded copy")
         default:
             DiagLog.write("YT", "refresh cached generatedAt=\(outcome.dropFirst(7)) (applies next launch)")
         }

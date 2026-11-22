@@ -24,6 +24,13 @@ struct JoeSettingsView: View {
     /// change), so focus stays on the tapped chip through the
     /// switch — never stranded.
     @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.ultra.rawValue
+    /// v2.1.1 (owner ruling): the DEFAULT theme — the theme the
+    /// app opens in. A SECOND persisted key, distinct from the
+    /// current-theme key above: the root applies it once at
+    /// launch (JoeTVApp); this screen's default-theme control
+    /// (defaultThemeBlock) writes it. Empty = unset.
+    @AppStorage("joetv.theme.default") private var defaultThemeIDRaw = ""
+    @FocusState private var defaultThemeChipFocused: String?
     @State private var addonURL: String = TorrentSettings.addonURL
     @State private var rdToken: String = TorrentSettings.rdToken
     @State private var torboxToken: String = TorrentSettings.torboxToken
@@ -79,12 +86,93 @@ struct JoeSettingsView: View {
     /// ScrollViewReader jump to the top of the page
     /// (owner order 2026-11-21).
     @State private var topScrollSignal = 0
+    /// v2.1.1 (Private Cinema Settings): the two-pane
+    /// composition's state — the selected left-rail category,
+    /// the rail's focus identity, the right pane's
+    /// Menu-to-top scroll signal and the top row's back
+    /// button focus. PC root only; the shared column never
+    /// reads them.
+    @State private var pcCategory: PCCategory = .appearance
+    @FocusState private var pcCategoryFocused: String?
+    @FocusState private var pcBackFocused: Bool
+    @State private var pcTopScrollSignal = 0
+
+    /// The Private Cinema Settings design's six categories
+    /// (delivery-joetv-Settings.png, left rail, in order).
+    private enum PCCategory: String, CaseIterable {
+        case appearance, playback, language, deviceData, info, debrid
+
+        var title: String {
+            switch self {
+            case .appearance: return "Giao diện"
+            case .playback: return "Phát lại"
+            case .language: return "Ngôn ngữ & phụ đề"
+            case .deviceData: return "Dữ liệu thiết bị"
+            case .info: return "Thông tin"
+            case .debrid: return "Tài khoản debrid"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .appearance: return "paintpalette"
+            case .playback: return "play"
+            case .language: return "captions.bubble"
+            case .deviceData: return "externaldrive"
+            case .info: return "info.circle"
+            case .debrid: return "link"
+            }
+        }
+    }
 
     private enum KKRouteStatus {
         case idle, probing, ok(ms: Int), down
     }
 
     var body: some View {
+        // v2.1.1: under Private Cinema this screen renders its
+        // designed two-pane composition (pcSettingsRoot below);
+        // every other theme keeps the shared column
+        // (sharedSettingsRoot) byte-for-byte in behaviour. The
+        // modifiers on this Group are the ones BOTH roots need
+        // (the log-export cover, the auto-save observers, the
+        // open-time probes) — they stood on the shared body
+        // before and are hoisted here unchanged so the PC root
+        // inherits the identical behaviour.
+        Group {
+            if theme.id == .privateCinema {
+                pcSettingsRoot
+            } else {
+                sharedSettingsRoot
+            }
+        }
+        // Item 5: the KK route probe runs when Settings opens.
+        .task { await runKKProbe() }
+        // TVB YouTube feature: the Gold row's state is a
+        // fresh presence read when Settings opens.
+        .task { await ytSession.refresh() }
+        // v2.0.33: the log-export cover (see logExportBlock /
+        // LogExportView at the end of this file).
+        .fullScreenCover(isPresented: $showLogExport) {
+            LogExportView()
+        }
+        .onDisappear { save(silent: true) }
+        .onChange(of: addonURL) { save() }
+        .onChange(of: rdToken) { save() }
+        .onChange(of: torboxToken) { save() }
+        .onChange(of: premiumizeToken) { save() }
+        .onChange(of: mfURL) { save() }
+        .onChange(of: mfEnabled) { save() }
+        .onChange(of: userAddonURL) { save() }
+        .onChange(of: sportsURL) { save() }
+        .onChange(of: subAddonURL) { save() }
+        .onChange(of: tmdbKey) { save() }
+    }
+
+    /// The shared Settings column — the ONE structure every
+    /// non-PC theme uses (v2.1.1: extracted verbatim from the
+    /// old `body`; composition, order, focus sections and the
+    /// exit/defaultFocus declarations are unchanged).
+    private var sharedSettingsRoot: some View {
         // v2.0.49 (item 7, fix round): the ScrollView sits
         // inside a ScrollViewReader so Menu can jump
         // straight to the top of the page (see
@@ -130,61 +218,18 @@ struct JoeSettingsView: View {
                     .focusSection()
 
                 Group {
-                field(title: "Link Torrentio của anh (tuỳ chọn)",
-                      hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
-                      text: $addonURL, id: "addon", secure: true, allowsPaste: true,
-                      status: addonFieldStatus,
-                      inForce: !TorrentSettings.addonURL
-                                   .trimmingCharacters(in: .whitespaces).isEmpty
-                               || TorrentSettings.effectiveBase != nil)
-                field(title: "Token Real-Debrid",
-                      hint: "Mã tài khoản Real-Debrid của anh — dùng để giải link torrent và dựng Torrentio khi chưa có link ở trên.",
-                      text: $rdToken, id: "rd", secure: true, allowsPaste: true,
-                      status: fieldStatus(stored: TorrentSettings.rdToken,
-                                          secret: true,
-                                          bundledFallback: BundledTokens.rdToken),
-                      inForce: !TorrentSettings.effectiveRDToken.isEmpty)
-                field(title: "Token TorBox",
-                      hint: "Mã tài khoản TorBox của anh (nếu dùng TorBox thay Real-Debrid).",
-                      text: $torboxToken, id: "tb", secure: true, allowsPaste: true,
-                      status: fieldStatus(stored: TorrentSettings.torboxToken,
-                                          secret: true,
-                                          bundledFallback: BundledTokens.torboxToken),
-                      inForce: !TorrentSettings.effectiveTorBoxToken.isEmpty)
-                field(title: "Token Premiumize",
-                      hint: "Mã tài khoản Premiumize của anh (nếu dùng Premiumize cạnh Real-Debrid/TorBox).",
-                      text: $premiumizeToken, id: "pm", secure: true, allowsPaste: true,
-                      status: fieldStatus(stored: TorrentSettings.premiumizeToken,
-                                          secret: true,
-                                          bundledFallback: BundledTokens.premiumizeToken),
-                      inForce: !TorrentSettings.effectivePremiumizeToken.isEmpty)
+                torrentioField
+                rdField
+                torboxField
+                premiumizeField
                 // v2.0.16: MediaFusion — the second torrent
                 // gateway. With its link pasted, the torrent
                 // detail pools both gateways' streams (ranked
                 // top-30) and the TV section gains the Thể Thao
                 // Torrent tab. The toggle is the kill-switch:
                 // off ⇒ MediaFusion is fully absent.
-                field(title: "Link MediaFusion (tuỳ chọn)",
-                      hint: "Dán link manifest MediaFusion của anh (trang cấu hình MediaFusion, đã gắn TorBox/Real-Debrid/Premiumize). Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
-                      text: $mfURL, id: "mf", secure: true, allowsPaste: true,
-                      status: fieldStatus(stored: TorrentSettings.mfURL,
-                                          secret: false,
-                                          bundledFallback: BundledTokens.mfURL,
-                                          bundledText: "Chưa điền — đang dùng link MediaFusion tích hợp sẵn ✓",
-                                          emptyText: "Chưa điền — chưa có link này thì MediaFusion không hoạt động"),
-                      inForce: !TorrentSettings.mfURL
-                                   .trimmingCharacters(in: .whitespaces).isEmpty
-                               || !BundledTokens.mfURL
-                                   .trimmingCharacters(in: .whitespaces).isEmpty)
-                Button {
-                    mfEnabled.toggle()
-                } label: {
-                    JoeSecondaryLabel(title: mfEnabled
-                                      ? "MediaFusion: đang bật ✓"
-                                      : "MediaFusion: đang tắt")
-                }
-                .joeCardButton()
-                .focused($mfToggleFocused)
+                mfField
+                mfToggleButton
                 // v2.0.45 (leg 3): the user-addon link —
                 // the owner's own Stremio addon as a
                 // library section + backup stream source.
@@ -199,15 +244,7 @@ struct JoeSettingsView: View {
                 // field is stored-only now — no bundled
                 // fallback, and "in force" means a stored
                 // link alone.
-                field(title: "Link Addon (tuỳ chọn)",
-                      hint: "Dán link manifest của addon Stremio anh muốn thêm. Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
-                      text: $userAddonURL, id: "useraddon", secure: true, allowsPaste: true,
-                      status: fieldStatus(stored: TorrentSettings.userAddonURL,
-                                          secret: false,
-                                          bundledFallback: nil,
-                                          emptyText: "Chưa điền — chưa có link addon nào"),
-                      inForce: !TorrentSettings.userAddonURL
-                                   .trimmingCharacters(in: .whitespaces).isEmpty)
+                userAddonField
                 // v2.0.24: the Thể Thao Torrent tab's primary
                 // source (Sony 2.3.37 parity). Empty = the
                 // Nuvio public instance; the owner can paste
@@ -219,70 +256,11 @@ struct JoeSettingsView: View {
                 // in full ("đang dùng: https://…"), like
                 // Sony's "Đang dùng" line — a plain public
                 // URL, not a credential, so it may render.
-                field(title: "Thể Thao Torrent — nguồn chính (Nuvio)",
-                      hint: "Để trống thì dùng Nuvio công cộng. Dán link khác khi anh tự dựng Nuvio (ví dụ trên PC của anh). Mục Thể Thao Torrent lấy nguồn này trước, MediaFusion dự phòng sau.",
-                      text: $sportsURL, id: "sports", secure: false, allowsPaste: true,
-                      status: fieldStatus(stored: TorrentSettings.sportsURL,
-                                          secret: false,
-                                          emptyText: "Chưa điền — đang dùng: \(TorrentSettings.sportsBase ?? TorrentSettings.sportsDefault)"),
-                      // The built-in public base is always in
-                      // force here (the status line prints it),
-                      // so the check is always earned.
-                      inForce: true)
-                field(title: "Addon phụ đề (OpenSubtitles)",
-                      hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
-                      text: $subAddonURL, id: "sub", secure: false,
-                      status: fieldStatus(stored: TorrentSettings.subAddonURL,
-                                          secret: false),
-                      // The editor itself opens on the built-in
-                      // OpenSubtitles v3 default when nothing is
-                      // stored (see the @State initialiser), so
-                      // the displayed value is the in-force one.
-                      inForce: !subAddonURL
-                                   .trimmingCharacters(in: .whitespaces).isEmpty)
-                field(title: "TMDB API Key",
-                      hint: "Chỉ nhập khi anh muốn dùng key TMDB riêng thay cho key tích hợp sẵn trong app.",
-                      text: $tmdbKey, id: "tmdb", secure: true,
-                      status: fieldStatus(stored: UserDefaults.standard.string(forKey: "tmdb_api_key") ?? "",
-                                          secret: true,
-                                          emptyText: "Chưa điền — đang dùng key tích hợp sẵn"),
-                      // Same condition as the green-dot row
-                      // under this field: a key (his own or the
-                      // bundled one) is live.
-                      inForce: !TMDBClient.apiKey.isEmpty)
-                // C-13 / §7.8: the field starts empty on a fresh
-                // install even though TMDB is already active via
-                // the bundled key — v1.8's "Tuỳ chọn" hint made it
-                // read as "not set up". Say which key is live.
-                if !TMDBClient.apiKey.isEmpty {
-                    HStack(spacing: 10) {
-                        Circle()
-                            .fill(JoeTheme.okGreen)
-                            .frame(width: 12, height: 12)
-                        Text(tmdbKey.trimmingCharacters(in: .whitespaces).isEmpty
-                             ? "TMDB: đang dùng key tích hợp sẵn ✓"
-                             : "TMDB: đang dùng key anh nhập ✓")
-                            .font(.system(size: 25))
-                            .foregroundStyle(theme.meta)
-                    }
-                }
+                sportsField
+                subAddonField
+                tmdbFieldBlock
 
-                HStack(spacing: 14) {
-                    if savedTick {
-                        Text("Đã lưu ✓")
-                            .font(.system(size: 25))
-                            .foregroundStyle(JoeTheme.okGreen)
-                    } else {
-                        Text("Mọi thay đổi tự lưu ngay khi nhập — không cần bấm Lưu.")
-                            .font(.system(size: 25))
-                            .foregroundStyle(theme.meta)
-                    }
-                }
-
-                Text("Trên Apple TV không có công tắc hầm trong app: đường truyền Việt Nam do profile Sing-box của hệ thống đảm nhiệm. Token chỉ lưu trong app này trên Apple TV của anh, không gửi đi đâu ngoài dịch vụ tương ứng.")
-                    .font(.system(size: 25))
-                    .foregroundStyle(theme.meta)
-                    .frame(maxWidth: 1200, alignment: .leading)
+                saveNoteBlock
                 }
                 .focusSection()
 
@@ -375,27 +353,10 @@ struct JoeSettingsView: View {
         // v2.0.5 (N1/N2): the section's DECLARED top element —
         // the first theme chip (the column's first focusable).
         .defaultFocus($themeChipFocused, JoeThemeID.billboard.rawValue)
-        // Item 5: the KK route probe runs when Settings opens.
-        .task { await runKKProbe() }
-        // TVB YouTube feature: the Gold row's state is a
-        // fresh presence read when Settings opens.
-        .task { await ytSession.refresh() }
-        // v2.0.33: the log-export cover (see logExportBlock /
-        // LogExportView at the end of this file).
-        .fullScreenCover(isPresented: $showLogExport) {
-            LogExportView()
-        }
-        .onDisappear { save(silent: true) }
-        .onChange(of: addonURL) { save() }
-        .onChange(of: rdToken) { save() }
-        .onChange(of: torboxToken) { save() }
-        .onChange(of: premiumizeToken) { save() }
-        .onChange(of: mfURL) { save() }
-        .onChange(of: mfEnabled) { save() }
-        .onChange(of: userAddonURL) { save() }
-        .onChange(of: sportsURL) { save() }
-        .onChange(of: subAddonURL) { save() }
-        .onChange(of: tmdbKey) { save() }
+        // v2.1.1: the open-time probes, the log-export cover,
+        // the disappear save and the auto-save observers that
+        // stood here now live on `body`'s Group, shared with
+        // the Private Cinema root — same behaviour, one home.
     }
 
     /// The "Giao diện" row (v2.0.0, UI-5): three chips, one per
@@ -424,6 +385,508 @@ struct JoeSettingsView: View {
                 .font(.system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1250, alignment: .leading)
+            defaultThemeBlock
+        }
+    }
+
+    /// v2.1.1 (owner ruling): the DEFAULT-theme control — the
+    /// theme the app OPENS in. A chip row in the same shape as
+    /// the current-theme picker above, writing the SECOND key
+    /// ("joetv.theme.default"); the root applies it once at
+    /// launch. The selected chip is the stored default, or —
+    /// while no default is stored — the current theme (which
+    /// is what the launch falls back to, so the row never
+    /// claims a default that is not in force). Its chips carry
+    /// their OWN @FocusState, so the Settings first-chip trap
+    /// (themeChipFocused / the billboard landing) is untouched.
+    private var defaultThemeBlock: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Giao diện mở app")
+                .font(.system(size: 29, weight: .bold))
+                .foregroundStyle(theme.text)
+            HStack(spacing: 14) {
+                ForEach(JoeThemeID.allCases, id: \.self) { id in
+                    Button {
+                        defaultThemeIDRaw = id.rawValue
+                    } label: {
+                        JoeChipLabel(title: id.pickerLabel,
+                                     selected: effectiveDefaultThemeID == id)
+                    }
+                    .joeCardButton()
+                    .focused($defaultThemeChipFocused, equals: id.rawValue)
+                }
+            }
+            Text("App mở lên sẽ vào thẳng giao diện này. Đổi giao diện hiện tại ở hàng trên không làm thay đổi lựa chọn này.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1250, alignment: .leading)
+        }
+    }
+
+    /// The default theme actually in force at launch: the
+    /// stored default when one is set and valid, else the
+    /// current theme (the root's fallback — see JoeTVApp).
+    private var effectiveDefaultThemeID: JoeThemeID {
+        JoeThemeID(rawValue: defaultThemeIDRaw)
+            ?? JoeThemeID(rawValue: themeIDRaw) ?? .ultra
+    }
+
+    // MARK: - Credential field rows (v2.1.1 extraction)
+    //
+    // The shared column's inline field(...) calls, extracted
+    // VERBATIM into named rows (FL-390 stepwise composition)
+    // so the Private Cinema two-pane composition renders the
+    // SAME rows — one definition per field, no copy. The
+    // shared column's order and content are unchanged.
+
+    private var torrentioField: some View {
+        field(title: "Link Torrentio của anh (tuỳ chọn)",
+              hint: "Dán nguyên link Torrentio đã gắn Real-Debrid/TorBox/Premiumize của anh. Để trống thì app tự dựng link từ token bên dưới.",
+              text: $addonURL, id: "addon", secure: true, allowsPaste: true,
+              status: addonFieldStatus,
+              inForce: !TorrentSettings.addonURL
+                           .trimmingCharacters(in: .whitespaces).isEmpty
+                       || TorrentSettings.effectiveBase != nil)
+    }
+
+    private var rdField: some View {
+        field(title: "Token Real-Debrid",
+              hint: "Mã tài khoản Real-Debrid của anh — dùng để giải link torrent và dựng Torrentio khi chưa có link ở trên.",
+              text: $rdToken, id: "rd", secure: true, allowsPaste: true,
+              status: fieldStatus(stored: TorrentSettings.rdToken,
+                                  secret: true,
+                                  bundledFallback: BundledTokens.rdToken),
+              inForce: !TorrentSettings.effectiveRDToken.isEmpty)
+    }
+
+    private var torboxField: some View {
+        field(title: "Token TorBox",
+              hint: "Mã tài khoản TorBox của anh (nếu dùng TorBox thay Real-Debrid).",
+              text: $torboxToken, id: "tb", secure: true, allowsPaste: true,
+              status: fieldStatus(stored: TorrentSettings.torboxToken,
+                                  secret: true,
+                                  bundledFallback: BundledTokens.torboxToken),
+              inForce: !TorrentSettings.effectiveTorBoxToken.isEmpty)
+    }
+
+    private var premiumizeField: some View {
+        field(title: "Token Premiumize",
+              hint: "Mã tài khoản Premiumize của anh (nếu dùng Premiumize cạnh Real-Debrid/TorBox).",
+              text: $premiumizeToken, id: "pm", secure: true, allowsPaste: true,
+              status: fieldStatus(stored: TorrentSettings.premiumizeToken,
+                                  secret: true,
+                                  bundledFallback: BundledTokens.premiumizeToken),
+              inForce: !TorrentSettings.effectivePremiumizeToken.isEmpty)
+    }
+
+    private var mfField: some View {
+        // v2.0.16: MediaFusion — the second torrent gateway.
+        // With its link pasted, the torrent detail pools both
+        // gateways' streams (ranked top-30) and the TV section
+        // gains the Thể Thao Torrent tab. The toggle below is
+        // the kill-switch: off ⇒ MediaFusion is fully absent.
+        field(title: "Link MediaFusion (tuỳ chọn)",
+              hint: "Dán link manifest MediaFusion của anh (trang cấu hình MediaFusion, đã gắn TorBox/Real-Debrid/Premiumize). Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
+              text: $mfURL, id: "mf", secure: true, allowsPaste: true,
+              status: fieldStatus(stored: TorrentSettings.mfURL,
+                                  secret: false,
+                                  bundledFallback: BundledTokens.mfURL,
+                                  bundledText: "Chưa điền — đang dùng link MediaFusion tích hợp sẵn ✓",
+                                  emptyText: "Chưa điền — chưa có link này thì MediaFusion không hoạt động"),
+              inForce: !TorrentSettings.mfURL
+                           .trimmingCharacters(in: .whitespaces).isEmpty
+                       || !BundledTokens.mfURL
+                           .trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+
+    private var mfToggleButton: some View {
+        Button {
+            mfEnabled.toggle()
+        } label: {
+            JoeSecondaryLabel(title: mfEnabled
+                              ? "MediaFusion: đang bật ✓"
+                              : "MediaFusion: đang tắt")
+        }
+        .joeCardButton()
+        .focused($mfToggleFocused)
+    }
+
+    private var userAddonField: some View {
+        // v2.0.45 (leg 3): the user-addon link — the owner's
+        // own Stremio addon as a library section + backup
+        // stream source. The field is the MF field's exact
+        // config (secure, paste); its focus id is "useraddon"
+        // — the design's "addon" id is already the Torrentio
+        // field's in this file, and two fields may not share
+        // one focus identity. v2.0.49: the bundled addon
+        // default was REMOVED by the owner's order
+        // (2026-11-21 22:41 CST), so the field is stored-only
+        // now — no bundled fallback, and "in force" means a
+        // stored link alone.
+        field(title: "Link Addon (tuỳ chọn)",
+              hint: "Dán link manifest của addon Stremio anh muốn thêm. Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
+              text: $userAddonURL, id: "useraddon", secure: true, allowsPaste: true,
+              status: fieldStatus(stored: TorrentSettings.userAddonURL,
+                                  secret: false,
+                                  bundledFallback: nil,
+                                  emptyText: "Chưa điền — chưa có link addon nào"),
+              inForce: !TorrentSettings.userAddonURL
+                           .trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+
+    private var sportsField: some View {
+        // v2.0.24: the Thể Thao Torrent tab's primary source
+        // (Sony 2.3.37 parity). Empty = the Nuvio public
+        // instance; the owner can paste a self-hosted
+        // instance's base instead. This slot never touches
+        // the MediaFusion link above — that one also feeds
+        // the movie path. v2.0.38 (Sony 2.3.41 parity, item 1):
+        // the empty status now shows the EFFECTIVE base in
+        // full ("đang dùng: https://…"), like Sony's "Đang
+        // dùng" line — a plain public URL, not a credential,
+        // so it may render.
+        field(title: "Thể Thao Torrent — nguồn chính (Nuvio)",
+              hint: "Để trống thì dùng Nuvio công cộng. Dán link khác khi anh tự dựng Nuvio (ví dụ trên PC của anh). Mục Thể Thao Torrent lấy nguồn này trước, MediaFusion dự phòng sau.",
+              text: $sportsURL, id: "sports", secure: false, allowsPaste: true,
+              status: fieldStatus(stored: TorrentSettings.sportsURL,
+                                  secret: false,
+                                  emptyText: "Chưa điền — đang dùng: \(TorrentSettings.sportsBase ?? TorrentSettings.sportsDefault)"),
+              // The built-in public base is always in force
+              // here (the status line prints it), so the check
+              // is always earned.
+              inForce: true)
+    }
+
+    private var subAddonField: some View {
+        field(title: "Addon phụ đề (OpenSubtitles)",
+              hint: "Mặc định là OpenSubtitles v3 chính thức — app kiểm tra phụ đề Việt cho mỗi phim torrent.",
+              text: $subAddonURL, id: "sub", secure: false,
+              status: fieldStatus(stored: TorrentSettings.subAddonURL,
+                                  secret: false),
+              // The editor itself opens on the built-in
+              // OpenSubtitles v3 default when nothing is stored
+              // (see the @State initialiser), so the displayed
+              // value is the in-force one.
+              inForce: !subAddonURL
+                           .trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+
+    private var tmdbFieldBlock: some View {
+        // Spacing 40 = the shared column's LazyVStack spacing
+        // these two rows carried as separate children before
+        // the extraction — the shared rendering is unchanged.
+        VStack(alignment: .leading, spacing: 40) {
+            field(title: "TMDB API Key",
+                  hint: "Chỉ nhập khi anh muốn dùng key TMDB riêng thay cho key tích hợp sẵn trong app.",
+                  text: $tmdbKey, id: "tmdb", secure: true,
+                  status: fieldStatus(stored: UserDefaults.standard.string(forKey: "tmdb_api_key") ?? "",
+                                      secret: true,
+                                      emptyText: "Chưa điền — đang dùng key tích hợp sẵn"),
+                  // Same condition as the green-dot row under
+                  // this field: a key (his own or the bundled
+                  // one) is live.
+                  inForce: !TMDBClient.apiKey.isEmpty)
+            // C-13 / §7.8: the field starts empty on a fresh
+            // install even though TMDB is already active via
+            // the bundled key — v1.8's "Tuỳ chọn" hint made it
+            // read as "not set up". Say which key is live.
+            if !TMDBClient.apiKey.isEmpty {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(JoeTheme.okGreen)
+                        .frame(width: 12, height: 12)
+                    Text(tmdbKey.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "TMDB: đang dùng key tích hợp sẵn ✓"
+                         : "TMDB: đang dùng key anh nhập ✓")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                }
+            }
+        }
+    }
+
+    private var saveNoteBlock: some View {
+        VStack(alignment: .leading, spacing: 40) {
+            HStack(spacing: 14) {
+                if savedTick {
+                    Text("Đã lưu ✓")
+                        .font(.system(size: 25))
+                        .foregroundStyle(JoeTheme.okGreen)
+                } else {
+                    Text("Mọi thay đổi tự lưu ngay khi nhập — không cần bấm Lưu.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                }
+            }
+            Text("Trên Apple TV không có công tắc hầm trong app: đường truyền Việt Nam do profile Sing-box của hệ thống đảm nhiệm. Token chỉ lưu trong app này trên Apple TV của anh, không gửi đi đâu ngoài dịch vụ tương ứng.")
+                .font(.system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1200, alignment: .leading)
+        }
+    }
+
+    // MARK: - Private Cinema Settings (v2.1.1, audit §7)
+    //
+    // The designed two-pane composition from
+    // delivery-joetv-Settings.png: top row ("← Quay lại" /
+    // centred "JOETV / KHÔNG GIAN CỦA BẠN" / clock), a left
+    // rail (eyebrow, serif "Cài đặt", tagline, the six
+    // categories — the selected row wears the filled Panel
+    // face), and a right pane showing the selected category's
+    // EXISTING rows. Every row the shared column carries stays
+    // reachable — the panes below render the same named blocks
+    // and field rows the shared column renders, mapped:
+    //   Giao diện          → theme CARDS + default-theme control
+    //   Phát lại           → preview toggle + KK route status
+    //   Ngôn ngữ & phụ đề  → OpenSubtitles addon field
+    //   Dữ liệu thiết bị   → history reset + DiagLog export
+    //   Thông tin          → source diagnostics + load signposts
+    //                        + version line
+    //   Tài khoản debrid   → torrent status + ALL credential
+    //                        fields + MF toggle + addon/sports/
+    //                        TMDB fields + TVB Gold sign-in row
+    //                        + the auto-save note
+    // (Mapping notes: the KK route row is a playback-delivery
+    // check, so it sits under Phát lại; TVB Gold is an account
+    // sign-in, so it sits with the other account rows under
+    // Tài khoản debrid. FL-390: the composition is built from
+    // these named stepwise helpers — no giant inline body.)
+
+    private var pcSettingsRoot: some View {
+        ScrollViewReader { proxy in
+            VStack(alignment: .leading, spacing: 36) {
+                pcTopRow
+                HStack(alignment: .top, spacing: 64) {
+                    pcLeftRail
+                        .focusSection()
+                    ScrollView(.vertical, showsIndicators: false) {
+                        pcCategoryPane
+                            .id("joePCSettingsTop")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .focusSection()
+                }
+            }
+            .onChange(of: pcTopScrollSignal) { _, _ in
+                proxy.scrollTo("joePCSettingsTop", anchor: .top)
+            }
+        }
+        .onChange(of: pcCategory) { _, _ in
+            pcTopScrollSignal += 1
+        }
+        // Menu mirrors the shared column's rule: from the
+        // declared first element (the Giao diện rail row) Menu
+        // returns to Phim; from anywhere else it first goes
+        // home inside the page (rail selection + pane to top).
+        .onExitCommand {
+            if pcCategoryFocused == PCCategory.appearance.rawValue {
+                nav.section = .phim
+            } else {
+                pcCategory = .appearance
+                pcTopScrollSignal += 1
+                pcCategoryFocused = PCCategory.appearance.rawValue
+            }
+        }
+        // The PC root's declared entry landing: the first
+        // rail row, exactly where the shared column declares
+        // its first theme chip.
+        .defaultFocus($pcCategoryFocused, PCCategory.appearance.rawValue)
+    }
+
+    private var pcTopRow: some View {
+        ZStack {
+            HStack(alignment: .center, spacing: 20) {
+                Button {
+                    nav.section = .phim
+                } label: {
+                    PCBackLabel()
+                }
+                .joeCardButton()
+                .focused($pcBackFocused)
+                Spacer()
+                PCClockLabel()
+            }
+            Text("JOETV / KHÔNG GIAN CỦA BẠN")
+                .font(.system(size: 22, weight: .semibold))
+                .tracking(3)
+                .foregroundStyle(theme.accent2)
+                .lineLimit(1)
+        }
+        .frame(height: 60)
+    }
+
+    private var pcLeftRail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("PRIVATE CINEMA")
+                .font(.system(size: 20, weight: .semibold))
+                .tracking(4)
+                .foregroundStyle(theme.accent2)
+            Text("Cài đặt")
+                .font(.system(size: 64, design: .serif))
+                .foregroundStyle(theme.text)
+                .padding(.top, 16)
+            Text("Một vài lựa chọn nhỏ.\nMột buổi xem đúng ý bạn.")
+                .font(.system(size: 24))
+                .foregroundStyle(theme.meta)
+                .padding(.top, 18)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(PCCategory.allCases, id: \.self) { category in
+                    Button {
+                        pcCategory = category
+                    } label: {
+                        PCCategoryRowLabel(title: category.title,
+                                           icon: category.icon,
+                                           selected: pcCategory == category)
+                    }
+                    .joeCardButton()
+                    .focused($pcCategoryFocused, equals: category.rawValue)
+                }
+            }
+            .padding(.top, 44)
+        }
+        .frame(width: 440, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var pcCategoryPane: some View {
+        switch pcCategory {
+        case .appearance: pcAppearancePane
+        case .playback: pcPlaybackPane
+        case .language: pcLanguagePane
+        case .deviceData: pcDevicePane
+        case .info: pcInfoPane
+        case .debrid: pcDebridPane
+        }
+    }
+
+    private func pcPaneHeader(_ title: String, _ subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundStyle(theme.text)
+            Text(subtitle)
+                .font(.system(size: 24))
+                .foregroundStyle(theme.meta)
+        }
+    }
+
+    private var pcAppearancePane: some View {
+        VStack(alignment: .leading, spacing: 32) {
+            pcPaneHeader("Giao diện",
+                         "Chọn không gian cho những câu chuyện bạn yêu thích.")
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 24),
+                                GridItem(.flexible(), spacing: 24)],
+                      alignment: .leading, spacing: 24) {
+                ForEach(JoeThemeID.allCases, id: \.self) { id in
+                    pcThemeCard(id)
+                }
+            }
+            defaultThemeBlock
+            Divider()
+                .overlay(theme.stroke)
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 24))
+                    .foregroundStyle(theme.meta)
+                Text("Private Cinema là một lựa chọn bổ sung, không thay thế Ultra. Đổi giao diện áp dụng ngay cho toàn app: trang chủ, trang phim, tìm kiếm và trình phát.")
+                    .font(.system(size: 24))
+                    .foregroundStyle(theme.meta)
+                    .frame(maxWidth: 1100, alignment: .leading)
+            }
+        }
+    }
+
+    /// One theme CARD (design: art header + name + a check on
+    /// the selected card, a "Chọn" affordance on the others).
+    /// The header is painted from the CANDIDATE theme's own
+    /// tokens (its surface gradient + its name in its accent)
+    /// — the app carries no per-theme still artwork, so the
+    /// drawing's photographic header is substituted by the
+    /// theme's own face, flagged in the WS-A report. The card
+    /// buttons write the current-theme key and carry the
+    /// SHARED themeChipFocused identity, so focus survives
+    /// the switch into the shared column exactly as a chip
+    /// tap there does.
+    private func pcThemeCard(_ id: JoeThemeID) -> some View {
+        let tokens = ThemeTokens.tokens(for: id)
+        let selected = themeIDRaw == id.rawValue
+        return Button {
+            themeIDRaw = id.rawValue
+        } label: {
+            PCThemeCardLabel(tokens: tokens, selected: selected,
+                             subtitle: pcThemeSubtitle(id))
+        }
+        .joeCardButton()
+        .focused($themeChipFocused, equals: id.rawValue)
+    }
+
+    private func pcThemeSubtitle(_ id: JoeThemeID) -> String {
+        switch id {
+        case .billboard: return "Đỏ thẫm, phong cách Billboard."
+        case .posterWall: return "Vàng trên đen, tương phản cao."
+        case .sourceBoard: return "Xanh lá, bảng nguồn."
+        case .ultra: return "Giao diện hiện có của JoeTV"
+        case .privateCinema: return "Điện ảnh, theo cách riêng."
+        }
+    }
+
+    private var pcPlaybackPane: some View {
+        VStack(alignment: .leading, spacing: 40) {
+            pcPaneHeader("Phát lại",
+                         "Cách app chạy trước và kiểm tra đường truyền khi phát.")
+            previewToggleBlock
+            tunnelStatusBlock
+        }
+    }
+
+    private var pcLanguagePane: some View {
+        VStack(alignment: .leading, spacing: 40) {
+            pcPaneHeader("Ngôn ngữ & phụ đề",
+                         "Nguồn phụ đề app kiểm tra cho mỗi phim.")
+            subAddonField
+        }
+    }
+
+    private var pcDevicePane: some View {
+        VStack(alignment: .leading, spacing: 40) {
+            pcPaneHeader("Dữ liệu thiết bị",
+                         "Dữ liệu app lưu trên Apple TV này và log chẩn đoán.")
+            historyBlock
+            logExportBlock
+        }
+    }
+
+    private var pcInfoPane: some View {
+        VStack(alignment: .leading, spacing: 40) {
+            pcPaneHeader("Thông tin",
+                         "Kiểm tra nguồn phim ngay trên máy này và thông tin bản dựng.")
+            diagnosticsBlock
+            signpostBlock
+            Text("Joe TV v\(JoeRootView.appVersion)")
+                .font(.system(size: 23))
+                .foregroundStyle(theme.meta)
+        }
+    }
+
+    private var pcDebridPane: some View {
+        VStack(alignment: .leading, spacing: 40) {
+            pcPaneHeader("Tài khoản debrid",
+                         "Token và link nguồn torrent — chỉ lưu trong app này trên Apple TV của anh.")
+            Text(torrentHeaderText)
+                .font(.system(size: 25))
+                .foregroundStyle(TorrentSettings.isConfigured
+                                 ? JoeTheme.okGreen : .orange)
+            torrentioField
+            rdField
+            torboxField
+            premiumizeField
+            mfField
+            mfToggleButton
+            userAddonField
+            sportsField
+            tmdbFieldBlock
+            tvbGoldBlock
+            saveNoteBlock
         }
     }
 
@@ -1001,6 +1464,129 @@ private struct JoeTVBGoldRowLabel: View {
         .overlay(Capsule().strokeBorder(
             isFocused ? theme.focus : theme.stroke,
             lineWidth: isFocused ? theme.ringWidth : 1.5))
+    }
+}
+
+// MARK: - Private Cinema Settings labels (v2.1.1)
+//
+// The PC two-pane composition's three label shapes. All
+// follow the house pattern (JoeTVBGoldRowLabel / PillLabel):
+// the label reads its OWN focus from the environment and
+// changes VALUES only (fill, stroke colour/width, text
+// colour) inside shapes that are always installed — no
+// scale, no hand-drawn competing ring, no structure
+// conditional on focus.
+
+/// The left rail's category row: icon + title on a rounded
+/// panel face. The SELECTED row wears the filled Panel face
+/// (theme.surface2 = #182024 under PC) per the drawing; an
+/// unselected row is transparent. Focus adds the inside
+/// theme.focus stroke, the JoeChipLabel recipe.
+private struct PCCategoryRowLabel: View {
+    let title: String
+    let icon: String
+    let selected: Bool
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 26, weight: .medium))
+            Text(title)
+                .font(.system(size: 28, weight: (selected || isFocused) ? .semibold : .regular))
+                .lineLimit(1)
+            Spacer()
+        }
+        .foregroundStyle(selected || isFocused ? theme.text : theme.meta)
+        .padding(.horizontal, 26)
+        .padding(.vertical, 18)
+        .frame(width: 440, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14)
+            .fill(selected ? theme.surface2 : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 14)
+            .strokeBorder(isFocused ? theme.focus : .clear,
+                          lineWidth: isFocused ? theme.ringWidth : 0))
+    }
+}
+
+/// The top row's "← Quay lại" (the drawing's plain text
+/// affordance): focus recolours the text to theme.focus —
+/// value-only, no shape change.
+private struct PCBackLabel: View {
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.left")
+                .font(.system(size: 24, weight: .medium))
+            Text("Quay lại")
+                .font(.system(size: 26))
+        }
+        .foregroundStyle(isFocused ? theme.focus : theme.text)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+}
+
+/// One theme card in the PC Giao diện pane: an art header
+/// painted from the CANDIDATE theme's own tokens (surface
+/// gradient + its name in its accent — the app carries no
+/// per-theme still artwork; see the flag in the WS-A
+/// report), over a Panel footer carrying the theme's name,
+/// its line, and — per the drawing — a check on the
+/// selected card or a "Chọn" affordance on the others.
+private struct PCThemeCardLabel: View {
+    let tokens: ThemeTokens
+    let selected: Bool
+    let subtitle: String
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                tokens.surfaceGradient
+                Text(tokens.id.pickerLabel)
+                    .font(.system(size: 44, weight: .heavy))
+                    .foregroundStyle(tokens.accent2)
+                    .padding(24)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 190)
+            HStack(alignment: .center, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(tokens.id.pickerLabel)
+                        .font(.system(size: 29, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                    Text(subtitle)
+                        .font(.system(size: 23))
+                        .foregroundStyle(theme.meta)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundStyle(theme.accent2)
+                } else {
+                    Text("Chọn")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Capsule().strokeBorder(theme.stroke, lineWidth: 1.5))
+                }
+            }
+            .padding(24)
+            .background(theme.surface2)
+        }
+        .background(RoundedRectangle(cornerRadius: 16).fill(theme.surface2))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16)
+            .strokeBorder(isFocused ? theme.focus : (selected ? theme.stroke : .clear),
+                          lineWidth: isFocused ? theme.ringWidth : 1.5))
     }
 }
 

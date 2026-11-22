@@ -76,8 +76,33 @@ enum CacheVideo {
     /// wrap of the same URL is the fallback.
     static func resolve(imdbId: String, season: Int, episode: Int) async -> String? {
         if imdbId.isEmpty { return nil }
+        // v2.1.1 (WS-E, parity J-25): the CDN contract
+        // demote (SourceHealth's CacheVideo section, ported
+        // from Sony 2.3.52). While demoted, resolve answers
+        // "not carried" without touching the network — the
+        // memo included, since handing out a memoised CDN
+        // URL would re-pay the fail-first tax the demote
+        // exists to remove. A granted re-probe whose
+        // resolution hands out NO CacheVideo CDN URL must
+        // release its own claim (see the returns below):
+        // the resolver it talks to never records against
+        // the CDN host, so without that release the claim
+        // would leak and the demote would become
+        // process-permanent.
+        let cvState = SourceHealth.cvState()
+        if cvState == .demoted { return nil }
+        let isProbe = cvState == .probe
         let memoKey = "\(imdbId)|\(season)|\(episode)"
-        if let cached = memoGet(memoKey) { return cached }
+        if let cached = memoGet(memoKey) {
+            // Gate R2 fix (Lens A MINOR 3): the memo-hit
+            // return releases a granted probe claim like
+            // the other two no-fetch exits below — this
+            // call hands the memoised URL to no fetcher of
+            // its own, so without the release the claim
+            // would sit until the 600 s stale backstop.
+            if isProbe { SourceHealth.cvReleaseProbe() }
+            return cached
+        }
         let path = season > 0
             ? "/stream/series/\(imdbId):\(season):\(max(1, episode)).json"
             : "/stream/movie/\(imdbId).json"
@@ -89,6 +114,9 @@ enum CacheVideo {
             { budget in
                 try await JoeHTTP.getJSON(url, timeout: budget)
             }) else {
+            // A probe that never reached a CDN URL releases
+            // its claim (see the demote note at entry).
+            if isProbe { SourceHealth.cvReleaseProbe() }
             return nil
         }
         let streams = JSON.arr(root, "streams") ?? []
@@ -102,7 +130,12 @@ enum CacheVideo {
             }
             if fallback == nil { fallback = streamURL }
         }
-        if let fallback { memoSet(memoKey, fallback) }
+        if let fallback {
+            memoSet(memoKey, fallback)
+        } else if isProbe {
+            // The probe handed out no CDN URL — release.
+            SourceHealth.cvReleaseProbe()
+        }
         return fallback
     }
 }

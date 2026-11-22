@@ -130,8 +130,15 @@ enum TpClient {
         // letterboxed into a band in every theme — and left
         // m.thumb "" for every TP record, so the detail band
         // had no thumb stage either.
-        m.poster = JSON.str(o, "thumbPathOriginal")
-        if m.poster.isEmpty { m.poster = JSON.str(o, "thumbPath300") }
+        // v2.1.1 (WS-E, POSTER-PERF-DIAG §9 fix 1): cards take
+        // the 200×300 variant FIRST — the same poster exists
+        // on the same CDN at ~15 KB (thumb_300) vs a ~402 KB
+        // median original (~27× the bytes for a 240 pt card).
+        // The original stays as this field's fallback. The
+        // landscape `thumb` leg below KEEPS the originals —
+        // it feeds the detail band, not cards.
+        m.poster = JSON.str(o, "thumbPath300")
+        if m.poster.isEmpty { m.poster = JSON.str(o, "thumbPathOriginal") }
         m.thumb = JSON.str(o, "posterPathOriginal")
         if m.thumb.isEmpty { m.thumb = JSON.str(o, "posterPath300") }
         m.year = JSON.str(o, "year")

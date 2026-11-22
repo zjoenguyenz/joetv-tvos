@@ -61,6 +61,14 @@ struct JoeSearchView: View {
     @State private var addonResults: [TorMeta] = []
     @State private var addonGroupName = ""
     @FocusState private var focusedAddon: String?
+    // v2.1.1 (WS-E): the Private Cinema discovery landing's
+    // items — the trending FILE's titles, flattened in file
+    // order (JoeTrendingFile already deduped across rails).
+    // Loaded once per appearance of the search layer, PC
+    // theme only, fail-open (an empty load simply leaves
+    // the landing without its grid).
+    @State private var discoveryItems: [TorMeta] = []
+    @FocusState private var focusedDiscovery: String?
 
     /// The top area's focus landing (v2.0.17): a letter-strip
     /// key or the Quay lại button — see JoeSearchKeyFocus.
@@ -79,7 +87,17 @@ struct JoeSearchView: View {
             // slab was the defect construction). A/F centre the
             // field row (maxW 1150, the render anatomy); D runs
             // it full width at the top of the wall.
-            if theme.id == .posterWall {
+            // v2.1.1 (WS-E): under .privateCinema the top of
+            // the surface is the design's composition — the
+            // serif headline + the ONE wide field (see
+            // pcHeadline / pcFieldRow below). The letter
+            // strip under it and every round behind it are
+            // unchanged: the design dresses the surface, it
+            // does not cut the function.
+            if theme.id == .privateCinema {
+                pcHeadline
+                pcFieldRow
+            } else if theme.id == .posterWall {
                 fieldRow
             } else {
                 HStack(spacing: 0) {
@@ -170,9 +188,23 @@ struct JoeSearchView: View {
             // v2.0.5 (N1, pair k): the results area is a
             // declared focus region, paired with the query
             // row's own section above.
-            resultsArea
-                .focusSection()
+            // v2.1.1 (WS-E): the PC LANDING state (no query,
+            // no round run yet) shows the design's discovery
+            // composition in this slot instead; the moment
+            // typing starts a round, the normal results area
+            // takes the slot back, untouched.
+            if pcLanding {
+                pcDiscoverySection
+                    .focusSection()
+            } else {
+                resultsArea
+                    .focusSection()
+            }
         }
+        // v2.1.1 (WS-E): the discovery grid's data — one
+        // trending-file load per search-layer appearance,
+        // PC only (loadDiscovery guards the theme itself).
+        .task { await loadDiscovery() }
         // v2.0.17: strip edits drive the type-ahead round —
         // the onChange that used to sit on the TextField.
         .onChange(of: query) { _, _ in scheduleTypeAhead() }
@@ -255,6 +287,192 @@ struct JoeSearchView: View {
         // movement between the regions is the engine's
         // geometric search, as it has been since v2.0.8.
         .focusSection()
+    }
+
+    // MARK: - Private Cinema landing (v2.1.1, WS-E)
+    //
+    // The design's Search composition (replit-set
+    // ...-15-delivery-joetv-Search.png) as the PC arm's
+    // LANDING state: serif headline, the wide field, and
+    // the "Đáng để khám phá" discovery grid fed by the
+    // trending file. The letter-strip instant search above
+    // is the same function every theme runs — this section
+    // only dresses the surface while no query exists.
+
+    /// True while the PC landing composition owns the
+    /// results slot: PC theme, the field empty, and no
+    /// round has run (or is running) yet.
+    private var pcLanding: Bool {
+        theme.id == .privateCinema
+            && query.trimmingCharacters(in: .whitespaces).isEmpty
+            && !searched && !roundActive && results.isEmpty
+    }
+
+    /// The headline row: the design's serif headline at
+    /// the left, its quiet tagline at the right.
+    private var pcHeadline: some View {
+        HStack(alignment: .bottom, spacing: 24) {
+            Text("Câu chuyện tiếp theo của bạn.")
+                // FIX-10b / F12: spec Search title = 63.
+                .font(.system(size: 63, weight: .regular, design: .serif))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text("Tìm một bộ phim. Bước vào một thế giới.")
+                .font(.system(size: 22))
+                .foregroundStyle(theme.meta)
+                .padding(.bottom, 10)
+        }
+    }
+
+    /// The wide field (the design's one full-width bar):
+    /// the same query display the other themes centre,
+    /// run full width here, with the design's TÌM KIẾM
+    /// chip inside the bar's right end. Typing still
+    /// happens on the letter strip below — the chip is
+    /// the design's furniture, not a second search path.
+    /// Quay lại keeps its place and its focus identity.
+    private var pcFieldRow: some View {
+        HStack(spacing: 18) {
+            HStack(spacing: 14) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 26, weight: .semibold))
+                Text(query.isEmpty
+                        ? "Tên phim, diễn viên, đạo diễn..." : query)
+                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("TÌM KIẾM")
+                    .font(.system(size: 15, weight: .semibold))
+                    .tracking(1.5)
+                    .foregroundStyle(theme.meta)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .overlay(RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(theme.stroke, lineWidth: 1.5))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .joeFieldChrome(focused: false)
+            Button {
+                nav.searchOpen = false
+            } label: {
+                JoeSecondaryLabel(title: "⟵ Quay lại")
+            }
+            .joeCardButton()
+            .focused($keyFocus, equals: .back)
+        }
+        .focusSection()
+    }
+
+    /// The discovery section: heading + the file's title
+    /// count at the right (the design's furniture, fed by
+    /// the real count), then the poster grid — eight
+    /// columns at the design's card geometry (205×263),
+    /// two rows of the trending file's first titles.
+    private var pcDiscoverySection: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(alignment: .firstTextBaseline, spacing: 24) {
+                    Text("Đáng để khám phá")
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                    Spacer(minLength: 0)
+                    if !discoveryItems.isEmpty {
+                        Text("\(discoveryItems.count) tựa phim")
+                            .font(.system(size: 22))
+                            .foregroundStyle(theme.meta)
+                    }
+                }
+                LazyVGrid(columns: Array(
+                            repeating: GridItem(.flexible(), spacing: 31),
+                            count: 8),
+                          alignment: .leading, spacing: 24) {
+                    ForEach(discoveryItems.prefix(16)) { meta in
+                        pcDiscoveryCard(meta)
+                    }
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 4)
+            }
+        }
+    }
+
+    private func pcDiscoveryCard(_ meta: TorMeta) -> some View {
+        Button { openDiscovery(meta) } label: {
+            JoeSearchDiscoveryCard(meta: meta)
+        }
+        .joeCardButton()
+        .focused($focusedDiscovery, equals: "discovery|" + meta.id)
+    }
+
+    /// Load the discovery items once (PC only, fail-open):
+    /// the trending file's rails flattened in file order.
+    private func loadDiscovery() async {
+        guard theme.id == .privateCinema, discoveryItems.isEmpty
+        else { return }
+        let rails = await JoeTrendingFile.loadRails()
+        discoveryItems = rails.flatMap { $0.metas }
+    }
+
+    /// A discovery tap (v2.1.1, WS-E): the chain-first
+    /// bridge of DIAG-2050 §4 — the same discipline the
+    /// phim home / actor page resolve foreign titles with.
+    /// A trending-file item carries no provider slug, so
+    /// it must never mint a detail route directly.
+    private func openDiscovery(_ meta: TorMeta) {
+        Task { await resolveDiscovery(meta) }
+    }
+
+    private func resolveDiscovery(_ meta: TorMeta) async {
+        // 1. The resident catalogue first (no network):
+        // an exact normalised-name match, the year
+        // agreeing whenever both sides state one.
+        if let hit = discoveryMatch(in: storeMovies(), for: meta) {
+            openChainMovie(hit)
+            return
+        }
+        // 2. The providers, in priority order, one search
+        // pass each, same acceptance rule.
+        for code in Providers.priority {
+            guard let results = try? await Providers.search(
+                code, keyword: meta.name) else { continue }
+            if let hit = discoveryMatch(in: results, for: meta) {
+                openChainMovie(hit)
+                return
+            }
+        }
+        // 3. No chain record carries the title: fall
+        // through to the torrent detail by the item's IMDb
+        // id (every file item carries one — items without
+        // are skipped at parse), exactly as the torrent
+        // home opens these metas today. A tap is never dead.
+        nav.tor = TorRoute(meta: meta, base: TorrentSettings.cinemeta)
+    }
+
+    /// The discovery acceptance rule: normalised-name
+    /// equality (the search round's own exact tier), the
+    /// year agreeing whenever both sides state one, and a
+    /// slug present — a record that cannot open is not a
+    /// match.
+    private func discoveryMatch(in movies: [Movie],
+                                for meta: TorMeta) -> Movie? {
+        let target = Providers.normalizeTitle(meta.name)
+        guard !target.isEmpty else { return nil }
+        return movies.first {
+            !$0.slug.isEmpty
+                && Providers.normalizeTitle($0.name) == target
+                && (meta.year.isEmpty || $0.year.isEmpty
+                    || $0.year == meta.year)
+        }
+    }
+
+    /// Mint the normal detail route for a resolved chain
+    /// record — resultCard's own construction.
+    private func openChainMovie(_ movie: Movie) {
+        nav.movie = MovieRoute(
+            provider: movie.provider, slug: movie.slug,
+            name: movie.name, poster: movie.poster,
+            year: movie.year)
     }
 
     /// Results: design F groups them by source (one rail per
@@ -796,6 +1014,90 @@ private final class JoeSearchSession: @unchecked Sendable {
 enum JoeSearchKeyFocus: Hashable {
     case key(String)
     case back
+}
+
+/// One discovery-grid card (v2.1.1, WS-E — the PC Search
+/// design's card): the bare poster at the design's card
+/// geometry (205×263 in the 1920-wide drawing ≈ the grid
+/// column's width at a 205:263 ratio), a type badge at the
+/// poster's top-left, then title and year under it, on the
+/// page background — the Private Cinema card anatomy
+/// (PosterCard.cinemaBody's shape), drawn locally because
+/// the shared card's width is a theme token this surface
+/// does not own. Focus is the house PC treatment: the art
+/// alone carries the ivory ring, value-only (clear at
+/// rest), no competing hand-drawn scale layer.
+///
+/// Data honesty: the trending file carries no quality and
+/// no genre for its items, so the badge states only what
+/// the data states — the type (SERIES for a series item;
+/// a movie item carries no badge rather than an invented
+/// "4K") — and the line under the title is the year alone
+/// (the design's "year · genre" with the genre absent from
+/// the data, never fabricated).
+private struct JoeSearchDiscoveryCard: View {
+    let meta: TorMeta
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            GeometryReader { geo in
+                ZStack(alignment: .topLeading) {
+                    JoeRemoteImage(url: meta.posterURL,
+                                   targetPixels: 480,
+                                   slotClass: .portrait) {
+                        ZStack {
+                            theme.surface2
+                            Text(String(meta.name.prefix(1)))
+                                .font(.system(size: 34, weight: .bold))
+                                .foregroundStyle(theme.text.opacity(0.7))
+                        }
+                    }
+                    .frame(width: geo.size.width,
+                           height: geo.size.width * 263 / 205)
+                    if meta.type == "series" {
+                        badge("SERIES")
+                    }
+                }
+            }
+            .aspectRatio(205.0 / 263.0, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isFocused ? theme.focus : .clear,
+                              lineWidth: isFocused ? theme.ringWidth : 0))
+            Text(meta.name)
+                // FIX-5 / Lens C Finding 3: the design's card title is 18/400.
+                .font(.system(size: 18))
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 10)
+            if !meta.year.isEmpty {
+                Text(meta.year)
+                    // FIX-10b / F12: spec metadata = 14.
+                    .font(.system(size: 14))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 4)
+            }
+        }
+    }
+
+    /// The design's badge: a small dark chip at the
+    /// poster's top-left (11 pt text, #0C1215 at ~90%).
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            // FIX-10b / F12: the rail-card badge dressing
+            // — 11 regular.
+            .font(.system(size: 11, weight: .regular))
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 3)
+                .fill(Color.black.opacity(0.88)))
+            .padding(.top, 10)
+            .padding(.leading, 10)
+    }
 }
 
 /// The Netflix-anatomy letter strip (v2.0.17 — the owner's

@@ -46,6 +46,20 @@ final class PhimStore: ObservableObject {
     /// every error was discarded by try?, so no on-device
     /// failure could ever be diagnosed.
     @Published var providerErrors: [String: String] = [:]
+    /// v2.1.1 (DIAG-2050 §4): the trending DATA FILE's rails
+    /// (JoeTrendingFile — the same self-pulled file the
+    /// torrent home consumes), converted to JoeRailSpec
+    /// Movie placeholders by trendingFileSpec(from:) below.
+    /// Published here; JoePhimHome inserts them after the
+    /// WatchStore rails and before the provider rails,
+    /// deduped against the provider rails by normalised
+    /// name + year at render time (the provider rails land
+    /// on their own schedule, so the dedupe must be live,
+    /// not a one-shot at load). Fail-open: an empty result
+    /// simply leaves the home exactly as it was.
+    @Published var trendingFileSpecs: [JoeRailSpec] = []
+    private var trendingFileInFlight = false
+    private var trendingFileAttemptedAt: Date?
 
     private var loadedAt: Date?
     private var loadTask: Task<Void, Never>?
@@ -87,6 +101,7 @@ final class PhimStore: ObservableObject {
     }
 
     func loadIfNeeded() {
+        loadTrendingFileIfNeeded()
         if loading { return }
         if let loadedAt, hasData,
            Date().timeIntervalSince(loadedAt) < 900 { return }
@@ -362,6 +377,68 @@ final class PhimStore: ObservableObject {
     /// Manual retry for the home's error state (a failed load
     /// leaves loadedAt nil, so loadIfNeeded runs again).
     func retry() { loadIfNeeded() }
+
+    /// v2.1.1 (DIAG-2050 §4, step 1): the trending file load
+    /// for the PHIM home — a second consumer of the existing
+    /// loader (the torrent home's store is the first). The
+    /// loader is fail-open with a last-good disk cache, so
+    /// this can never break the phim home: worst case it
+    /// returns [] and nothing publishes. Runs beside the
+    /// catalogue load, not inside it — the staged catalogue
+    /// machinery (watchdog, deadline, boxes) is untouched.
+    /// Attempt-throttled to the store's own 900 s freshness
+    /// window so section re-entries do not re-fetch.
+    private func loadTrendingFileIfNeeded() {
+        if trendingFileInFlight { return }
+        if let trendingFileAttemptedAt,
+           Date().timeIntervalSince(trendingFileAttemptedAt) < 900 { return }
+        trendingFileInFlight = true
+        trendingFileAttemptedAt = Date()
+        Task {
+            let rails = await JoeTrendingFile.loadRails()
+            if !rails.isEmpty {
+                trendingFileSpecs = rails.compactMap(
+                    Self.trendingFileSpec(from:))
+            }
+            trendingFileInFlight = false
+            DiagLog.write("PHIM", "trending file rails=\(trendingFileSpecs.count) items=\(trendingFileSpecs.reduce(0) { $0 + $1.movies.count })")
+        }
+    }
+
+    /// v2.1.1 (DIAG-2050 §4, step 2): convert one file rail
+    /// to a JoeRailSpec of Movie PLACEHOLDERS. A placeholder
+    /// carries NO provider slug — its slug is stamped with
+    /// its IMDb id purely so Movie.id is unique per item,
+    /// and JoePhimHome's fileTrendingRail intercepts every
+    /// tap on these scopes and resolves chain-first (provider
+    /// search by name + year) with a torrent-route fall-
+    /// through by IMDb id; the placeholder's slug/provider
+    /// are never minted into a detail route.
+    /// Field limits, stated plainly: TorMeta (what
+    /// JoeTrendingFile.parse publishes) does NOT carry the
+    /// file's tmdb_id or original_title — the parser drops
+    /// both — so the placeholder's tmdbId and originName
+    /// stay empty; name, year, poster, imdbId and type are
+    /// everything the rail actually carries.
+    nonisolated static func trendingFileSpec(
+        from rail: JoeTrendingRail
+    ) -> JoeRailSpec? {
+        let movies = rail.metas.map { meta in
+            var m = Movie()
+            m.name = meta.name
+            m.year = meta.year
+            m.poster = meta.poster
+            m.imdbId = meta.imdbId.isEmpty ? meta.id : meta.imdbId
+            m.type = meta.type
+            m.tmdbType = meta.type == "series" ? "tv" : "movie"
+            m.slug = m.imdbId
+            return m
+        }
+        guard !movies.isEmpty else { return nil }
+        return JoeRailSpec(scope: "fileTrending:" + rail.id,
+                           title: rail.title,
+                           movies: movies, badges: false)
+    }
 }
 
 /// Counting semaphore bounding the Phim launch burst: at most

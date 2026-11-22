@@ -125,6 +125,18 @@ struct JoeMovieDetail: View {
     /// same discipline as autoSource.
     @ObservedObject private var ytStore = JoeYtStore.shared
     @ObservedObject private var ytSession = JoeYtSession.shared
+    /// v2.1.1 (WS-C, DIAG-2050 §1c): the YouTube identity
+    /// surface's model, observed ONLY for the Private
+    /// Cinema trailer sign-in prompt (pcTrailerSignInPrompt):
+    /// its userCode / flowError / flowFinished drive that
+    /// prompt exactly as they drive the router's
+    /// JoeYtDeviceCodeView. No other theme reads it here.
+    @ObservedObject private var ytIdentity = JoeYtIdentity.shared
+    /// v2.1.1 (WS-C): a trailer attempt in THIS detail ended
+    /// in needsIdentity and the PC sign-in prompt is up.
+    /// Set only under .privateCinema (see startTrailerPreview);
+    /// every other theme keeps the preview's silent rule.
+    @State private var trailerSignInPrompt = false
     @State private var ytMode: JoeYtSourceMode = .auto
     @State private var ytChainPinned = false
 
@@ -151,11 +163,22 @@ struct JoeMovieDetail: View {
     /// with focusedFav exactly as the favourite button's is.
     @FocusState private var focusedFollow: Bool
     @FocusState private var focusedAlt: String?
+    /// v2.1.1 (WS-C): the PC trailer sign-in prompt's two
+    /// buttons ("retry" / "dismiss") share one binding —
+    /// the branches are mutually exclusive in time with
+    /// the retry button, exactly as in JoeYtDeviceCodeView.
+    @FocusState private var focusedSignIn: String?
     @FocusState private var focusedRetry: Bool
     /// Idea 20: the cast row's focus binding (member ids).
     @FocusState private var focusedCast: Int?
     /// Idea 21: the franchise strip's focus binding.
     @FocusState private var focusedFranchise: String?
+    /// v2.1.1 fix round (Lens C F2): the PC detail's
+    /// back row ("← Quay lại") focus binding. Read only
+    /// by the PC composition's back row; every other
+    /// theme never installs the button, so the binding
+    /// simply never lands there.
+    @FocusState private var focusedBack: Bool
 
     struct DirectorHolder: Identifiable {
         let id = UUID()
@@ -462,7 +485,14 @@ struct JoeMovieDetail: View {
             .onChange(of: focusedFranchise) { old, new in
                 focusLandingChanged(old: old, new: new)
             }
-        let playerStage = franchiseFocusStage
+        // v2.1.1 fix round (Lens C F2): the PC back row's
+        // binding joins the D1 reporting like every other
+        // binding on this screen — one stage, same shape.
+        let backFocusStage = franchiseFocusStage
+            .onChange(of: focusedBack) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let playerStage = backFocusStage
             .onChange(of: playerHolder?.id) { handlePlayerPresentation() }
         let ytPlayerStage = playerStage
             .onChange(of: nav.ytPlayer?.id) { handleYtPlayerPresentation() }
@@ -983,13 +1013,27 @@ struct JoeMovieDetail: View {
             ? 1 : 0
         let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
         return AnyView(ZStack {
+            // FIX-7 (2.1.1): for a TVB title both still
+            // legs take .slice via stillPortraitMode (the
+            // sharp still is the whole backdrop — no
+            // trailer ever covers it); non-TVB keeps
+            // .blurField exactly. Stacking order is the
+            // existing best-variant ladder: poster (Movie
+            // .poster, the provider's full poster field)
+            // under thumb (Movie.thumb — the landscape
+            // still; on Tủ Phim the posterPathOriginal, up
+            // to 3840×2160) under the TMDB w1280 backdrop
+            // on top. All legs at targetPixels 1920 (the
+            // detail backdrop bucket).
             if let url = m.posterURL {
                 JoeBandImage(url: url, targetPixels: 1920,
-                             anchor: 0.16, portraitMode: .blurField)
+                             anchor: 0.16,
+                             portraitMode: stillPortraitMode(nonTVB: .blurField))
             }
             if let url = m.thumbURL, url != m.posterURL {
                 JoeBandImage(url: url, targetPixels: 1920,
-                             anchor: 0.16, portraitMode: .blurField)
+                             anchor: 0.16,
+                             portraitMode: stillPortraitMode(nonTVB: .blurField))
             }
             if let u = tmdbBackdropURL {
                 JoeBandImage(url: u, targetPixels: 1920,
@@ -1061,13 +1105,21 @@ struct JoeMovieDetail: View {
             ? 1 : 0
         let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
         return AnyView(ZStack {
+            // FIX-7 (2.1.1): same TVB still rule as
+            // ultraBackdrop — .slice for TVB via
+            // stillPortraitMode, .blurField unchanged for
+            // every other title; same ladder (poster under
+            // thumb under the TMDB w1280 backdrop, all at
+            // targetPixels 1920).
             if let url = m.posterURL {
                 JoeBandImage(url: url, targetPixels: 1920,
-                             anchor: 0.16, portraitMode: .blurField)
+                             anchor: 0.16,
+                             portraitMode: stillPortraitMode(nonTVB: .blurField))
             }
             if let url = m.thumbURL, url != m.posterURL {
                 JoeBandImage(url: url, targetPixels: 1920,
-                             anchor: 0.16, portraitMode: .blurField)
+                             anchor: 0.16,
+                             portraitMode: stillPortraitMode(nonTVB: .blurField))
             }
             if let u = tmdbBackdropURL {
                 JoeBandImage(url: u, targetPixels: 1920,
@@ -1490,18 +1542,31 @@ struct JoeMovieDetail: View {
     /// preview over it) stays uncovered. Eyebrow = the
     /// genres joined " / " uppercased + the type word;
     /// a letterspaced serif title; the origin-name line;
-    /// the meta row; the synopsis; the SHARED action row;
-    /// then a text-only credits block — the first three
-    /// cast names as tappable buttons (the actorNameAction
-    /// pattern, JoeCinemaNameLabel dress), with NO photo
-    /// cast row under this theme. There is NO "ĐẠO DIỄN"
-    /// column: neither Detail, Movie nor TMDBInfo carries
-    /// a director field, so the column is omitted rather
-    /// than invented. Below the header: a Divider + the
-    /// "Chọn nguồn phát" heading over the shared
-    /// sourceChips and servers blocks, reused verbatim.
-    /// The genreChips row is NOT used here — the eyebrow
-    /// carries the genres in this design.
+    /// the meta row; the synopsis; then a text-only
+    /// credits block — the first three cast names as
+    /// tappable buttons (the actorNameAction pattern,
+    /// JoeCinemaNameLabel dress), with NO photo cast row
+    /// under this theme. There is NO "ĐẠO DIỄN" column:
+    /// neither Detail, Movie nor TMDBInfo carries a
+    /// director field, so the column is omitted rather
+    /// than invented. The genreChips row is NOT used
+    /// here — the eyebrow carries the genres in this
+    /// design.
+    /// v2.1.1 (WS-C, fidelity audit §3): the action row
+    /// is now the design's MINIMAL row (pcActionRow: the
+    /// shared pale playButton + a plain quality/sub text
+    /// + fav/follow as plain-text actions — no pills),
+    /// and below the header a Divider + the "Chọn nguồn
+    /// phát" heading over the NUMBERED source cards
+    /// (pcSourceBlock: Panel #182024 cards over the
+    /// shared sourceEntries membership, the chips' own
+    /// actions and focus binding) with the shared
+    /// servers(…) episode block under them — the
+    /// episode-first flow for series is exactly the
+    /// shipped one. Between header and source block sits
+    /// the trailer sign-in prompt (pcTrailerSignInPrompt,
+    /// DIAG-2050 §1c), present only after a trailer
+    /// attempt ended in needsIdentity.
     private func privateCinemaDetail(_ d: Detail) -> AnyView {
         let genres: [String] = d.categories
             .split(separator: ",")
@@ -1523,6 +1588,7 @@ struct JoeMovieDetail: View {
         if !d.movie.time.isEmpty { metaParts.append(d.movie.time) }
         let metaText: String = metaParts.joined(separator: " · ")
         return AnyView(VStack(alignment: .leading, spacing: 0) {
+            pcBackRow
             VStack(alignment: .leading, spacing: 0) {
                 Text(eyebrow)
                     .font(.system(size: 23, weight: .semibold))
@@ -1531,9 +1597,11 @@ struct JoeMovieDetail: View {
                     .lineLimit(1)
                     .padding(.top, 30)
                 Text(d.movie.name)
-                    .font(.system(size: 92, weight: .semibold,
+                    // FIX-10b / F5: spec type sheet — Detail
+                    // title 100/500, tracking −3.
+                    .font(.system(size: 100, weight: .medium,
                                   design: .serif))
-                    .tracking(6)
+                    .tracking(-3)
                     .foregroundStyle(theme.text)
                     .lineLimit(2)
                     .padding(.top, 16)
@@ -1555,32 +1623,41 @@ struct JoeMovieDetail: View {
                                 .lineLimit(1)
                         }
                         if !d.movie.quality.isEmpty {
+                            // FIX-10b / F7: the meta line's
+                            // quality chip takes the hero meta
+                            // chips' small dressing (cinema
+                            // HeroMetaRow in JoePhimHome):
+                            // 14 regular on black 0.35, r4,
+                            // stroke 1 — no oversized label.
                             Text(d.movie.quality)
-                                .font(.system(size: 21, weight: .semibold))
+                                .font(.system(size: 14, weight: .regular))
                                 .foregroundStyle(theme.text)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 4)
-                                .overlay(RoundedRectangle(cornerRadius: 6)
-                                    .strokeBorder(theme.stroke, lineWidth: 1.5))
+                                .background(RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.black.opacity(0.35)))
+                                .overlay(RoundedRectangle(cornerRadius: 4)
+                                    .strokeBorder(theme.stroke, lineWidth: 1))
                         }
                     }
                     .padding(.top, 12)
                 }
                 if hasSynopsis {
+                    // FIX-10b / F2: spec type sheet — Detail
+                    // synopsis 21/400, line height 1.55
+                    // (lineSpacing = 21 × 1.55 − 21 = 11.55),
+                    // max width 720; the drawing shows 3
+                    // lines at that width, so the limit is 3.
                     Text(synopsisText)
-                        .font(.system(size: 27))
+                        .font(.system(size: 21))
                         .foregroundStyle(theme.text.opacity(0.92))
-                        .lineSpacing(8)
-                        .lineLimit(4)
-                        .frame(maxWidth: 1150, alignment: .leading)
+                        .lineSpacing(11.55)
+                        .lineLimit(3)
+                        .frame(maxWidth: 720, alignment: .leading)
                         .padding(.top, 20)
                 }
-                HStack(spacing: 18) {
-                    playButton(d)
-                    favButton(d)
-                    followButton(d)
-                }
-                .padding(.top, 22)
+                pcActionRow(d)
+                    .padding(.top, 22)
                 if let tmdb, !tmdb.cast.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("DIỄN VIÊN")
@@ -1603,17 +1680,479 @@ struct JoeMovieDetail: View {
                 }
             }
             .focusSection()
+            pcTrailerSignInPrompt
             Divider()
                 .padding(.top, 38)
-            Text("Chọn nguồn phát")
-                .font(.system(size: 34, weight: .bold))
-                .foregroundStyle(theme.text)
+            pcSourceBlock(d)
                 .padding(.top, 20)
-            sourceChips
-                .padding(.top, 18)
-            servers(d, heading: "Chọn tập", headingSize: 30)
-                .padding(.top, 36)
         })
+    }
+
+    // MARK: - Private Cinema detail pieces (v2.1.1, WS-C)
+
+    /// v2.1.1 fix round (Lens C F2): the Detail drawing's
+    /// header row — "← Quay lại" at the top-left, over the
+    /// backdrop, no panel and no tab strip (the strip is
+    /// the mockup's shell nav; the shell carries it). The
+    /// row is the PC composition's FIRST focus section, so
+    /// focus reaches it by moving up from the header
+    /// section; the declared default focus stays on Play
+    /// (the covers stage's .defaultFocus is untouched),
+    /// and the row is a plain button — no trap.
+    private var pcBackRow: some View {
+        HStack(spacing: 0) {
+            Button {
+                pcBackTapped()
+            } label: {
+                PCDetailBackLabel()
+            }
+            .joeCardButton()
+            .focused($focusedBack)
+            Spacer(minLength: 0)
+        }
+        .focusSection()
+    }
+
+    /// The back row's press: the SAME dismiss the Menu
+    /// handler's closing branch performs (handleExitCommand
+    /// — kill the preview, clear nav.movie), preceded by
+    /// the standard press discipline every button on this
+    /// screen runs (rule D1: a press is owner input).
+    private func pcBackTapped() {
+        killPreviewOnInput()
+        nav.movie = nil
+    }
+
+    /// The design's plain quality/sub line beside the
+    /// play button ("Vietsub · 4K UHD" in the drawing):
+    /// built ONLY from the record's own fields — Movie
+    /// .lang (the payload's subtitle/audio descriptor)
+    /// and Movie.quality, each verbatim, empty parts
+    /// dropped. No per-source or expanded values exist
+    /// in the record, so none are invented here.
+    private func pcPlayInfoText(_ d: Detail) -> String {
+        joinParts([cleanField(d.movie.lang),
+                   cleanField(d.movie.quality)], " · ")
+    }
+
+    /// The PC minimal action row (fidelity audit §3):
+    /// ONE pale "▶ Xem ngay" — the shared playButton,
+    /// its action, disabled rule and $focusedPlay binding
+    /// untouched (under PC tokens JoePrimaryLabel's fill
+    /// is the pale accent2) — then the plain quality/sub
+    /// text, then favourite/follow as compact PLAIN-TEXT
+    /// actions (pcFavTextButton / pcFollowTextButton):
+    /// same actions and focus bindings as the pill
+    /// buttons, no pill faces. Nothing here paints over
+    /// the backdrop — the row is text and the one pale
+    /// button, so the 2.0.49 trailer contract (preview
+    /// playing behind uncovered UI) is unchanged.
+    private func pcActionRow(_ d: Detail) -> some View {
+        let infoText = pcPlayInfoText(d)
+        return HStack(spacing: 26) {
+            playButton(d)
+            if !infoText.isEmpty {
+                Text(infoText)
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+            }
+            pcFavTextButton(d)
+            pcFollowTextButton(d)
+        }
+    }
+
+    /// The favourite toggle as a plain-text action (PC
+    /// arm only): favButton's own action (favButtonAction)
+    /// and $focusedFav binding, the same label strings,
+    /// focus read value-only through the binding exactly
+    /// as favButton reads it for its ring — text colour
+    /// only, no capsule, no plate, geometry never moves.
+    private func pcFavTextButton(_ d: Detail) -> some View {
+        Button {
+            favButtonAction(d)
+        } label: {
+            Text(isFav ? "♥ Đã thích" : "♡ Yêu thích")
+                .font(.system(size: 25, weight: .semibold))
+                .foregroundStyle(focusedFav
+                    ? theme.focusTitle
+                    : (isFav ? JoeTheme.accentRed : theme.text))
+                .lineLimit(1)
+        }
+        .joeCardButton()
+        .focused($focusedFav)
+    }
+
+    /// The follow toggle as a plain-text action (PC arm
+    /// only): followButton's own action, $focusedFollow
+    /// binding, label strings and series-only rule
+    /// (isSeries) — followButton's @ViewBuilder condition
+    /// mirrored, so a movie shows no follow action here
+    /// either. Plain text, value-only focus colour.
+    @ViewBuilder
+    private func pcFollowTextButton(_ d: Detail) -> some View {
+        if isSeries(d) {
+            Button {
+                followButtonAction(d)
+            } label: {
+                Text(isFollowing(d) ? "Đang theo dõi" : "Theo dõi")
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(focusedFollow
+                        ? theme.focusTitle
+                        : (isFollowing(d)
+                           ? JoeTheme.accentRed : theme.text))
+                    .lineLimit(1)
+            }
+            .joeCardButton()
+            .focused($focusedFollow)
+        }
+    }
+
+    /// The PC source block (fidelity audit §3 — the
+    /// audit's worst Detail deviation): the "Chọn nguồn
+    /// phát" heading over the drawing's horizontal row
+    /// of NUMBERED Panel cards (pcSourceCardGrid: 3 per
+    /// row, wrapping) over the SAME membership the chips
+    /// render (sourceEntries), then the shared servers(…)
+    /// episode block — a series still picks its episode
+    /// first from the shipped chips, exactly as every
+    /// other composition. The heading's right-aligned
+    /// design note ("Chất lượng tốt nhất trước") is NOT
+    /// painted: the entry order is the source-priority
+    /// order (Tự động → YouTube → current → alternatives
+    /// → Torrent) and every entry shares the one record
+    /// quality — no per-source quality exists to sort
+    /// by, so the note would be a false claim. Flagged
+    /// in the WS-C report.
+    private func pcSourceBlock(_ d: Detail) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
+                Text("Chọn nguồn phát")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(theme.text)
+                if switching {
+                    ProgressView().tint(theme.text)
+                }
+                Spacer(minLength: 0)
+            }
+            pcSourceCardGrid(d)
+            // No torrentUnresolvedNote here: the Torrent
+            // card's own sub-line carries the entry state
+            // (pcCardSubLine) — the chip anatomies need
+            // the note because a chip has no state slot.
+            servers(d, heading: "Chọn tập", headingSize: 30)
+                .padding(.top, 20)
+        }
+    }
+
+    /// FIX-10b / F6: the drawing's source-card layout —
+    /// a HORIZONTAL row of cards, 3 per row, wrapping to
+    /// a second row when the membership carries more
+    /// (the app carries up to ~6 entries). Measured from
+    /// delivery-joetv-Detail.png (1920×1080): cards
+    /// ≈563×128 pt, gap 20 pt, side margins 95 pt — the
+    /// grid's three flexible columns with 20 pt gaps
+    /// reproduce that rhythm at this composition's own
+    /// width. The card anatomy (pcSourceCard) is
+    /// unchanged; the servers/episode block below the
+    /// block stays exactly as it was.
+    private func pcSourceCardGrid(_ d: Detail) -> some View {
+        LazyVGrid(columns: Array(
+                    repeating: GridItem(.flexible(), spacing: 20),
+                    count: 3),
+                  alignment: .leading, spacing: 20) {
+            ForEach(Array(sourceEntries.enumerated()),
+                    id: \.element.id) { index, entry in
+                pcSourceCard(entry, detail: d, index: index)
+            }
+        }
+        .focusSection()
+    }
+
+    /// One entry's card name — the same names the chips
+    /// and F's rows carry (sourceChip / sourceRowEntry).
+    private func pcCardName(_ entry: SourceEntry) -> String {
+        switch entry {
+        case .auto: return "Tự động"
+        case .youtube: return "YouTube"
+        case .current: return Providers.displayName(provider)
+        case .alternative(let code, _):
+            return Providers.displayName(code)
+        case .torrent: return "Torrent"
+        }
+    }
+
+    /// One entry's press — the CHIP actions verbatim
+    /// (autoChipAction / youtubeChipAction /
+    /// currentChipAction / alternativeChipAction /
+    /// torrentChipAction): each already kills the
+    /// preview itself (the D1 rule) and drives the same
+    /// state (autoSource / ytMode / ytChainPinned /
+    /// provider+slug switch / torrent handoff), so a
+    /// card tap selects exactly as a chip tap does.
+    private func pcCardAction(_ entry: SourceEntry) -> () -> Void {
+        switch entry {
+        case .auto: return { autoChipAction() }
+        case .youtube: return { youtubeChipAction() }
+        case .current: return { currentChipAction() }
+        case .alternative(let code, let altSlug):
+            return { alternativeChipAction(code: code, altSlug: altSlug) }
+        case .torrent: return { torrentChipAction() }
+        }
+    }
+
+    /// The card's sub/audio line, from REAL FIELDS ONLY:
+    /// the record's Movie.lang (subtitle/audio descriptor)
+    /// plus the entry's own shipped data line — for the
+    /// current source, its server names exactly as
+    /// servers(…) renders them (a server's name IS its
+    /// sub/audio descriptor in the payloads, so the lang
+    /// is not repeated beside it); for YouTube, the
+    /// match's episode count + tier label (sourceRowEntry's
+    /// own meta); for Torrent and an alternative, those
+    /// rows' shipped meta strings. A part the record
+    /// does not carry is omitted, never filled in.
+    private func pcCardSubLine(_ entry: SourceEntry,
+                               detail d: Detail) -> String {
+        var parts: [String] = []
+        switch entry {
+        case .current:
+            let serverNames = d.servers.map { $0.name }
+                .filter { !$0.isEmpty }
+            if !serverNames.isEmpty {
+                parts.append(serverNames.joined(separator: " · "))
+            } else if !d.movie.lang.isEmpty {
+                parts.append(d.movie.lang)
+            }
+        case .youtube:
+            if !d.movie.lang.isEmpty { parts.append(d.movie.lang) }
+            if let yt = ytMatch {
+                parts.append("\(yt.eps.count) tập")
+                if !yt.tierLabel.isEmpty { parts.append(yt.tierLabel) }
+            }
+        case .torrent:
+            parts.append("Nguồn thay thế tự động khi các nguồn trên đều chết")
+            // FIX-10b / F9: the entry STATE rides this
+            // sub-line now (the card's right slot is
+            // quality-only, as drawn) — appended only
+            // when the line does not already state it.
+            let stateText = pcTorrentStateText()
+            if !stateText.isEmpty
+                && !parts.joined(separator: " · ").contains(stateText) {
+                parts.append(stateText)
+            }
+        case .alternative:
+            if !d.movie.lang.isEmpty { parts.append(d.movie.lang) }
+            parts.append("Nguồn khác của phim này")
+        case .auto:
+            if !d.movie.lang.isEmpty { parts.append(d.movie.lang) }
+        }
+        return joinParts(parts, " · ")
+    }
+
+    /// The Torrent entry's state text (the F row's state
+    /// strings, verbatim): Cần token / Đang tìm mã
+    /// IMDb… / Chưa tìm được mã IMDb / Sẵn sàng.
+    private func pcTorrentStateText() -> String {
+        switch torrentEntryState {
+        case .notConfigured: return "Cần token"
+        case .pending: return "Đang tìm mã IMDb…"
+        case .unresolved: return "Chưa tìm được mã IMDb"
+        case .ready: return "Sẵn sàng"
+        }
+    }
+
+    /// The card's right-aligned quality text: the
+    /// record's Movie.quality verbatim for the chain
+    /// entries (the only quality the record carries —
+    /// per-source quality does not exist, so every chain
+    /// card honestly shows the same value, or nothing
+    /// when the field is empty). FIX-10b / F9: the slot
+    /// is quality-only, as drawn — the Torrent entry
+    /// returns EMPTY here (a torrent quality is not
+    /// known on this screen and is never invented); its
+    /// entry state rides the card's sub-line instead
+    /// (pcCardSubLine via pcTorrentStateText).
+    private func pcCardRightText(_ entry: SourceEntry,
+                                 detail d: Detail) -> String {
+        switch entry {
+        case .torrent:
+            return ""
+        case .auto, .youtube, .current, .alternative:
+            return cleanField(d.movie.quality)
+        }
+    }
+
+    /// One numbered PC source card: Panel #182024 face
+    /// (the design token, spelt out — the theme's
+    /// surface gradient is NOT the design's flat Panel),
+    /// big number, role label (ĐỀ XUẤT on the first card,
+    /// NGUỒN DỰ PHÒNG on the rest), the source name, the
+    /// sub/audio line under it (the Torrent card's
+    /// sub-line also carries its entry state), quality
+    /// right-aligned and the design's chevron. Focus is the
+    /// shipped construction: a Button over $focusedAlt
+    /// with the entry's own id (the chips' binding), the
+    /// label carrying JoeFocusRing inside the resting
+    /// stroke — no scale, no hand-drawn ring. The
+    /// unconfigured Torrent entry stays a non-focusable
+    /// status card, exactly as F's "Cần token" row.
+    @ViewBuilder
+    private func pcSourceCard(_ entry: SourceEntry, detail d: Detail,
+                              index: Int) -> some View {
+        let panel = Color(red: 0.094, green: 0.125, blue: 0.141)
+        let numberText = String(format: "%02d", index + 1)
+        let roleText = index == 0 ? "ĐỀ XUẤT" : "NGUỒN DỰ PHÒNG"
+        let nameText = pcCardName(entry)
+        let subText = pcCardSubLine(entry, detail: d)
+        let rightText = pcCardRightText(entry, detail: d)
+        let cardBase = HStack(alignment: .center, spacing: 24) {
+            Text(numberText)
+                .font(.system(size: 32, weight: .light,
+                              design: .serif))
+                .foregroundStyle(theme.meta)
+            Image(systemName: "play")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(theme.text)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(roleText)
+                    .font(.system(size: 19, weight: .semibold))
+                    .tracking(2)
+                    .foregroundStyle(index == 0
+                                     ? theme.heroMeta : theme.meta)
+                Text(nameText)
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                if !subText.isEmpty {
+                    Text(subText)
+                        .font(.system(size: 24))
+                        .foregroundStyle(theme.meta)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            // FIX-5 / Lens C Finding 2 (R2 C7 residual): the
+            // design's card right side is quality only — no
+            // "● Đang chọn" / "Sẵn sàng" state line. The
+            // underlying selection state and the card's
+            // action are untouched; role label + focus carry
+            // the design's treatment.
+            VStack(alignment: .trailing, spacing: 6) {
+                if !rightText.isEmpty {
+                    Text(rightText)
+                        .font(.system(size: 25, weight: .medium))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                }
+            }
+            Image(systemName: "chevron.right")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(theme.meta)
+        }
+        let cardPadded = cardBase
+            .padding(.horizontal, 30)
+            .padding(.vertical, 22)
+        let cardFramed = cardPadded
+            .frame(maxWidth: .infinity, alignment: .leading)
+        let cardFilled = cardFramed
+            .background(RoundedRectangle(cornerRadius: theme.rField)
+                .fill(panel))
+        let card = cardFilled
+            .overlay(RoundedRectangle(cornerRadius: theme.rField)
+                .strokeBorder(theme.stroke, lineWidth: 1.5))
+        if case .torrent = entry,
+           case .notConfigured = torrentEntryState {
+            card
+        } else {
+            Button(action: pcCardAction(entry)) {
+                card.overlay(JoeFocusRing(
+                    shape: RoundedRectangle(cornerRadius: theme.rField)))
+            }
+            .joeCardButton()
+            .focused($focusedAlt, equals: entry.id)
+        }
+    }
+
+    /// The trailer sign-in prompt (DIAG-2050 §1c, PC arm
+    /// only): when a trailer attempt in this detail ends
+    /// in needsIdentity, the preview's silent rule would
+    /// leave the owner with a dead headline feature and
+    /// no signal — so the PC composition surfaces the
+    /// EXISTING device-code activation here instead.
+    /// Boundary (flagged in the WS-C report): the
+    /// router's own surface, JoeYtDeviceCodeView, is
+    /// built around a JoeYtPlayRequest (its footer,
+    /// resume-on-approval and Menu-cancel all belong to
+    /// a pending EPISODE playback) and cannot be
+    /// presented honestly for a trailer attempt from
+    /// this file — so this prompt mirrors its pattern
+    /// (same heading family, code block, error + retry,
+    /// spinner) over JoeYtIdentity's public API, driven
+    /// by the same published state. It is in-flow text
+    /// and buttons — NO panel over the backdrop, so the
+    /// trailer area stays uncovered. Ordinary preview
+    /// failures never reach here: only the
+    /// trailer-needs-identity ending sets the flag (see
+    /// startTrailerPreview).
+    @ViewBuilder
+    private var pcTrailerSignInPrompt: some View {
+        if trailerSignInPrompt {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Trailer cần đăng nhập YouTube")
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(theme.text)
+                Text("Trailer phát qua YouTube nên cần anh duyệt mã kích hoạt một lần trên điện thoại — không gõ mật khẩu trên TV. Duyệt xong, trailer của các phim sau tự chạy.")
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+                    .frame(maxWidth: 1150, alignment: .leading)
+                if let code = ytIdentity.userCode {
+                    Text("MÃ KÍCH HOẠT")
+                        .font(.system(size: 22, weight: .semibold))
+                        .tracking(2)
+                        .foregroundStyle(theme.meta)
+                    Text(code)
+                        .font(.system(size: 54, weight: .heavy,
+                                      design: .monospaced))
+                        .foregroundStyle(theme.text)
+                    Text("Mở \(ytIdentity.verificationURL) trên iPhone → nhập mã này → duyệt bằng tài khoản của anh.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                } else if let error = ytIdentity.flowError {
+                    Text(error)
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.text)
+                        .frame(maxWidth: 1150, alignment: .leading)
+                    Button {
+                        ytIdentity.beginDeviceCodeFlow()
+                    } label: {
+                        JoeSecondaryLabel(title: "Thử lại")
+                    }
+                    .joeCardButton()
+                    .focused($focusedSignIn, equals: "retry")
+                } else {
+                    HStack(spacing: 12) {
+                        ProgressView().tint(theme.text)
+                        Text("Đang lấy mã kích hoạt…")
+                            .font(.system(size: 25))
+                            .foregroundStyle(theme.meta)
+                    }
+                }
+                Button {
+                    ytIdentity.cancelDeviceCodeFlow()
+                    trailerSignInPrompt = false
+                } label: {
+                    JoeSecondaryLabel(title: "Để sau")
+                }
+                .joeCardButton()
+                .focused($focusedSignIn, equals: "dismiss")
+            }
+            .padding(.top, 26)
+            .focusSection()
+            .onChange(of: ytIdentity.flowFinished) { _, finished in
+                if finished == true { trailerSignInPrompt = false }
+            }
+        }
     }
 
     /// F's source rows: one row per source family, over the
@@ -2099,6 +2638,31 @@ private struct JoeCinemaNameLabel: View {
     }
 }
 
+/// The PC detail back row's label (v2.1.1 fix round,
+/// Lens C F2): the drawing's plain "← Quay lại" text —
+/// the same element the PC Settings top row carries
+/// (PCBackLabel, JoeSettings.swift): arrow glyph +
+/// "Quay lại", focus recolours the text to theme.focus,
+/// value-only — no plate, no ring of its own, no scale;
+/// the button's native kit treatment is the focus
+/// rendering, exactly as on the Settings row.
+private struct PCDetailBackLabel: View {
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.left")
+                .font(.system(size: 24, weight: .medium))
+            Text("Quay lại")
+                .font(.system(size: 26))
+        }
+        .foregroundStyle(isFocused ? theme.focus : theme.text)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+}
+
     // MARK: - Nguồn phát membership (ONE shared model, v2.0.5)
 
     /// ONE membership model for the Nguồn phát block
@@ -2496,6 +3060,21 @@ private struct JoeCinemaNameLabel: View {
         (tmdb?.backdropURL).flatMap { $0.isEmpty ? nil : URL(string: $0) }
     }
 
+    /// FIX-7 (2.1.1): the portrait treatment for one
+    /// backdrop leg. A TVB title (route.tvb != nil — the
+    /// same discriminator runPreview's FIX-7 guard uses)
+    /// gets .slice ALWAYS: its backdrop is a still (no
+    /// trailer preview ever starts), and the sharp
+    /// full-bleed slice is the WS-D path — the .blurField
+    /// / .treatment blurred field must never smear a TVB
+    /// still. A non-TVB title keeps its surface's
+    /// existing mode byte-for-byte (the parameter).
+    private func stillPortraitMode(
+        nonTVB: JoeBandImage.PortraitMode
+    ) -> JoeBandImage.PortraitMode {
+        route.tvb != nil ? .slice : nonTVB
+    }
+
     /// The band exists whenever ANY band art can paint: the
     /// TMDB backdrop, the provider thumb, or — v2.0.1 — the
     /// poster itself (the portrait treatment is a real band,
@@ -2546,8 +3125,13 @@ private struct JoeCinemaNameLabel: View {
             let bandStack = ZStack {
                 Color.black.opacity(0.45)
                 if let url = movie.posterURL {
+                    // FIX-7 (2.1.1): a TVB title's poster leg
+                    // takes .slice (sharp still, no trailer
+                    // covers the band); non-TVB keeps the
+                    // .treatment construction exactly.
                     JoeBandImage(url: url, targetPixels: 1920,
-                                 anchor: 0.16, portraitMode: .treatment)
+                                 anchor: 0.16,
+                                 portraitMode: stillPortraitMode(nonTVB: .treatment))
                 }
                 if let url = movie.thumbURL {
                     JoeBandImage(url: url, targetPixels: 1920,
@@ -4098,12 +4682,37 @@ private struct JoeCastCellLabel: View {
     // torrent detail, whose backdrop is a STATIC image
     // by the 2026-11-21 22:39 ruling (no preview
     // machinery for torrent titles, full stop).
+    // FIX-7 (2.1.1, owner 2026-11-22 02:40 CST): TVB
+    // titles (route.tvb != nil) never reach the trailer
+    // attempt either — runPreview returns at its FIX-7
+    // guard and the backdrop stays the title's
+    // highest-quality still (see stillPortraitMode).
 
     private func runPreview() async {
         // The same ~1.5 s dwell as the pre-resolve: an
         // owner who backs straight out costs nothing.
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         guard !Task.isCancelled, let d = detail else { return }
+        // FIX-7 (2.1.1, owner decision 2026-11-22 02:40
+        // CST): a TVB title NEVER starts the Option-C
+        // trailer preview here — its YouTube trailers are
+        // ~all 480p and died at the <720p quality gate, so
+        // the owner replaced them with the title's
+        // highest-quality STILL as the backdrop. The TVB
+        // discriminator is the route's snapshot context:
+        // `route.tvb != nil` (TVBRouteContext — non-nil
+        // ONLY on TVB-tab routes; see JoePhimHome.swift's
+        // TVBRouteContext and this file's tvbGate, which
+        // keys on the same value). The guard sits BEFORE
+        // every trailer path, so startTrailerPreview (and
+        // with it the PC trailer sign-in prompt's
+        // needsIdentity surfacing) can never fire for a
+        // TVB title. Non-TVB titles fall through to the
+        // unchanged Option-C behaviour below.
+        guard route.tvb == nil else {
+            DiagLog.write("PREVIEW", "preview skipped rule=tvb-still-backdrop")
+            return
+        }
         guard JoePreviewSettings.enabled else {
             DiagLog.write("PREVIEW", "preview skipped rule=settings-off")
             return
@@ -4186,6 +4795,28 @@ private struct JoeCastCellLabel: View {
             return
         }
         preview.abortAttempt(reason: lastReason)
+        // v2.1.1 (WS-C, DIAG-2050 §1c): a needsIdentity
+        // ending is NOT an ordinary preview failure — the
+        // whole install lacks a YouTube session, and the
+        // silent rule left the owner no signal across two
+        // builds. Under Private Cinema ONLY (every other
+        // theme keeps the silent behaviour byte-for-byte),
+        // surface the existing device-code activation on
+        // this detail: the prompt (pcTrailerSignInPrompt)
+        // goes up and the flow starts, exactly as the
+        // router's goldPlaybackSurface starts it on a
+        // playback .needsIdentity. One approval serves
+        // both playback and trailers — no resolver or
+        // store change.
+        if lastReason == "trailer-needs-identity",
+           theme.id == .privateCinema {
+            await MainActor.run {
+                trailerSignInPrompt = true
+                JoeYtIdentity.shared.beginDeviceCodeFlow()
+            }
+            DiagLog.write("PREVIEW",
+                          "trailer sign-in prompt surfaced (PC, needsIdentity)")
+        }
     }
 
     /// One trailer key's resolve + hand-over. Returns

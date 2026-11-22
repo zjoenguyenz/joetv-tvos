@@ -90,7 +90,19 @@ final class JoeNavigator: ObservableObject {
     /// handlers set section = .phim), so the state lives on
     /// the navigator they all already observe.
     enum Section: String, CaseIterable {
-        case tv, phim, tvb, torrent, settings
+        // v2.1.1 (owner ruling): TV renders LAST in every shell
+        // bar — all three bar arms iterate allCases, so the case
+        // order IS the bar order. The raw values are pinned
+        // explicitly (identical to the case names, i.e. to the
+        // implicit String raw values they replace): a raw value
+        // is a FOCUS identity only (the pills' .focused equals
+        // and the bar's .defaultFocus fallback) — it is persisted
+        // NOWHERE (no @AppStorage/UserDefaults key stores a
+        // section; `section` below is in-memory and starts at
+        // .phim on every launch, so the landing stays Phim).
+        // Pinning them means no future reorder can silently
+        // change a focus identity.
+        case phim = "phim", tvb = "tvb", torrent = "torrent", settings = "settings", tv = "tv"
 
         var title: String {
             switch self {
@@ -263,6 +275,22 @@ struct JoeRootView: View {
     /// v2.0.0 (UI-5): the active design, chosen in Settings'
     /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
     @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.ultra.rawValue
+    /// v2.1.1 (owner ruling): the DEFAULT theme — the theme the
+    /// app OPENS in, picked in Settings' theme block (which
+    /// writes this same key from JoeSettings). Distinct from
+    /// the current-theme key above: switching the current theme
+    /// in Settings never rewrites the default, and vice versa.
+    /// Empty = unset → the launch behaviour is exactly the
+    /// pre-2.1.1 one (the stored current theme, with the
+    /// one-time Ultra migration below). Applied once per
+    /// process in .onAppear (see defaultThemeApplied).
+    @AppStorage("joetv.theme.default") private var defaultThemeIDRaw = ""
+    /// v2.1.1: the default-theme launch application runs once
+    /// per process — JoeRootView lives for the whole session,
+    /// but .onAppear must never re-apply the default over a
+    /// theme the user picked mid-session if the root ever
+    /// re-appears.
+    @State private var defaultThemeApplied = false
     /// v2.0.19: one-time landing on Ultra — the owner's Apple
     /// TV already carries a stored picker choice from an older
     /// build, which would otherwise win over the new default
@@ -337,19 +365,7 @@ struct JoeRootView: View {
             // content container respects it and adds NO further
             // padding, so the total inset is exactly 80/60 and
             // never stacks (the old manual 56/34/24 did stack).
-            VStack(spacing: 32) {
-                topBar
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    // v2.0.5 (N1): the content is ONE declared
-                    // focus region under the bar's own region —
-                    // pill ↔ section movement is section-to-
-                    // section navigation, and each section's
-                    // .defaultFocus declaration (its top
-                    // element) is the landing the engine picks
-                    // inside this region.
-                    .focusSection()
-            }
+            shellStack
             .disabled(nav.movie != nil || nav.tor != nil
                       || nav.ytDetail != nil || nav.ytPlayer != nil
                       || nav.addonDetail != nil
@@ -447,6 +463,17 @@ struct JoeRootView: View {
             if !ultraMigrated {
                 themeIDRaw = JoeThemeID.ultra.rawValue
                 ultraMigrated = true
+            }
+            // v2.1.1: the default-theme launch application —
+            // AFTER the one-time Ultra migration, so an owner's
+            // chosen default wins over the migration on the one
+            // launch where both fire. An unset or invalid
+            // default changes nothing (the pre-2.1.1 behaviour).
+            if !defaultThemeApplied {
+                defaultThemeApplied = true
+                if let def = JoeThemeID(rawValue: defaultThemeIDRaw) {
+                    themeIDRaw = def.rawValue
+                }
             }
         }
         .onChange(of: nav.section) { _, _ in
@@ -578,6 +605,43 @@ struct JoeRootView: View {
         // both halves of that sentence stopped being true in
         // the v2.0.8 programme; do not let it mislead the next
         // round.)
+    }
+
+    /// The shell's bar + content arrangement. Every theme
+    /// except Private Cinema keeps the device-proven VStack
+    /// (bar above content). v2.1.1 (audit §1 "Bar placement"):
+    /// under Private Cinema the design's bar FLOATS OVER the
+    /// content — a transparent ZStack overlay — so the Home
+    /// hero (WS-B's full-bleed stage) runs beneath it. The
+    /// invariants are identical in both shapes: the bar keeps
+    /// its own .focusSection() + height 76 + .defaultFocus
+    /// entry landing (all inside topBar), and the content
+    /// keeps its single .focusSection() region — only the
+    /// PAINT order changes, never the focus geometry.
+    @ViewBuilder
+    private var shellStack: some View {
+        if theme.id == .privateCinema {
+            ZStack(alignment: .top) {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .focusSection()
+                topBar
+            }
+        } else {
+            VStack(spacing: 32) {
+                topBar
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // v2.0.5 (N1): the content is ONE declared
+                    // focus region under the bar's own region —
+                    // pill ↔ section movement is section-to-
+                    // section navigation, and each section's
+                    // .defaultFocus declaration (its top
+                    // element) is the landing the engine picks
+                    // inside this region.
+                    .focusSection()
+            }
+        }
     }
 
     // The top row stays well under ~1,800pt wide on purpose

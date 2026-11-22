@@ -246,6 +246,20 @@ final class JoeProxy: @unchecked Sendable {
             guard let self, let data,
                   let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else {
+                // v2.1.1 (WS-G, WS-E item 4 hook): report the
+                // real HTTP status — the CacheVideo CDN
+                // contract demote can only fire from here,
+                // the one place a proxied playlist's status
+                // is observable. `http` from the guard is not
+                // in scope in this branch, so the response is
+                // re-cast; noteHttpStatus itself filters to
+                // the demote's exact contract (400 +
+                // cachevideo.com), so nothing else changes.
+                if let http = response as? HTTPURLResponse {
+                    SourceHealth.noteHttpStatus(
+                        hostKey: SourceHealth.hostKey(for: route.url),
+                        code: http.statusCode)
+                }
                 self?.recordProxySample(
                     url: route.url, stage: .playlist,
                     seconds: Date().timeIntervalSince(startedAt),
@@ -335,6 +349,14 @@ final class JoeProxy: @unchecked Sendable {
             }
             if let http = response as? HTTPURLResponse,
                !(200..<300).contains(http.statusCode) {
+                // v2.1.1 (WS-G, WS-E item 4 hook): the
+                // segment path's analogue — streamRefused
+                // itself receives no response object, so the
+                // status is reported here, at its sole caller,
+                // the one place it is in scope.
+                SourceHealth.noteHttpStatus(
+                    hostKey: SourceHealth.hostKey(for: st.url.absoluteString),
+                    code: http.statusCode)
                 proxy?.streamRefused(st)
                 completionHandler(.cancel)
                 return

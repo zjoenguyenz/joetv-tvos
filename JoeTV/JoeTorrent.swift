@@ -33,6 +33,55 @@ struct JoeTorrentHome: View {
     @FocusState private var focusedEntry: String?
     @FocusState private var torRetryFocused: Bool
     @FocusState private var searchRetryFocused: Bool
+    /// v2.1.1 (WS-I): the PC arm's focus-follows-backdrop
+    /// controller (the shared JoeCinemaBackdropController,
+    /// JoePrivateCinema.swift), fed from the SAME
+    /// focusedMeta / focusedEntry memory torContextInfo
+    /// derives from. Read only under the PC theme; every
+    /// other theme ignores it.
+    @StateObject private var torBackdrop =
+        JoeCinemaBackdropController()
+    /// v2.1.1 (FIX-6): the PC hero's action focus —
+    /// while focus sits on the hero's own buttons
+    /// focusedMeta / focusedEntry read nil, and
+    /// torHeroMemory below is what keeps the hero on
+    /// the last focused title (the JoePhimHome
+    /// cinemaHeroMemory discipline).
+    @FocusState private var torHeroPlayFocused: Bool
+    @FocusState private var torHeroInfoFocused: Bool
+    /// v2.1.1 (FIX-6): the last card-resolved hero, kept
+    /// while focus is on the hero's actions or the
+    /// search area (see torHeroFocusMoved).
+    @State private var torHeroMemory: TorHeroResolved?
+
+    /// v2.1.1 (FIX-10a / RECON-POWERMAX point 6): the
+    /// context strip's memory — the last RESOLVED strip
+    /// tuple, recorded in torHeroFocusMoved while a card
+    /// is focused. When focus moves up to the tab bar
+    /// (no card focused) the strip RETAINS this context
+    /// instead of resetting to the section label; nil
+    /// before any card has ever been focused (the rest
+    /// behaviour is unchanged).
+    @State private var torStripMemory: (title: String, meta: String, railName: String, railLine: String)?
+
+    /// v2.1.1 (FIX-6): what the PC hero's two actions
+    /// open for the currently resolved title — EXACTLY
+    /// the focused card's own tap mint per surface (a
+    /// catalogue / genre / search meta's TorRoute with
+    /// its rail's base, a CW / favourite entry's
+    /// TorRoute reopen mint).
+    private enum TorHeroTarget {
+        case meta(TorMeta, base: String)
+        case entry(WatchStore.Entry, preselect: Bool)
+    }
+
+    /// v2.1.1 (FIX-6): a resolved torrent hero — the
+    /// shared controller's item (text + art ladder) and
+    /// the actions' target.
+    private struct TorHeroResolved {
+        var item: JoeCinemaHeroItem
+        var target: TorHeroTarget
+    }
 
     /// The search row's focusable elements, in visual order.
     /// Swift 6 round (fault (e)): the .field case is GONE —
@@ -66,7 +115,8 @@ struct JoeTorrentHome: View {
             // to the top of the page (see .onExitCommand).
             ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 36) {
+                LazyVStack(alignment: .leading, spacing: 36,
+                           pinnedViews: [.sectionHeaders]) {
                     header
                     searchRow
                     // Fault (e): the in-app letter strip —
@@ -89,6 +139,41 @@ struct JoeTorrentHome: View {
                     } else if searchAttempted {
                         searchMessage
                     } else {
+                        if theme.id == .privateCinema {
+                            // v2.1.1 (FIX-6): the full PC
+                            // hero (485 stage, the Phim
+                            // hero's composition) above the
+                            // rails — it supersedes WS-I's
+                            // top-zone-only backdrop
+                            // placement: the shared
+                            // controller's layer now lives
+                            // INSIDE the hero block, and
+                            // the hero text + actions follow
+                            // focus (torHeroResolved).
+                            torHeroBlock
+                        }
+                        if theme.id == .privateCinema {
+                            // v2.1.1 (WS-H): the Many-Rails
+                            // PC arm — design order inside a
+                            // Section whose header is the
+                            // pinned context strip; the state
+                            // surfaces below stay shared.
+                            Section {
+                                pcTorCwRail
+                                pcTorProviderRails
+                                pcTorExploreRails
+                                favRail
+                            } header: {
+                                torContextStrip
+                            }
+                            // v2.1.1 (WS-I; FIX-6): the
+                            // rails' Section sits on plain
+                            // Ink — the backdrop lives in
+                            // the hero block above the
+                            // Section, never under the
+                            // rails while browsing.
+                            .background(theme.bg)
+                        } else {
                         cwRail
                         favRail
                         ForEach(Array(store.catalogs.enumerated()), id: \.offset) { _, cat in
@@ -102,6 +187,7 @@ struct JoeTorrentHome: View {
                                 metaRail(rail.title, rail.metas, base: TorrentSettings.cinemeta,
                                          scope: "torGenre:\(rail.type):\(rail.genre)")
                             }
+                        }
                         }
                         // C-4 + BLOCK-1: the torrent home's
                         // state surfaces are keyed on RAILS, not
@@ -141,6 +227,12 @@ struct JoeTorrentHome: View {
                 }
                 .id("joeTorHomeTop")
             }
+            // v2.1.1 (FIX-6): WS-I's ScrollView-background
+            // backdrop placement is REMOVED — the shared
+            // controller's layer now lives inside the PC
+            // hero block (torHeroBlock), in-flow, exactly
+            // like the Phim hero. Other themes never had
+            // a background here and still do not.
             // v2.0.49 (item 7): the Menu-to-top jump's
             // scroll hook, inside the reader.
             .onChange(of: topScrollSignal) { _, _ in
@@ -207,6 +299,375 @@ struct JoeTorrentHome: View {
             }
         }
         .defaultFocus($keyFocus, .key("a"))
+        // v2.1.1 (WS-I): focus-follows backdrop, PC arm
+        // only (the resolver no-ops under every other
+        // theme): focusedMeta / focusedEntry are the
+        // focus memory torContextInfo reads — every move
+        // feeds the backdrop controller; the debounce
+        // task inside the controller is the only
+        // scheduled work (FL-017).
+        .onChange(of: focusedMeta) { _, _ in torHeroFocusMoved() }
+        .onChange(of: focusedEntry) { _, _ in torHeroFocusMoved() }
+        // v2.1.1 (FIX-6): the rails landing (or the CW
+        // entries changing) re-seeds the hero's default
+        // title — onAppear fires before the store's
+        // first load lands.
+        .onChange(of: store.rails.count) { _, _ in torHeroFocusMoved() }
+        .onChange(of: torProgress.count) { _, _ in torHeroFocusMoved() }
+        .onAppear { torHeroFocusMoved() }
+    }
+
+    /// Feed the torrent hero + backdrop controller
+    /// from the focus memory (v2.1.1, WS-I; FIX-6 —
+    /// the full hero): a card focus resolves +
+    /// remembers the hero and pushes its item to the
+    /// controller (text first — the block renders the
+    /// same resolution in body — backdrop after the
+    /// controller's debounce). NO card focus keeps
+    /// the remembered hero (focus is on the hero's
+    /// actions or the search area); before any focus
+    /// the default resolution (the first title of the
+    /// first visible rail) seeds both.
+    private func torHeroFocusMoved() {
+        guard theme.id == .privateCinema else { return }
+        if focusedMeta != nil || focusedEntry != nil {
+            if let resolved = torHeroResolved() {
+                // FIX-12 / R7 B-1: record the strip's
+                // resolved tuple ONLY when the hero
+                // resolution actually resolved the FOCUSED
+                // card (this existing hook only — FL-017;
+                // no new per-focus work). torHeroResolved
+                // returns nil when a focused card no
+                // longer resolves (a reload removed it),
+                // and its focused branches key the item
+                // by the focus ID itself — the rest
+                // fallback keys it "rest|…", so the key
+                // test can never pass for a rest tuple.
+                if resolved.item.key == focusedMeta
+                    || resolved.item.key == focusedEntry {
+                    torStripMemory = torContextInfo
+                }
+                torHeroMemory = resolved
+                torBackdrop.focusChanged(to: resolved.item)
+            }
+            return
+        }
+        if torHeroMemory != nil { return }
+        if let resolved = torHeroResolved() {
+            torHeroMemory = resolved
+            torBackdrop.focusChanged(to: resolved.item)
+        }
+    }
+
+    /// The hero the block renders: the live resolution
+    /// while a card is focused; the remembered hero
+    /// once focus has left the cards; the default
+    /// resolution before either exists.
+    private func torHeroDisplayResolved() -> TorHeroResolved? {
+        if focusedMeta != nil || focusedEntry != nil {
+            return torHeroResolved()
+        }
+        return torHeroMemory ?? torHeroResolved()
+    }
+
+    /// The hero for the current focus, resolved from
+    /// the SAME focus memory torContextInfo derives
+    /// from (catalogue / genre / search metas, then CW
+    /// / favourite entries); before any focus, the
+    /// first title of the first VISIBLE rail in the PC
+    /// stack's order (Xem tiếp → landed catalogues →
+    /// genre rails → Yêu thích). Art ladder is WS-I's:
+    /// a TorMeta's background then its poster; an
+    /// entry's own background then its poster. The
+    /// meta line and synopsis come only from fields
+    /// TorMeta actually carries: year and desc — the
+    /// model has NO rating, runtime, quality / age or
+    /// localized-name field, so the drawing's ★ /
+    /// duration / chips / Vietnamese sub-line are
+    /// omitted, never invented (see the FIX-6 report).
+    private func torHeroResolved() -> TorHeroResolved? {
+        if let focusedMeta {
+            if let meta = (store.rails.values.flatMap { $0 }
+                           + store.genreRails.flatMap { $0.metas }
+                           + searchResults)
+                .first(where: { focusedMeta.hasSuffix("|" + $0.id) }) {
+                return TorHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedMeta,
+                        title: meta.name,
+                        meta: meta.year,
+                        synopsis: meta.desc,
+                        backdropURL: meta.background.isEmpty
+                            ? nil : URL(string: meta.background),
+                        posterURL: meta.posterURL),
+                    target: .meta(
+                        meta,
+                        base: torHeroBase(forFocusedMeta: focusedMeta,
+                                          meta: meta)))
+            }
+        }
+        if let focusedEntry {
+            if let entry = torProgress.first(where: { "cw|" + $0.key == focusedEntry }) {
+                return TorHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedEntry,
+                        title: entry.title,
+                        meta: entry.epLabel,
+                        synopsis: entry.desc,
+                        backdropURL: entry.background.isEmpty
+                            ? nil : URL(string: entry.background),
+                        posterURL: entry.posterURL),
+                    target: .entry(entry, preselect: true))
+            }
+            if let entry = torFavorites.first(where: { "fav|" + $0.key == focusedEntry }) {
+                return TorHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: focusedEntry,
+                        title: entry.title,
+                        meta: entry.year,
+                        synopsis: entry.desc,
+                        backdropURL: entry.background.isEmpty
+                            ? nil : URL(string: entry.background),
+                        posterURL: entry.posterURL),
+                    target: .entry(entry, preselect: false))
+            }
+        }
+        if focusedMeta != nil || focusedEntry != nil { return nil }
+        // Rest / default: the first title of the first
+        // visible rail, in the PC stack's render order.
+        if let entry = torProgress.first {
+            return TorHeroResolved(
+                item: JoeCinemaHeroItem(
+                    key: "rest|cw|" + entry.key,
+                    title: entry.title,
+                    meta: entry.epLabel,
+                    synopsis: entry.desc,
+                    backdropURL: entry.background.isEmpty
+                        ? nil : URL(string: entry.background),
+                    posterURL: entry.posterURL),
+                target: .entry(entry, preselect: true))
+        }
+        for cat in pcTorLandedCatalogs {
+            if let meta = store.rails[cat.id + "|" + cat.type]?.first {
+                return TorHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: "rest|torCat:" + cat.id + "|" + cat.type
+                            + "|" + meta.id,
+                        title: meta.name,
+                        meta: meta.year,
+                        synopsis: meta.desc,
+                        backdropURL: meta.background.isEmpty
+                            ? nil : URL(string: meta.background),
+                        posterURL: meta.posterURL),
+                    target: .meta(meta, base: cat.base))
+            }
+        }
+        for rail in store.genreRails where !rail.metas.isEmpty {
+            if let meta = rail.metas.first {
+                return TorHeroResolved(
+                    item: JoeCinemaHeroItem(
+                        key: "rest|torGenre:" + rail.type + ":"
+                            + rail.genre + "|" + meta.id,
+                        title: meta.name,
+                        meta: meta.year,
+                        synopsis: meta.desc,
+                        backdropURL: meta.background.isEmpty
+                            ? nil : URL(string: meta.background),
+                        posterURL: meta.posterURL),
+                    target: .meta(meta, base: TorrentSettings.cinemeta))
+            }
+        }
+        if let entry = torFavorites.first {
+            return TorHeroResolved(
+                item: JoeCinemaHeroItem(
+                    key: "rest|fav|" + entry.key,
+                    title: entry.title,
+                    meta: entry.year,
+                    synopsis: entry.desc,
+                    backdropURL: entry.background.isEmpty
+                        ? nil : URL(string: entry.background),
+                    posterURL: entry.posterURL),
+                target: .entry(entry, preselect: false))
+        }
+        return nil
+    }
+
+    /// The TorRoute base for a focused meta (v2.1.1,
+    /// FIX-6): scope-first, mirroring torContextInfo's
+    /// FIX-5 resolution — a "torCat:" focus ID names
+    /// its own catalogue (that catalogue's base, the
+    /// metaRail / torPcMetaRail mint); genre and search
+    /// cards mint against TorrentSettings.cinemeta
+    /// (pcTorExploreRails / searchGrid).
+    private func torHeroBase(forFocusedMeta focused: String,
+                             meta: TorMeta) -> String {
+        if focused.hasPrefix("torCat:") {
+            let segments = focused.dropFirst("torCat:".count)
+                .split(separator: "|")
+            let catId = segments.first.map(String.init) ?? ""
+            let catType = segments.count > 1 ? String(segments[1]) : ""
+            if let cat = pcTorLandedCatalogs.first(where: {
+                $0.id == catId && (catType.isEmpty || $0.type == catType)
+            }) {
+                return cat.base
+            }
+        }
+        return TorrentSettings.cinemeta
+    }
+
+    /// The hero actions' tap (v2.1.1, FIX-6): perform
+    /// the resolved title's OWN card tap — the
+    /// identical TorRoute mint each rail builder
+    /// performs (cwRail / favRail rebuild the meta
+    /// from the entry's stored fields, exactly as
+    /// here), nothing new.
+    private func torOpenHeroTarget(_ target: TorHeroTarget) {
+        switch target {
+        case .meta(let meta, let base):
+            nav.tor = TorRoute(meta: meta, base: base)
+        case .entry(let entry, let preselect):
+            nav.tor = TorRoute(
+                meta: TorMeta(id: entry.metaId, type: entry.metaType,
+                              name: entry.title, poster: entry.poster,
+                              background: entry.background,
+                              year: entry.year, desc: entry.desc,
+                              isLive: entry.isLive),
+                base: entry.reopenBase,
+                preselectStreamId: preselect ? entry.streamId : "")
+        }
+    }
+
+    /// The Private Cinema torrent hero block (v2.1.1,
+    /// FIX-6): the Phim hero's composition verbatim —
+    /// the shared controller's crossfade layer as a
+    /// 485-tall full-width stage, the same three
+    /// scrims, the text stack at the same positions,
+    /// and the right-side tagline block. Renders
+    /// nothing until a title resolves (the state
+    /// surfaces below own the loading / empty states).
+    @ViewBuilder
+    private var torHeroBlock: some View {
+        if let resolved = torHeroDisplayResolved() {
+            ZStack(alignment: .bottomLeading) {
+                JoeCinemaBackdropLayer(controller: torBackdrop)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 485)
+                    .clipped()
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.92), location: 0),
+                    .init(color: .black.opacity(0.80), location: 0.45),
+                    .init(color: .black.opacity(theme.scrimFloor), location: 0.65),
+                    .init(color: .black.opacity(0.15), location: 0.82),
+                    .init(color: .black.opacity(0.05), location: 1)
+                ], startPoint: .leading, endPoint: .trailing)
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0.55),
+                    .init(color: theme.bg, location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+                LinearGradient(stops: [
+                    .init(color: theme.bg.opacity(0.55), location: 0),
+                    .init(color: .clear, location: 0.35)
+                ], startPoint: .top, endPoint: .bottom)
+                torHeroText(resolved)
+            }
+            .frame(height: 485)
+            .overlay(alignment: .bottomTrailing) {
+                torHeroTagline
+                    .padding(.trailing, 14)
+                    .padding(.bottom, 72)
+            }
+        }
+    }
+
+    /// The torrent hero's text block (v2.1.1, FIX-6 —
+    /// a named helper per FL-390): the drawing's
+    /// static section eyebrow, typeset title, meta
+    /// line, synopsis (only when the meta carries a
+    /// desc) and the design's TWO actions — pale
+    /// "▶ Chọn nguồn phát" and dark "ⓘ Thông tin
+    /// phim", BOTH wired to the resolved title's own
+    /// torrent-detail route via torOpenHeroTarget.
+    /// Geometry mirrors JoePhimHome.cinemaHeroText
+    /// exactly.
+    private func torHeroText(_ resolved: TorHeroResolved) -> some View {
+        let item = resolved.item
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("THƯ VIỆN TORRENT CỦA BẠN / TORRENT")
+                .font(.system(size: 15, weight: .medium))
+                .tracking(3.6)
+                .foregroundStyle(theme.heroMeta)
+                .lineLimit(1)
+            Text(item.title)
+                .font(.system(size: 72, weight: .medium, design: .serif))
+                .tracking(-3)
+                .foregroundStyle(theme.text)
+                .lineLimit(2)
+                .padding(.top, 12)
+            if !item.meta.isEmpty {
+                Text(item.meta)
+                    .font(.system(size: 20, weight: .regular))
+                    .foregroundStyle(theme.heroMeta)
+                    .lineLimit(1)
+                    .padding(.top, 12)
+            }
+            if !item.synopsis.isEmpty {
+                Text(item.synopsis)
+                    .font(.system(size: 18))
+                    .foregroundStyle(theme.text.opacity(0.92))
+                    // FIX-12 / R7 C-F1: spec synopsis is
+                    // 18/400 at line 1.5 → 9 pt extra.
+                    .lineSpacing(9)
+                    .lineLimit(2)
+                    .frame(maxWidth: 850, alignment: .leading)
+                    .padding(.top, 10)
+            }
+            HStack(spacing: 16) {
+                Button {
+                    torOpenHeroTarget(resolved.target)
+                } label: {
+                    JoePrimaryLabel(title: "Chọn nguồn phát",
+                                    systemImage: "play.fill")
+                }
+                .joeCardButton()
+                .focused($torHeroPlayFocused)
+                Button {
+                    torOpenHeroTarget(resolved.target)
+                } label: {
+                    JoeSecondaryLabel(title: "Thông tin phim",
+                                      systemImage: "info.circle")
+                }
+                .joeCardButton()
+                .focused($torHeroInfoFocused)
+            }
+            .padding(.top, 16)
+        }
+        .padding(.leading, 13)
+        .padding(.vertical, 36)
+        .frame(maxWidth: 900, alignment: .leading)
+    }
+
+    /// The hero's right-side tagline block (v2.1.1,
+    /// FIX-6 — the drawing's block, shared by all
+    /// three PC heroes): the italic line over the caps
+    /// line with THIS home's real visible rail count
+    /// (pcTorVisibleRailTitles — the strip's own list).
+    private var torHeroTagline: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Text("Một buổi tối. Một thế giới khác.")
+                .font(.system(size: 28, weight: .regular, design: .serif))
+                .italic()
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+            HStack(spacing: 10) {
+                Text("\(pcTorVisibleRailTitles.count) DÃY PHIM")
+                Text("↓")
+                Text("TIẾP TỤC KHÁM PHÁ")
+            }
+            .font(.system(size: 14, weight: .medium))
+            .tracking(3)
+            .foregroundStyle(theme.heroMeta)
+            .lineLimit(1)
+        }
     }
 
     private var header: some View {
@@ -521,6 +982,285 @@ struct JoeTorrentHome: View {
         }
     }
 
+    // MARK: - Private Cinema Many-Rails (v2.1.1, WS-H)
+
+    /// The PC rail shell (WS-H): the shared Rail's
+    /// construction mirrored at the design's rhythm —
+    /// heading 27 pt medium, card gap 25, side margin 94
+    /// total (shell 80 + 14 leading here).
+    private func torPcRailShell<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 27, weight: .medium))
+                .foregroundStyle(theme.text)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 25) { content() }
+                    .padding(.horizontal, 4)
+                    // FIX-5 / Lens C Finding 1 (C5): spec row padding 8 top / 9 bottom.
+                    .padding(.top, 8)
+                    .padding(.bottom, 9)
+            }
+            .scrollClipDisabled()
+        }
+        .focusSection()
+        .padding(.leading, 14)
+    }
+
+    /// Design rail 1 (WS-H): Continue Watching FIRST as
+    /// landscape 320×180 cards with progress bars
+    /// (JoeCinemaCwCard, JoePhimHome.swift — same module);
+    /// data, tap and context menu are cwRail's own.
+    @ViewBuilder
+    private var pcTorCwRail: some View {
+        if !torProgress.isEmpty {
+            torPcRailShell(title: "Xem tiếp") {
+                ForEach(torProgress) { entry in
+                    Button { nav.tor = TorRoute(
+                        meta: TorMeta(id: entry.metaId, type: entry.metaType,
+                                      name: entry.title, poster: entry.poster,
+                                      background: entry.background,
+                                      year: entry.year, desc: entry.desc,
+                                      isLive: entry.isLive),
+                        base: entry.reopenBase,
+                        preselectStreamId: entry.streamId) } label: {
+                        JoeCinemaCwCard(entry: entry)
+                    }
+                    .joeCardButton()
+                    .focused($focusedEntry, equals: "cw|" + entry.key)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            watch.removeProgress(key: entry.key)
+                        } label: {
+                            Text("Xoá khỏi Đang xem dở")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The landed catalogues in store order (the PC
+    /// rails' feeders).
+    private var pcTorLandedCatalogs: [TorCatalog] {
+        store.catalogs.filter {
+            !(store.rails[$0.id + "|" + $0.type]?.isEmpty ?? true)
+        }
+    }
+
+    /// Design rails 2–4 (WS-H): the first three landed
+    /// catalogues ("provider" rails — addon catalogues,
+    /// see WS-H mapping §5), each with the PC local
+    /// 205×263 card; tap and focus binding are metaRail's.
+    @ViewBuilder
+    private var pcTorProviderRails: some View {
+        ForEach(Array(pcTorLandedCatalogs.prefix(3).enumerated()), id: \.offset) { _, cat in
+            if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
+                torPcMetaRail(cat.name, metas, base: cat.base,
+                              scope: "torCat:\(cat.id)|\(cat.type)")
+            }
+        }
+    }
+
+    /// Design rail 5 (WS-H): "Torrent · Khám phá
+    /// catalogue" — the remaining catalogue rails plus
+    /// the genre rails, in existing order and existing
+    /// builders (the catalogue-exploration family; WS-H
+    /// mapping §5 flags the family mapping).
+    @ViewBuilder
+    private var pcTorExploreRails: some View {
+        ForEach(Array(pcTorLandedCatalogs.dropFirst(3).enumerated()), id: \.offset) { _, cat in
+            if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
+                metaRail(cat.name, metas, base: cat.base,
+                         scope: "torCat:\(cat.id)|\(cat.type)")
+            }
+        }
+        ForEach(Array(store.genreRails.enumerated()), id: \.offset) { _, rail in
+            if !rail.metas.isEmpty {
+                metaRail(rail.title, rail.metas, base: TorrentSettings.cinemeta,
+                         scope: "torGenre:\(rail.type):\(rail.genre)")
+            }
+        }
+    }
+
+    /// A PC poster rail over torrent metas: the local
+    /// 205×263 card (JoeCinemaTorCard, JoePhimHome.swift),
+    /// metaRail's tap and focus binding verbatim.
+    private func torPcMetaRail(_ title: String, _ metas: [TorMeta], base: String,
+                               scope: String) -> some View {
+        torPcRailShell(title: title) {
+            ForEach(metas) { meta in
+                Button { nav.tor = TorRoute(meta: meta, base: base) } label: {
+                    JoeCinemaTorCard(meta: meta)
+                }
+                .joeCardButton()
+                .focused($focusedMeta, equals: scope + "|" + meta.id)
+            }
+        }
+    }
+
+    /// The PC context strip (WS-H): the pinned Section
+    /// header — focused title · year · its rail · "Dãy
+    /// NN/TT · ↑ để trở lại", from the existing focus
+    /// memory. This view has no hero (WS-H mapping §5
+    /// flag); the strip's rest state names the section.
+    private var torContextStrip: some View {
+        let info = torContextInfo
+        return HStack(alignment: .center, spacing: 14) {
+            // FIX-8 / C-R4-2: the drawn composition
+            // (delivery-joetv-TorrentManyRails-browse.png)
+            // — left column: the surface eyebrow in small
+            // caps ABOVE the title, the meta riding the
+            // title's baseline beside it.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("TORRENT / ĐANG KHÁM PHÁ")
+                    .font(.system(size: 15, weight: .medium))
+                    .tracking(3.6)
+                    .foregroundStyle(theme.heroMeta)
+                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 14) {
+                    // FIX-5 / Lens C Finding 1 (C4): the spec's strip title is 34/500.
+                    Text(info.title)
+                        .font(.system(size: 34, weight: .medium))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    if !info.meta.isEmpty {
+                        Text(info.meta)
+                            .font(.system(size: 22))
+                            .foregroundStyle(theme.meta)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Spacer()
+            // FIX-8 / C-R4-2: right side is the drawing's
+            // TWO-LINE block — rail name over the Dãy
+            // line, right-aligned (values unchanged from
+            // torContextInfo's derivations).
+            VStack(alignment: .trailing, spacing: 4) {
+                if !info.railName.isEmpty {
+                    Text(info.railName)
+                        .font(.system(size: 22))
+                        .foregroundStyle(theme.heroMeta)
+                        .lineLimit(1)
+                }
+                Text(info.railLine)
+                    .font(.system(size: 22))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 14)
+        .frame(height: 88)
+        .frame(maxWidth: .infinity)
+        .background(theme.bg)
+    }
+
+    /// The strip's content for the torrent home: resolve
+    /// the focused meta ("torCat:…|metaId" /
+    /// "torGenre:…|metaId") or CW/favourite entry against
+    /// the store's rails.
+    private var torContextInfo: (title: String, meta: String, railName: String, railLine: String) {
+        let titles = pcTorVisibleRailTitles
+        let total = titles.count
+        if let focusedMeta {
+            if let meta = (store.rails.values.flatMap { $0 }
+                           + store.genreRails.flatMap { $0.metas })
+                .first(where: { focusedMeta.hasSuffix("|" + $0.id) }) {
+                // FIX-5 / Lens B Finding 2: resolve the rail
+                // from the focus ID's OWN scope segment first
+                // (mirroring cinemaTorrentRailPosition in
+                // JoePhimHome) — genre-rail metas share ids
+                // with the `top` catalogue, so the first
+                // catalogue containing the id is not the rail
+                // the user is on. Only a scope carrying no
+                // rail identity (e.g. "torSearch") falls back
+                // to the catalogue search below.
+                var railName = ""
+                if focusedMeta.hasPrefix("torCat:") {
+                    let segments = focusedMeta.dropFirst("torCat:".count)
+                        .split(separator: "|")
+                    let catId = segments.first.map(String.init) ?? ""
+                    let catType = segments.count > 1 ? String(segments[1]) : ""
+                    if let cat = pcTorLandedCatalogs.first(where: {
+                        $0.id == catId && (catType.isEmpty || $0.type == catType)
+                    }) {
+                        railName = cat.name
+                    }
+                } else if focusedMeta.hasPrefix("torGenre:") {
+                    let scopePart = focusedMeta.split(separator: "|")
+                        .first.map(String.init) ?? ""
+                    let segments = scopePart.dropFirst("torGenre:".count)
+                        .split(separator: ":", maxSplits: 1)
+                    let genreType = segments.first.map(String.init) ?? ""
+                    let genre = segments.count > 1 ? String(segments[1]) : ""
+                    if let rail = store.genreRails.first(where: {
+                        $0.type == genreType && $0.genre == genre
+                    }) {
+                        railName = rail.title
+                    }
+                }
+                if railName.isEmpty {
+                    for cat in store.catalogs {
+                        if store.rails[cat.id + "|" + cat.type]?
+                            .contains(where: { $0.id == meta.id }) == true {
+                            railName = cat.name
+                            break
+                        }
+                    }
+                }
+                if railName.isEmpty {
+                    railName = store.genreRails
+                        .first(where: { $0.metas.contains { $0.id == meta.id } })?.title ?? ""
+                }
+                let pos = titles.firstIndex(of: railName).map { $0 + 1 } ?? 1
+                return (meta.name, meta.year,
+                        railName,
+                        "Dãy \(String(format: "%02d", pos)) / \(total) · ↑ để trở lại")
+            }
+        }
+        if let focusedEntry {
+            if let entry = torProgress.first(where: { "cw|" + $0.key == focusedEntry }) {
+                return (entry.title, entry.epLabel,
+                        "Xem tiếp",
+                        "Dãy 01 / \(total) · ↑ để trở lại")
+            }
+            if let entry = torFavorites.first(where: { "fav|" + $0.key == focusedEntry }) {
+                let pos = titles.firstIndex(of: "Yêu thích").map { $0 + 1 } ?? total
+                return (entry.title, entry.year,
+                        "Yêu thích",
+                        "Dãy \(String(format: "%02d", pos)) / \(total) · ↑ để trở lại")
+            }
+        }
+        // FIX-10a / RECON-POWERMAX point 6: no card
+        // focused — return the last resolved strip tuple
+        // when one exists. Before any focus ever, memory
+        // is nil and the rest tuple below is unchanged.
+        if focusedMeta == nil, focusedEntry == nil,
+           let memory = torStripMemory {
+            return memory
+        }
+        return ("Phim Torrent", "",
+                "",
+                "Dãy 01 / \(total) · ↑ để trở lại")
+    }
+
+    /// The visible PC rails' titles in render order (the
+    /// strip's denominator).
+    private var pcTorVisibleRailTitles: [String] {
+        var out: [String] = []
+        if !torProgress.isEmpty { out.append("Xem tiếp") }
+        for cat in pcTorLandedCatalogs { out.append(cat.name) }
+        for rail in store.genreRails where !rail.metas.isEmpty {
+            out.append(rail.title)
+        }
+        if !torFavorites.isEmpty { out.append("Yêu thích") }
+        return out
+    }
+
     private var searchGrid: some View {
         // Fixed 6 columns (§7.6: 6×264 + 5×28 = 1724 ≤ 1760).
         // v2.0.8: the fixed columns now serve the focus
@@ -675,7 +1415,12 @@ struct JoeTorrentDetail: View {
             // panel on the right. Every other theme keeps the
             // standard single-column body below; state, load logic
             // and actions are shared, only the composition moves.
-            if theme.id == .ultra {
+            // v2.1.1 (Private Cinema): the PC composition family
+            // (cinemaTorBody below) — its own branch, checked
+            // first; Ultra and the standard body are unchanged.
+            if theme.id == .privateCinema {
+                cinemaTorBody
+            } else if theme.id == .ultra {
                 ultraBody
             } else {
                 standardBody
@@ -890,6 +1635,236 @@ struct JoeTorrentDetail: View {
         .overlay(RoundedRectangle(cornerRadius: 24)
             .strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 24))
+    }
+
+    // MARK: - Private Cinema composition (2.1.1)
+
+    /// Private Cinema torrent detail: the PC detail family
+    /// (FIDELITY-AUDIT-210 §4) — the whole body takes the
+    /// family composition: the STATIC backdrop hero (the
+    /// shared static stack — poster blur field + the
+    /// Cinemeta background sliced over it + scrims; NO
+    /// preview machinery exists on this screen and none is
+    /// added, per the 2.0.49 static-image ruling), a serif
+    /// title block, the text-line credits (cinemaTorCredits,
+    /// shipped in 2.1.0 — kept), the shared episode block,
+    /// and the streams dressed as numbered Panel cards
+    /// (cinemaStreamSection). State, load logic and actions
+    /// are the detail's own, shared with every theme; only
+    /// the composition is PC's. The ScrollViewReader carries
+    /// the same Menu-to-top hook the standard body has.
+    private var cinemaTorBody: some View {
+        ZStack {
+            ultraTorBackdrop
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 32) {
+                        cinemaTorHeader
+                        if !cast.isEmpty {
+                            cinemaTorCredits
+                                .focusSection()
+                        }
+                        if meta.type == "series" {
+                            episodeSection
+                                .focusSection()
+                        }
+                        cinemaStreamSection
+                            .focusSection()
+                    }
+                    .id("joeTorDetailTopPC")
+                    .padding(.vertical, 10)
+                }
+                .onChange(of: topScrollSignal) { _, _ in
+                    proxy.scrollTo("joeTorDetailTopPC", anchor: .top)
+                }
+            }
+        }
+    }
+
+    /// The PC title block: letterspaced eyebrow, serif
+    /// typeset title, the year line, the shared favourite
+    /// row (+ the ViSub capsule when the subtitle fetch
+    /// found one), the synopsis, and the notice line —
+    /// every value the meta's own real field, over the
+    /// backdrop with NO poster card (the family dress).
+    private var cinemaTorHeader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(meta.type == "series" ? "PHIM BỘ / TORRENT"
+                                       : "PHIM ĐIỆN ẢNH / TORRENT")
+                .font(.system(size: 23, weight: .semibold))
+                .tracking(3)
+                .foregroundStyle(theme.heroMeta)
+                .lineLimit(1)
+                .padding(.top, 30)
+            Text(meta.name)
+                .font(.system(size: 64, weight: .semibold,
+                              design: .serif))
+                .tracking(4)
+                .foregroundStyle(theme.text)
+                .lineLimit(3)
+                .padding(.top, 16)
+            if !meta.year.isEmpty {
+                Text(meta.year)
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(theme.heroMeta)
+                    .padding(.top, 12)
+            }
+            HStack(spacing: 16) {
+                favButton
+                if hasViSub {
+                    Text("Phụ đề Việt: có (OpenSubtitles)")
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.text.opacity(0.8))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Color.white.opacity(0.10)))
+                }
+            }
+            .padding(.top, 20)
+            if !meta.desc.isEmpty {
+                // FIX-10a / ADJUDICATION F2: the spec type
+                // sheet's Detail synopsis — 21 pt regular,
+                // 1.55 line height (lineSpacing = 21 × 0.55
+                // ≈ 11.5 extra between lines), maxWidth 720.
+                Text(meta.desc)
+                    .font(.system(size: 21))
+                    .foregroundStyle(theme.text.opacity(0.92))
+                    .lineSpacing(11.5)
+                    // FIX-12 / R7 C-F3: 3 lines, matching
+                    // the chain-detail synopsis twin.
+                    .lineLimit(3)
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .padding(.top, 20)
+            }
+            if let notice {
+                Text(notice)
+                    .font(.system(size: 25))
+                    .foregroundStyle(.orange)
+                    .padding(.top, 14)
+            }
+        }
+    }
+
+    /// The PC stream block: the design's source-card dress
+    /// over THIS screen's stream list — a Divider + "Chọn
+    /// nguồn phát" heading, then one NUMBERED card per
+    /// stream (cinemaStreamRow). The loading / failed /
+    /// empty states are streamSection's own, mirrored
+    /// verbatim so the PC arm can never diverge from the
+    /// shared honesty surfaces.
+    @ViewBuilder
+    private var cinemaStreamSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Divider()
+            Text("Chọn nguồn phát")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+                .padding(.top, 8)
+            if loadingStreams {
+                ProgressView("Đang lấy nguồn…")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.text)
+                    .tint(.white)
+            } else if streamsFailed {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Không lấy được nguồn phát. Kiểm tra mạng rồi thử lại.")
+                        .font(.system(size: 25))
+                        .foregroundStyle(.orange)
+                    retryButton(focusKey: "retry|streams") {
+                        Task { await loadStreams() }
+                    }
+                }
+            } else if streams.isEmpty {
+                Text(TorrentSettings.isConfigured || TorrentSettings.mfBase != nil
+                     ? "Chưa có nguồn phát."
+                     : "Chưa cấu hình nguồn — vào Cài đặt nhập link Torrentio, token Real-Debrid/TorBox hoặc link MediaFusion.")
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(streams.enumerated()), id: \.offset) { pair in
+                        cinemaStreamRow(pair.element,
+                                        number: pair.offset + 1)
+                    }
+                }
+            }
+        }
+    }
+
+    /// One numbered PC source card: the serif number, the
+    /// role label (ĐỀ XUẤT for the pooled list's first —
+    /// the fetch ranks best-first — NGUỒN DỰ PHÒNG for the
+    /// rest), the play-state tag, the stream's own label /
+    /// title, and the spec + language lines tokenised from
+    /// the stream's OWN name/title text (ultraSpec — the
+    /// honesty rule: a fact the text does not state is
+    /// never shown). The face is the theme's Panel surface
+    /// token; focus is the shared JoeFocusRing, exactly as
+    /// streamRow dresses it. A tap plays through the same
+    /// play(_:) as every other theme.
+    private func cinemaStreamRow(_ stream: TorStream,
+                                 number: Int) -> some View {
+        Button {
+            play(stream)
+        } label: {
+            HStack(spacing: 18) {
+                Text(String(format: "%02d", number))
+                    .font(.system(size: 30, weight: .semibold,
+                                  design: .serif))
+                    .foregroundStyle(theme.meta)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 12) {
+                        Text(number == 1 ? "ĐỀ XUẤT" : "NGUỒN DỰ PHÒNG")
+                            .font(.system(size: 19, weight: .bold))
+                            .tracking(2)
+                            .foregroundStyle(theme.heroMeta)
+                        Text(streamTag(stream))
+                            .font(.system(size: 21, weight: .heavy))
+                            .foregroundStyle(theme.text)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(stream.playable
+                                                       ? JoeTheme.okGreen.opacity(0.35)
+                                                       : Color.orange.opacity(0.35)))
+                    }
+                    Text(stream.label)
+                        .font(.system(size: 29, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    if !stream.title.isEmpty && stream.title != stream.label {
+                        Text(stream.title)
+                            .font(.system(size: 25))
+                            .foregroundStyle(theme.meta)
+                            .lineLimit(1)
+                    }
+                    let spec = Self.ultraSpec(stream)
+                    if !spec.line.isEmpty {
+                        Text(spec.line)
+                            .font(.system(size: 23))
+                            .foregroundStyle(theme.text.opacity(0.78))
+                            .lineLimit(1)
+                    }
+                    if !spec.lang.isEmpty {
+                        Text(spec.lang)
+                            .font(.system(size: 23, weight: .semibold))
+                            .foregroundStyle(theme.heroMeta)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(theme.meta)
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: theme.rField)
+                .fill(theme.surface2))
+            .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
+        }
+        .joeCardButton()
+        .focused($focusedRow, equals: "st|" + stream.id.uuidString)
     }
 
     // MARK: - Hero

@@ -35,6 +35,11 @@ import UIKit
 // network, no container (App Group unavailable under the
 // owner's signing) → write nothing; the extension then returns
 // nil and the system shows its default shelf. No crash path.
+//
+// v2.1.1 (WS-E): the hot list's first source is the trending
+// FILE's full set, handed over in a rotating window (see
+// refresh()); the TMDB-trending resolution below it is the
+// fallback, unchanged.
 
 /// The extension's JSON contract (mirror of ShelfDoc in
 /// TopShelfProvider.swift — keep in sync).
@@ -100,6 +105,85 @@ enum JoeTopShelfWriter {
         // -- Hot list: TMDB trending resolved into the catalogue.
         var hero: ShelfDoc.Item?
         var hot: [ShelfDoc.Item] = []
+
+        // -- v2.1.1 (WS-E, owner order 2026-11-22 01:27 CST
+        // — full-set rotation): the FIRST hot source is now
+        // the trending FILE (JoeTrendingFile — the full set,
+        // 228 items / 142 titles with w780 backdrops at the
+        // owner's count), matched into the catalogue by IMDb
+        // id so every shelf item still deep-links to a title
+        // the app can open. The pre-fix writer resolved at
+        // most 9 TMDB-trending titles, so the shelf looped a
+        // handful of images from the same lead. The full set
+        // cannot be written into the container in one run —
+        // each title costs a backdrop + a poster fetch and
+        // a JPEG encode — so the writer hands over a
+        // rotating WINDOW of the set (hero + 12 hot) and
+        // advances the window start by one window per
+        // completed write (persisted below): successive
+        // refreshes cycle the window through the whole set,
+        // and the provider cycles the whole handed-over set
+        // on every load. The TMDB-trending branch below is
+        // kept verbatim as the fallback when the file
+        // resolves nothing.
+        var fileWindowAdvance: Int? = nil
+        let candidates = await fileCandidates(phim: phim)
+        if !candidates.isEmpty {
+            let windowSize = 13
+            let stored = UserDefaults.standard.integer(
+                forKey: "joetv.topshelf.windowStart")
+            let start = candidates.count > windowSize
+                ? stored % candidates.count : 0
+            let rotated = Array(candidates[start...])
+                + Array(candidates[..<start])
+            let window = Array(rotated.prefix(windowSize))
+            if candidates.count > windowSize {
+                fileWindowAdvance = (start + windowSize) % candidates.count
+            }
+            if let first = window.first {
+                let backdrop = await writeImage(first.meta.background,
+                                                pixels: 1280,
+                                                name: "ts-hero.jpg",
+                                                into: container)
+                let poster = await writeImage(first.meta.poster,
+                                              pixels: 500,
+                                              name: "ts-hero-poster.jpg",
+                                              into: container)
+                if !backdrop.isEmpty || !poster.isEmpty {
+                    hero = ShelfDoc.Item(
+                        id: "hot|" + first.movie.id,
+                        title: first.movie.name,
+                        backdrop: backdrop, poster: poster,
+                        action: movieLink(first.movie))
+                }
+            }
+            if hero != nil {
+                for (i, pair) in window.dropFirst().enumerated() {
+                    let poster = await writeImage(pair.meta.poster,
+                                                  pixels: 500,
+                                                  name: "ts-hot-\(i).jpg",
+                                                  into: container)
+                    let backdrop = await writeImage(pair.meta.background,
+                                                    pixels: 1280,
+                                                    name: "ts-hot-\(i)-bg.jpg",
+                                                    into: container)
+                    guard !poster.isEmpty || !backdrop.isEmpty else { continue }
+                    hot.append(ShelfDoc.Item(
+                        id: "hot|" + pair.movie.id,
+                        title: pair.movie.name,
+                        backdrop: backdrop, poster: poster,
+                        action: movieLink(pair.movie)))
+                }
+            } else {
+                // The window's lead produced no image at
+                // all — fall through to the TMDB branch
+                // below with a clean slate.
+                hot = []
+                fileWindowAdvance = nil
+            }
+        }
+
+        if hero == nil {
         let trending = await TMDBClient.trendingWeek()
         var resolved: [(TrendingTitle, Movie)] = []
         for t in trending {
@@ -143,6 +227,7 @@ enum JoeTopShelfWriter {
                     backdrop: backdrop, poster: poster,
                     action: movieLink(pair.1)))
             }
+        }
         }
 
         // -- Fallback: the catalogue's own order (the app's
@@ -224,7 +309,44 @@ enum JoeTopShelfWriter {
                            continueWatching: cw, hot: hot)
         guard let data = try? JSONEncoder().encode(doc) else { return }
         try? data.write(to: docURL, options: .atomic)
+        // v2.1.1 (WS-E): the trending-file window advances
+        // only on a completed write, so the next refresh
+        // hands over the NEXT window of the full set.
+        if let advance = fileWindowAdvance {
+            UserDefaults.standard.set(advance,
+                forKey: "joetv.topshelf.windowStart")
+        }
         pruneStaleImages(in: container, keeping: doc)
+    }
+
+    /// The trending file's titles matched into the
+    /// catalogue (v2.1.1, WS-E): every file meta whose IMDb
+    /// id the PhimStore catalogue carries, in the file's
+    /// own rail/item order, deduped by catalogue identity
+    /// (the file's own cross-rail dedupe already ran at
+    /// parse). A title the catalogue does not carry is
+    /// skipped — the shelf's deep-link rule (every item
+    /// opens in the app) outranks set size.
+    @MainActor
+    private static func fileCandidates(phim: PhimStore)
+        async -> [(meta: TorMeta, movie: Movie)] {
+        let rails = await JoeTrendingFile.loadRails()
+        var byImdb: [String: Movie] = [:]
+        for m in phim.merged where !m.imdbId.isEmpty {
+            if byImdb[m.imdbId] == nil { byImdb[m.imdbId] = m }
+        }
+        var out: [(meta: TorMeta, movie: Movie)] = []
+        var seen = Set<String>()
+        for rail in rails {
+            for meta in rail.metas {
+                guard let movie = byImdb[meta.imdbId],
+                      !movie.slug.isEmpty,
+                      seen.insert(movie.id).inserted
+                else { continue }
+                out.append((meta: meta, movie: movie))
+            }
+        }
+        return out
     }
 
     // MARK: - Deep links (joetv:// — parsed by JoeRootView's
