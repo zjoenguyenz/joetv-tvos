@@ -23,8 +23,8 @@ struct JoeHomeTVBFocusHero: View {
     /// the core passes the §3.5 static line only when a
     /// target carries no category at all.
     let eyebrowLine: String
-    var heroPlayFocused: Binding<Bool>
-    var heroInfoFocused: Binding<Bool>
+    var heroPlayFocused: FocusState<Bool>.Binding
+    var heroInfoFocused: FocusState<Bool>.Binding
     let openTarget: (JoePhimHomeCore.CinemaHeroTarget) -> Void
     @EnvironmentObject private var watch: WatchStore
     @ObservedObject private var followStore = FollowStore.shared
