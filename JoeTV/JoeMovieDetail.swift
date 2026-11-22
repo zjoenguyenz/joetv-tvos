@@ -299,72 +299,97 @@ struct JoeMovieDetail: View {
     /// six .task modifiers, their bodies slimmed to calls
     /// into named async methods below), so no single
     /// expression is heavy. Modifier ORDER is unchanged.
+    ///
+    /// Stepwise stage (CI run #34): run #33's erasure
+    /// moved the timeout onto the AnyView wrap itself
+    /// (:367) — erasing the RETURN type never shrank the
+    /// argument expression the checker still had to price
+    /// inside the call. The three chain layers now compose
+    /// IMPERATIVELY: sequential let bindings, each applying
+    /// exactly ONE modifier, so every statement is priced
+    /// on its own and no single expression composes the
+    /// chain. The nesting each binding builds is identical
+    /// to the chained form it replaces — same modifiers,
+    /// same order, same closures.
     private var detailScrollTasks: AnyView {
-        AnyView(detailScrollContent
-        .task(id: loadTaskID) { await load() }
-        .task(id: detail?.movie.id ?? "") { await runTMDBEnrichment() }
-        .task(id: detail?.movie.id ?? "") { await runTMDBLogoFetch() }
-        .task(id: dwellTaskID) {
-            // v2.0.8 (Phase 2/3): dwell pre-resolve — see
-            // dwellPreResolve(). SwiftUI cancels and restarts
-            // this task whenever the key changes (provider,
-            // slug, focused episode, detail arrival), so
-            // speculative work dies on exit/switch by itself.
-            await dwellPreResolve()
-        }
-        .task(id: previewTaskID) {
-            // 2.0.48 (Leg 3): the backdrop preview's dwell.
-            // Keyed WITHOUT the focused episode on purpose:
-            // the preview target is fixed at open time (the
-            // episode Play would play), and a focus move is
-            // an input that KILLS the preview (rule D1) —
-            // it must never restart this task into a fresh
-            // attempt. Provider/slug changes re-key it, but
-            // the kill latch the switch's own input set
-            // keeps the new run silent.
-            await runPreview()
-        }
-        .task(id: tmdb?.collectionId ?? 0) {
-            // Idea 21: the franchise load — keyed on the
-            // loaded TMDBInfo's collection id, so it starts
-            // the moment fetchInfo lands a collection and
-            // re-runs only for a different one. Fail-soft:
-            // no collection / no matched part leaves the
-            // strip absent and the detail exactly as it was.
-            await loadFranchise()
-        })
+        let loadStage = detailScrollContent
+            .task(id: loadTaskID) { await load() }
+        let enrichStage = loadStage
+            .task(id: detail?.movie.id ?? "") { await runTMDBEnrichment() }
+        let logoStage = enrichStage
+            .task(id: detail?.movie.id ?? "") { await runTMDBLogoFetch() }
+        let dwellStage = logoStage
+            .task(id: dwellTaskID) {
+                // v2.0.8 (Phase 2/3): dwell pre-resolve — see
+                // dwellPreResolve(). SwiftUI cancels and restarts
+                // this task whenever the key changes (provider,
+                // slug, focused episode, detail arrival), so
+                // speculative work dies on exit/switch by itself.
+                await dwellPreResolve()
+            }
+        let previewStage = dwellStage
+            .task(id: previewTaskID) {
+                // 2.0.48 (Leg 3): the backdrop preview's dwell.
+                // Keyed WITHOUT the focused episode on purpose:
+                // the preview target is fixed at open time (the
+                // episode Play would play), and a focus move is
+                // an input that KILLS the preview (rule D1) —
+                // it must never restart this task into a fresh
+                // attempt. Provider/slug changes re-key it, but
+                // the kill latch the switch's own input set
+                // keeps the new run silent.
+                await runPreview()
+            }
+        let franchiseStage = previewStage
+            .task(id: tmdb?.collectionId ?? 0) {
+                // Idea 21: the franchise load — keyed on the
+                // loaded TMDBInfo's collection id, so it starts
+                // the moment fetchInfo lands a collection and
+                // re-runs only for a different one. Fail-soft:
+                // no collection / no matched part leaves the
+                // strip absent and the detail exactly as it was.
+                await loadFranchise()
+            }
+        return AnyView(franchiseStage)
     }
 
     /// Structural fix, stage 3: the two full-screen
     /// covers, the declared Play focus and the exit hook.
+    /// Stepwise since run #34 (see detailScrollTasks):
+    /// one modifier per let binding.
     private var detailScrollCovers: AnyView {
-        AnyView(detailScrollTasks
-        .fullScreenCover(item: $actorRoute) { route in
-            JoeActorPage(route: route)
-        }
-        .fullScreenCover(item: $playerHolder) { holder in
-            JoePlayerView(director: holder.director,
-                          attemptRows: chainAttemptRows,
-                          filmTitle: holder.title,
-                          filmEpisode: holder.episode,
-                          sourceLine: holder.sourceLine)
-        }
-        .defaultFocus($focusedPlay, true)
-        // Menu closes THIS detail (1.9.2, Team 9 item 4): the
-        // handler lives on the detail's OWN root — the
-        // placement the player's own-root handler device-proves.
-        // The 1.9.1 handler sat on the root ZStack's wrapper
-        // layer, outside this view, and Menu exited the app
-        // from here on device. Unconditional: it exists exactly
-        // while the detail does.
-        .onExitCommand { handleExitCommand() })
+        let actorStage = detailScrollTasks
+            .fullScreenCover(item: $actorRoute) { route in
+                JoeActorPage(route: route)
+            }
+        let playerStage = actorStage
+            .fullScreenCover(item: $playerHolder) { holder in
+                JoePlayerView(director: holder.director,
+                              attemptRows: chainAttemptRows,
+                              filmTitle: holder.title,
+                              filmEpisode: holder.episode,
+                              sourceLine: holder.sourceLine)
+            }
+        let focusStage = playerStage
+            .defaultFocus($focusedPlay, true)
+        let exitStage = focusStage
+            // Menu closes THIS detail (1.9.2, Team 9 item 4): the
+            // handler lives on the detail's OWN root — the
+            // placement the player's own-root handler device-proves.
+            // The 1.9.1 handler sat on the root ZStack's wrapper
+            // layer, outside this view, and Menu exited the app
+            // from here on device. Unconditional: it exists exactly
+            // while the detail does.
+            .onExitCommand { handleExitCommand() }
+        return AnyView(exitStage)
     }
 
     /// Structural fix, final stage: the preview/input
     /// hooks, the scene-phase hook, the YouTube session
-    /// task and the chain hand-back hook.
+    /// task and the chain hand-back hook. Stepwise since
+    /// run #34 (see detailScrollTasks): one modifier per
+    /// let binding.
     private var detailScroll: AnyView {
-        AnyView(detailScrollCovers
         // 2.0.48 (Leg 3, rule D1): ANY input kills the
         // backdrop preview for this visit. Every focus
         // binding on this screen reports here — a swipe
@@ -378,47 +403,64 @@ struct JoeMovieDetail: View {
         // unset→set transition) from a user press; every
         // other transition kills, dwell included (see
         // JoePreview.swift focusInput).
-        .onChange(of: focusedEp) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: ytEpFocus) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: focusedPlay) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: focusedFav) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: focusedFollow) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: focusedAlt) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: focusedRetry) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: focusedCast) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: focusedFranchise) { old, new in
-            focusLandingChanged(old: old, new: new)
-        }
-        .onChange(of: playerHolder?.id) { handlePlayerPresentation() }
-        .onChange(of: nav.ytPlayer?.id) { handleYtPlayerPresentation() }
-        .onChange(of: provider) { handleProviderChange() }
-        .onChange(of: scenePhase) { handleScenePhaseChange() }
-        .onDisappear { handleDetailDisappear() }
-        // TVB YouTube feature: the catalogue + session state
-        // the source-row integration reads, and the chain
-        // hand-back — when the YouTube player (launched from
-        // this detail in Auto) gives an episode back, this
-        // detail plays it via the chain itself.
-        .task { await loadYtSession() }
-        .onChange(of: nav.ytChainPlay) { _, token in
-            handleYtChainPlay(token)
-        })
+        let epFocusStage = detailScrollCovers
+            .onChange(of: focusedEp) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let ytEpFocusStage = epFocusStage
+            .onChange(of: ytEpFocus) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let playFocusStage = ytEpFocusStage
+            .onChange(of: focusedPlay) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let favFocusStage = playFocusStage
+            .onChange(of: focusedFav) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let followFocusStage = favFocusStage
+            .onChange(of: focusedFollow) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let altFocusStage = followFocusStage
+            .onChange(of: focusedAlt) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let retryFocusStage = altFocusStage
+            .onChange(of: focusedRetry) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let castFocusStage = retryFocusStage
+            .onChange(of: focusedCast) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let franchiseFocusStage = castFocusStage
+            .onChange(of: focusedFranchise) { old, new in
+                focusLandingChanged(old: old, new: new)
+            }
+        let playerStage = franchiseFocusStage
+            .onChange(of: playerHolder?.id) { handlePlayerPresentation() }
+        let ytPlayerStage = playerStage
+            .onChange(of: nav.ytPlayer?.id) { handleYtPlayerPresentation() }
+        let providerStage = ytPlayerStage
+            .onChange(of: provider) { handleProviderChange() }
+        let sceneStage = providerStage
+            .onChange(of: scenePhase) { handleScenePhaseChange() }
+        let disappearStage = sceneStage
+            .onDisappear { handleDetailDisappear() }
+        let ytSessionStage = disappearStage
+            // TVB YouTube feature: the catalogue + session state
+            // the source-row integration reads, and the chain
+            // hand-back — when the YouTube player (launched from
+            // this detail in Auto) gives an episode back, this
+            // detail plays it via the chain itself.
+            .task { await loadYtSession() }
+        let chainStage = ytSessionStage
+            .onChange(of: nav.ytChainPlay) { _, token in
+                handleYtChainPlay(token)
+            }
+        return AnyView(chainStage)
     }
 
     // MARK: - 2.0.48 sweep: hook handlers + hoisted keys
@@ -1495,7 +1537,11 @@ struct JoeMovieDetail: View {
                            stateWeight: Font.Weight = .regular,
                            focusID: String? = nil,
                            action: (() -> Void)?) -> some View {
-        let row = HStack(alignment: .center, spacing: 20) {
+        // Stepwise since run #34 (see detailScrollTasks):
+        // the row's five styling modifiers compose one per
+        // let binding, not in a single expression over the
+        // HStack subtree.
+        let rowBase = HStack(alignment: .center, spacing: 20) {
             Text(name)
                 .font(.system(size: 30, weight: .bold))
                 .foregroundStyle(theme.text)
@@ -1510,13 +1556,18 @@ struct JoeMovieDetail: View {
                 .font(.system(size: 25, weight: stateWeight))
                 .foregroundStyle(stateColor)
         }
-        .padding(.horizontal, 30)
-        .padding(.vertical, 22)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: theme.rField)
-            .fill(theme.surfaceGradient))
-        .overlay(RoundedRectangle(cornerRadius: theme.rField)
-            .strokeBorder(theme.stroke, lineWidth: 1.5))
+        let rowPadded = rowBase
+            .padding(.horizontal, 30)
+        let rowSpaced = rowPadded
+            .padding(.vertical, 22)
+        let rowFramed = rowSpaced
+            .frame(maxWidth: .infinity, alignment: .leading)
+        let rowFilled = rowFramed
+            .background(RoundedRectangle(cornerRadius: theme.rField)
+                .fill(theme.surfaceGradient))
+        let row = rowFilled
+            .overlay(RoundedRectangle(cornerRadius: theme.rField)
+                .strokeBorder(theme.stroke, lineWidth: 1.5))
         if let action {
             // D1 (2.0.48): EVERY row built here kills the
             // preview in its press — several row actions
@@ -2203,7 +2254,11 @@ private struct JoeActorNameLabel: View {
             ? 1 : 0
         let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
         if bandVisible(movie: movie, tmdbURL: tmdbURL) {
-            ZStack {
+            // Stepwise since run #34 (see detailScrollTasks):
+            // the band's four trailing modifiers compose one
+            // per let binding below, not in a single
+            // expression over the ZStack subtree.
+            let bandStack = ZStack {
                 Color.black.opacity(0.45)
                 if let url = movie.posterURL {
                     JoeBandImage(url: url, targetPixels: 1920,
@@ -2244,23 +2299,27 @@ private struct JoeActorNameLabel: View {
                     .init(color: theme.bg, location: 1)
                 ], startPoint: .top, endPoint: .bottom)
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 430)
-            // v2.0.5 (N5 — design fidelity): DESIGN-SPEC-V19
-            // §7.4 specifies this strip with corner radius 18
-            // and a white @ 0.14 stroke at 2 pt, and
-            // acceptance shot 16 requires the radius VISIBLE;
-            // the shipped band was square-cornered (the
-            // owner's "Backdrop của theme ko có bo góc").
-            // Applied on the band's EXISTING geometry: the
-            // height stays 430 — §7.4's frozen 540 predates
-            // the approved composition this page was built
-            // from (the render + Android pipeline both run
-            // 430), so the dimension is flagged in the wave
-            // report rather than silently changed here.
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
+            let bandWide = bandStack
+                .frame(maxWidth: .infinity)
+            let bandSized = bandWide
+                .frame(height: 430)
+            let bandClipped = bandSized
+                // v2.0.5 (N5 — design fidelity): DESIGN-SPEC-V19
+                // §7.4 specifies this strip with corner radius 18
+                // and a white @ 0.14 stroke at 2 pt, and
+                // acceptance shot 16 requires the radius VISIBLE;
+                // the shipped band was square-cornered (the
+                // owner's "Backdrop của theme ko có bo góc").
+                // Applied on the band's EXISTING geometry: the
+                // height stays 430 — §7.4's frozen 540 predates
+                // the approved composition this page was built
+                // from (the render + Android pipeline both run
+                // 430), so the dimension is flagged in the wave
+                // report rather than silently changed here.
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+            bandClipped
+                .overlay(RoundedRectangle(cornerRadius: 18)
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
         }
     }
 
