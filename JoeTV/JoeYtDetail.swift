@@ -116,6 +116,14 @@ struct JoeYtDetail: View {
     /// and the ScrollViewReader scrolls the content's
     /// top id back into view.
     @State private var topScrollSignal = 0
+    /// FIX-213 (Fault 1, DIAG-20261122): the Menu exit's
+    /// second-press arm — Menu #1 jumps to the top and
+    /// arms this, Menu #2 closes, independent of whether
+    /// the jump's programmatic chipFocus write landed
+    /// (the chain detail's exitArmed, same construction).
+    /// Cleared by any focus change (the chipFocus /
+    /// epFocus stages in body below).
+    @State private var exitArmed = false
     /// Super VIP press feedback: the honest above-tier
     /// message, promoted from a quiet line to the accented
     /// notice when an episode is actually pressed.
@@ -167,7 +175,8 @@ struct JoeYtDetail: View {
                 content(series)
             } else {
                 ProgressView("Đang tải danh sách TVB…")
-                    .font(.system(size: 29))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(29) : .system(size: 29))
                     .foregroundStyle(theme.text)
                     .tint(theme.text)
             }
@@ -195,7 +204,14 @@ struct JoeYtDetail: View {
         // for a kill-on-input discipline to engage.
         let exitStage = rootContent
             .onExitCommand { handleExitCommand() }
-        let taskStage = exitStage
+        // FIX-213 (Fault 1): any focus change on this
+        // screen disarms the Menu exit (see exitArmed) —
+        // two more stepwise stages in the FL-390 shape.
+        let chipFocusStage = exitStage
+            .onChange(of: chipFocus) { _, _ in exitArmed = false }
+        let epFocusStage = chipFocusStage
+            .onChange(of: epFocus) { _, _ in exitArmed = false }
+        let taskStage = epFocusStage
             .task {
                 ytStore.ensureLoaded()
                 await session.refresh()
@@ -215,15 +231,24 @@ struct JoeYtDetail: View {
     /// unchanged — exactly as on the chain detail, whose
     /// Menu-close keys on Play, not on its back row; the
     /// back row's own press dismisses directly.)
+    /// (FIX-213: the handler now also carries the
+    /// exitArmed second-press close — see exitArmed.)
     /// (FIX-7: the per-branch preview kills this handler
     /// used to perform are removed — no preview exists
     /// on this screen.)
     private func handleExitCommand() {
         if chipFocus == "src:auto" {
             nav.ytDetail = nil
+        } else if exitArmed {
+            // FIX-213 (Fault 1): the previous Menu already
+            // jumped to the top and armed the exit; this
+            // press closes even if the chipFocus write
+            // never landed.
+            nav.ytDetail = nil
         } else {
             topScrollSignal += 1
             chipFocus = "src:auto"
+            exitArmed = true
         }
     }
 
@@ -520,7 +545,8 @@ struct JoeYtDetail: View {
         Text(mode == .auto
              ? "Tự động: ưu tiên YouTube; nếu YouTube không phát được mà phim có ở nguồn khác, app tự chuyển nguồn."
              : "YouTube: chỉ phát qua YouTube, không tự chuyển nguồn.")
-            .font(.system(size: 23))
+            .font(theme.id == .privateCinema
+                  ? JoePCType.outfit(23) : .system(size: 23))
             .foregroundStyle(theme.meta)
             .frame(maxWidth: 1250, alignment: .leading)
     }
@@ -572,15 +598,14 @@ struct JoeYtDetail: View {
     private func cinemaHeader(_ series: JoeYtSeries) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("TVB / YOUTUBE")
-                .font(.system(size: 23, weight: .semibold))
-                .tracking(3)
+                .font(JoePCType.outfit(15, weight: .medium))
+                .tracking(3.6)
                 .foregroundStyle(theme.heroMeta)
                 .lineLimit(1)
                 .padding(.top, 30)
             Text(series.title)
-                .font(.system(size: 64, weight: .semibold,
-                              design: .serif))
-                .tracking(4)
+                .font(JoePCType.display(100))
+                .tracking(-3)
                 .foregroundStyle(theme.text)
                 .lineLimit(3)
                 .padding(.top, 16)
@@ -591,18 +616,18 @@ struct JoeYtDetail: View {
             }
             .padding(.top, 16)
             Text("\(series.channelDisplay) · \(series.eps.count) tập")
-                .font(.system(size: 25))
+                .font(JoePCType.outfit(25))
                 .foregroundStyle(theme.heroMeta)
                 .padding(.top, 12)
             if let views = series.views {
                 Text("\(views.formatted()) lượt xem trên YouTube")
-                    .font(.system(size: 25))
+                    .font(JoePCType.outfit(25))
                     .foregroundStyle(theme.heroMeta)
                     .padding(.top, 6)
             }
             if let badge = JoeYtQualityMap.badgeText(pid: series.pid) {
                 Text("Chất lượng cao nhất đã đo trên máy này: \(badge)")
-                    .font(.system(size: 25))
+                    .font(JoePCType.outfit(25))
                     .foregroundStyle(theme.heroMeta)
                     .padding(.top, 6)
             }
@@ -622,7 +647,7 @@ struct JoeYtDetail: View {
         VStack(alignment: .leading, spacing: 12) {
             Divider()
             Text("Chọn nguồn phát")
-                .font(.system(size: 34, weight: .bold))
+                .font(JoePCType.display(34))
                 .foregroundStyle(theme.text)
                 .padding(.top, 8)
             sourceChips(series)
@@ -676,7 +701,8 @@ struct JoeYtDetail: View {
     /// accompany it were the 2.0.41 law and are removed.
     private var vipNotice: some View {
         Text("Mục Super VIP — hạng cao nhất của TVB trên YouTube.")
-            .font(.system(size: 25))
+            .font(theme.id == .privateCinema
+                  ? JoePCType.outfit(25) : .system(size: 25))
             .foregroundStyle(theme.meta)
             .frame(maxWidth: 1250, alignment: .leading)
     }
@@ -686,7 +712,9 @@ struct JoeYtDetail: View {
     private func episodes(_ series: JoeYtSeries) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Danh sách tập")
-                .font(.system(size: 29, weight: .bold))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(29, weight: .bold)
+                      : .system(size: 29, weight: .bold))
                 .foregroundStyle(theme.text)
             // FL-352 (2.0.45, leg 5): the saved-position
             // label — the row's own epLabel ("Đang xem:
@@ -695,7 +723,9 @@ struct JoeYtDetail: View {
             if let row = resumeRow, let ri = resumeIndex,
                ri < series.eps.count {
                 Text(row.epLabel)
-                    .font(.system(size: 25, weight: .semibold))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(25, weight: .semibold)
+                          : .system(size: 25, weight: .semibold))
                     .foregroundStyle(JoeTheme.okGreen)
             }
             // Lazy by requirement (design §1.5): a 444-episode
@@ -812,9 +842,17 @@ private struct JoeYtEpisodeChipLabel: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 13)
         .background(RoundedRectangle(cornerRadius: 14).fill(theme.surface2))
+        // Fault 11 fix round: the resting hairline is its
+        // own always-installed overlay and the focus ring is
+        // the chip family's (JoeChipRing) — under Private
+        // Cinema the ivory outset outline (2 px, offset
+        // 4 px); under every other theme the house
+        // JoeFocusRing over the hairline, which the 4 px
+        // inside band covers exactly as the single-overlay
+        // expression did.
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(
-            isFocused ? theme.focus : theme.stroke,
-            lineWidth: isFocused ? theme.ringWidth : 1.5))
+            theme.stroke, lineWidth: 1.5))
+        .overlay(JoeChipRing(shape: RoundedRectangle(cornerRadius: 14)))
     }
 }
 
@@ -836,7 +874,7 @@ private struct JoeYtPCBackLabel: View {
             Image(systemName: "arrow.left")
                 .font(.system(size: 24, weight: .medium))
             Text("Quay lại")
-                .font(.system(size: 26))
+                .font(JoePCType.outfit(26))
         }
         .foregroundStyle(isFocused ? theme.focus : theme.text)
         .padding(.horizontal, 10)

@@ -504,8 +504,28 @@ struct JoeTVBView: View {
         .onExitCommand {
             if searchOpen {
                 searchOpen = false
-            } else if headerSearchFocused == true {
-                nav.section = .phim
+            } else if headerSearchFocused == true
+                        || tvbHeroPlayFocused == true {
+                // FIX-213 (Fault 5): the "focus rests on
+                // this page's declared first element" test
+                // names BOTH landings — the header search
+                // button (every other theme) and the hero
+                // Play button (Private Cinema, whose header
+                // carries no button since this fix). Each
+                // binding is only ever bound under its own
+                // theme, so the combined test is exact.
+                nav.section = .home  // FIX-213 (Fault 13): return to Trang chủ (.home), the home surface since the split
+            } else if theme.id == .privateCinema && catalog == nil {
+                // GATE-213 R6 Lens 2 F3: under Private
+                // Cinema with no catalogue on screen (the
+                // loading / load-failed states) the hero —
+                // and with it the $tvbHeroPlayFocused
+                // binding — is not rendered, so the landing
+                // write below was a visibly dead press; only
+                // the second press, its state now reading
+                // true, reached the return above. Fall
+                // through to that return on the first press.
+                nav.section = .home
             } else {
                 // v2.0.49 (item 7, owner order 2026-11-21
                 // 22:32): Menu jumps straight to the top of
@@ -513,13 +533,32 @@ struct JoeTVBView: View {
                 // land focus on the header search button
                 // (this page's declared first element),
                 // swallowing the exit.
+                // FIX-213 (Fault 5): under Private Cinema
+                // the landing is the hero Play button —
+                // the header search button no longer
+                // exists there.
                 topScrollSignal += 1
-                headerSearchFocused = true
+                if theme.id == .privateCinema {
+                    tvbHeroPlayFocused = true
+                } else {
+                    headerSearchFocused = true
+                }
             }
         }
         // Idea 1: the actor page (.tvb mode) over this tab.
         .fullScreenCover(item: $actorRoute) { route in
             JoeActorPage(route: route)
+        }
+        // FIX-213 (Fault 5): the shell bar's search
+        // request for this section (see JoeNavigator
+        // .tvbSearchRequested) — consume it, reset it,
+        // and open the in-tab search, with the header
+        // button's own catalogue guard.
+        .onChange(of: nav.tvbSearchRequested) { _, requested in
+            if requested {
+                nav.tvbSearchRequested = false
+                if catalog != nil { searchOpen = true }
+            }
         }
         .task { await loadCatalog() }
         .task { ytStore.ensureLoaded() }
@@ -627,7 +666,14 @@ struct JoeTVBView: View {
             ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 8,
                        pinnedViews: [.sectionHeaders]) {
-                header
+                // GATE-213 R3 Lens 3 Finding 1 (RECALC-SPEC
+                // §3.5 + §5): the PC TVB home opens STRAIGHT
+                // with its hero, like the other three homes —
+                // the legacy `header` title block ("Phim bộ
+                // TVB" in system 44 heavy over a system 25
+                // subtitle) is legacy-theme furniture and
+                // does not render here. The legacy home
+                // keeps `header` unchanged.
                 if let catalog {
                     // v2.1.1 (FIX-6): the full PC hero
                     // (485 stage, the Phim hero's
@@ -645,6 +691,14 @@ struct JoeTVBView: View {
                         pcTVBCwRail
                         pcPipelineRails(catalog)
                         if let snapshot = ytStore.snapshot {
+                            // FIX-213 (Fault 7) + GATE-213
+                            // R5 Lens 2 F1: the YT rails ride
+                            // the shared Rail, which since
+                            // the R4 gate fix carries the
+                            // design's 94 frame itself under
+                            // Private Cinema — no wrapper
+                            // inset here (it double-inset
+                            // the rails to 108).
                             ytRailSections(snapshot)
                         }
                         pcAppendSections(catalog)
@@ -654,19 +708,33 @@ struct JoeTVBView: View {
                     .background(theme.bg)
                 } else if loadFailed {
                     Text("Không tải được danh sách TVB.")
-                        .font(.system(size: 29))
+                        .font(JoePCType.outfit(29))
                         .foregroundStyle(theme.meta)
                         .padding(.top, 30)
                 } else {
                     ProgressView("Đang tải danh sách TVB…")
-                        .font(.system(size: 29))
+                        .font(JoePCType.outfit(29))
                         .foregroundStyle(theme.text)
                         .tint(theme.text)
                         .padding(.top, 30)
                 }
             }
             .id("joeTVBHomeTop")
+            // FIX-213 (Fault 16): the stack rides up by
+            // the bar's height to cancel the scroll
+            // view's bar-clearance inset (joePCBarInset
+            // below) — rest geometry is unchanged (the
+            // hero still paints behind the transparent
+            // bar), but the pinned context strip now
+            // pins BELOW the bar instead of inside its
+            // band.
+            .padding(.top, -joePCBarHeight)
+            // FIX-213 (Fault 7): the design's bottom
+            // margin (library bottom64), as on the Phim
+            // home — the stack previously ended flush.
+            .padding(.bottom, 64)
             }
+            .joePCBarInset()
             .onChange(of: topScrollSignal) { _, _ in
                 proxy.scrollTo("joeTVBHomeTop", anchor: .top)
             }
@@ -679,7 +747,16 @@ struct JoeTVBView: View {
         // work (FL-017). The displayed-count hook seeds
         // the hero's default title when the catalogue
         // lands after onAppear.
-        .onChange(of: cardFocus) { _, _ in tvbHeroFocusMoved() }
+        .onChange(of: cardFocus) { _, new in
+            // FIX-213 (Fault 6 instrumentation): the
+            // focus-step breadcrumb — one DiagLog line
+            // per focus step on this home, so the next
+            // test session's log can convict or clear
+            // the lag hypotheses (see DiagLog's stall
+            // heartbeat). No behaviour change.
+            DiagLog.noteFocus(surface: "tvb-home", key: new)
+            tvbHeroFocusMoved()
+        }
         .onChange(of: displayed.count) { _, _ in tvbHeroFocusMoved() }
         .onAppear { tvbHeroFocusMoved() }
     }
@@ -930,20 +1007,38 @@ struct JoeTVBView: View {
                 .init(color: .clear, location: 0.55),
                 .init(color: theme.bg, location: 1)
             ], startPoint: .top, endPoint: .bottom)
-            LinearGradient(stops: [
-                .init(color: theme.bg.opacity(0.55), location: 0),
-                .init(color: .clear, location: 0.35)
-            ], startPoint: .top, endPoint: .bottom)
+            // FIX-213 (Fault 8): NO top scrim — the
+            // design draws exactly two scrims on this
+            // stage (left + bottom); the third one that
+            // stood here was added by the build for the
+            // OLD bar's legibility and darkened the art
+            // under the bar zone ("Làm che luôn
+            // backdrop"). See cinemaHeroBlock in
+            // JoePhimHome.swift.
             if let resolved = tvbHeroDisplayResolved(catalog) {
                 tvbHeroText(resolved)
             }
         }
         .frame(height: 485)
+        // FIX-213 (Fault 7): full-bleed stage, as on
+        // the Phim hero — the block bleeds across the
+        // shell's 80 pt ambient inset; the hero text
+        // keeps the TVB design's own x93 inside
+        // tvbHeroText and the tagline ends at 1826.
+        .padding(.horizontal, -80)
         .overlay(alignment: .bottomTrailing) {
             tvbHeroTagline(catalog)
-                .padding(.trailing, 14)
+                .padding(.trailing, 94)
                 .padding(.bottom, 72)
         }
+        // GATE-213 R6 Lens 2 F2: the declared section
+        // landing under Private Cinema — opening the TVB
+        // tab lands on the hero's Play control, as on the
+        // other PC homes (cinemaHeroBlock in JoePhimHome
+        // carries the same declaration). The header's own
+        // .defaultFocus serves every other theme (see the
+        // header declaration above).
+        .defaultFocus($tvbHeroPlayFocused, true)
     }
 
     /// The TVB hero's text block (v2.1.1, FIX-6 — a
@@ -963,26 +1058,26 @@ struct JoeTVBView: View {
             // painted literally — the same pattern as the
             // Torrent hero's static line in torHeroText.
             Text("MỘT THỜI HỒNG KÔNG / TVB")
-                .font(.system(size: 15, weight: .medium))
+                .font(JoePCType.outfit(15, weight: .medium))
                 .tracking(3.6)
                 .foregroundStyle(theme.heroMeta)
                 .lineLimit(1)
             Text(item.title)
-                .font(.system(size: 72, weight: .medium, design: .serif))
+                .font(JoePCType.display(72))
                 .tracking(-3)
                 .foregroundStyle(theme.text)
                 .lineLimit(2)
                 .padding(.top, 12)
             if !item.meta.isEmpty {
                 Text(item.meta)
-                    .font(.system(size: 20, weight: .regular))
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
                     .padding(.top, 12)
             }
             if !item.synopsis.isEmpty {
                 Text(item.synopsis)
-                    .font(.system(size: 18))
+                    .font(JoePCType.outfit(18))
                     .foregroundStyle(theme.text.opacity(0.92))
                     // FIX-12 / R7 C-F1: spec synopsis is
                     // 18/400 at line 1.5 → 9 pt extra.
@@ -1011,7 +1106,11 @@ struct JoeTVBView: View {
             }
             .padding(.top, 16)
         }
-        .padding(.leading, 13)
+        // FIX-213 (Fault 7): the hero block now bleeds
+        // to the frame's edges (see tvbHeroBlock), so
+        // this inset is the TVB design's own hero x93
+        // (TVB Home completion spec: hero x93, w850).
+        .padding(.leading, 93)
         .padding(.vertical, 36)
         .frame(maxWidth: 900, alignment: .leading)
     }
@@ -1024,8 +1123,7 @@ struct JoeTVBView: View {
     private func tvbHeroTagline(_ catalog: TVBCatalog) -> some View {
         VStack(alignment: .trailing, spacing: 8) {
             Text("Một buổi tối. Một thế giới khác.")
-                .font(.system(size: 28, weight: .regular, design: .serif))
-                .italic()
+                .font(JoePCType.editorial(28, italic: true))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
             HStack(spacing: 10) {
@@ -1033,7 +1131,7 @@ struct JoeTVBView: View {
                 Text("↓")
                 Text("TIẾP TỤC KHÁM PHÁ")
             }
-            .font(.system(size: 14, weight: .medium))
+            .font(JoePCType.outfit(14, weight: .medium))
             .tracking(3)
             .foregroundStyle(theme.heroMeta)
             .lineLimit(1)
@@ -1097,19 +1195,38 @@ struct JoeTVBView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 27, weight: .medium))
+                .font(JoePCType.display(27, weight: .medium))
+                .tracking(-0.3)
                 .foregroundStyle(theme.text)
+                // FIX-213 (Fault 7): heading at the
+                // design's 94 (shell 80 + 14 here); the
+                // track below owns the frame, as on the
+                // Phim home's cinemaRailShell.
+                .padding(.leading, 14)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 25) { content() }
-                    .padding(.horizontal, 4)
-                    // FIX-4 / C5: spec row padding 8 top / 9 bottom.
-                    .padding(.top, 8)
-                    .padding(.bottom, 9)
+                    // FIX-213 (Fault 7): the design's
+                    // track insets (94 / 94) inside a
+                    // track bled across the shell's 80 pt
+                    // ambient inset — first card at x94,
+                    // last card resting 94 short of the
+                    // right edge, scrolled cards painting
+                    // to both bezels, as drawn.
+                    .padding(.leading, 94)
+                    .padding(.trailing, 94)
+                    // FIX-4 / C5 + FIX-213 (Fault 14): track
+                    // padding 16/11 + row padding 8/9, as
+                    // on the Phim home — the design's
+                    // measured poster row (395) is their
+                    // sum; carrying only 8/9 compressed
+                    // every rail by ~26.
+                    .padding(.top, 24)
+                    .padding(.bottom, 20)
             }
             .scrollClipDisabled()
+            .padding(.horizontal, -80)
         }
         .focusSection()
-        .padding(.leading, 14)
     }
 
     /// FIX-4 / C3 (Gate R2 Lens C): the spec sheet's TVB
@@ -1196,6 +1313,13 @@ struct JoeTVBView: View {
     private func pcAppendSections(_ catalog: TVBCatalog) -> some View {
         ForEach(railSpecs(catalog)) { railSpec in
             if !pcLeadScopes.contains(railSpec.scope) {
+                // FIX-213 (Fault 7) + GATE-213 R5 Lens 2
+                // F1: these appended shelves ride the
+                // SHARED Rail, which since the R4 gate fix
+                // carries the design's 94 frame itself
+                // under Private Cinema — no wrapper inset
+                // here (it double-inset the shelves to
+                // 108).
                 if !railSpec.actors.isEmpty {
                     Rail(title: railSpec.title) {
                         ForEach(railSpec.actors) { actor in
@@ -1236,19 +1360,22 @@ struct JoeTVBView: View {
             // title's baseline beside it.
             VStack(alignment: .leading, spacing: 4) {
                 Text("TVB / ĐANG KHÁM PHÁ")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(JoePCType.outfit(15, weight: .medium))
                     .tracking(3.6)
                     .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     // FIX-4 / C4: the spec's strip title is 34/500.
+                    // GATE-213 R1 Lens 3: the family is
+                    // Bricolage (RECALC-SPEC §2.3), meta
+                    // Outfit 20/400.
                     Text(info.title)
-                        .font(.system(size: 34, weight: .medium))
+                        .font(JoePCType.display(34, weight: .medium))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     if !info.meta.isEmpty {
                         Text(info.meta)
-                            .font(.system(size: 22))
+                            .font(JoePCType.outfit(20))
                             .foregroundStyle(theme.meta)
                             .lineLimit(1)
                     }
@@ -1262,12 +1389,12 @@ struct JoeTVBView: View {
             VStack(alignment: .trailing, spacing: 4) {
                 if !info.railName.isEmpty {
                     Text(info.railName)
-                        .font(.system(size: 22))
+                        .font(JoePCType.outfit(22))
                         .foregroundStyle(theme.heroMeta)
                         .lineLimit(1)
                 }
                 Text(info.railLine)
-                    .font(.system(size: 22))
+                    .font(JoePCType.outfit(22))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
@@ -1391,7 +1518,28 @@ struct JoeTVBView: View {
     /// title + subtitle on the left, ONE entry button on the
     /// right carrying the section's .defaultFocus declaration —
     /// here the entry into the tab's own search.
+    /// FIX-213 (Fault 5, DIAG-20261122): under Private
+    /// Cinema the header carries NO search button and NO
+    /// .defaultFocus — the shell's floating bar centres
+    /// its own "Tìm phim" pill in the same top band, and
+    /// the two pills landed on top of each other (the
+    /// owner's "Đè nhau"). Under PC the bar's pill is
+    /// this page's single search entry (it raises
+    /// nav.tvbSearchRequested, consumed in body above),
+    /// and the section landing is the hero block's first
+    /// focusable, as on the other PC homes. Every other
+    /// theme keeps the button + landing below, byte-for-
+    /// byte (their VStack shell cannot collide).
+    @ViewBuilder
     private var header: some View {
+        if theme.id == .privateCinema {
+            headerRow
+        } else {
+            headerRow.defaultFocus($headerSearchFocused, true)
+        }
+    }
+
+    private var headerRow: some View {
         HStack(alignment: .center, spacing: 28) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Phim bộ TVB")
@@ -1402,16 +1550,17 @@ struct JoeTVBView: View {
                     .foregroundStyle(theme.meta)
             }
             Spacer()
-            Button {
-                if catalog != nil { searchOpen = true }
-            } label: {
-                JoeSecondaryLabel(title: "Tìm trong TVB",
-                                  systemImage: "magnifyingglass")
+            if theme.id != .privateCinema {
+                Button {
+                    if catalog != nil { searchOpen = true }
+                } label: {
+                    JoeSecondaryLabel(title: "Tìm trong TVB",
+                                      systemImage: "magnifyingglass")
+                }
+                .joeCardButton()
+                .focused($headerSearchFocused)
             }
-            .joeCardButton()
-            .focused($headerSearchFocused)
         }
-        .defaultFocus($headerSearchFocused, true)
     }
 
     // MARK: - Rails home (plan §3 + §3.3)
@@ -1822,12 +1971,19 @@ struct JoeCinemaTVBCwCard: View {
             }
             .frame(width: 320, height: 180)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(isFocused ? theme.focus : .clear,
-                              lineWidth: isFocused ? theme.ringWidth : 0))
+            // Fault 11 fix round: the design's tile focus —
+            // ivory OUTSET outline (3 px, offset 5 px, 7 px
+            // button radius) + 1.045 scale, replacing the
+            // legacy inside ring; rest opacity at the root.
+            .overlay(JoeOutsetRing(
+                shape: RoundedRectangle(cornerRadius: 7),
+                color: JoeCinemaFocus.ivory,
+                lineWidth: 3, offset: 5))
+            .scaleEffect(isFocused ? 1.045 : 1)
+            .animation(JoeCinemaFocus.tileCurve, value: isFocused)
             .overlay(alignment: .topLeading) {
                 Text(cwStateBadge)
-                    .font(.system(size: 11))
+                    .font(JoePCType.outfit(11))
                     .foregroundStyle(theme.badgeText)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 5)
@@ -1851,24 +2007,25 @@ struct JoeCinemaTVBCwCard: View {
                 .frame(height: 5)
             }
             Text(entry.title)
-                .font(.system(size: theme.cardTitleSize))
+                .font(JoePCType.outfit(theme.cardTitleSize))
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 10)
             if !entry.epLabel.isEmpty {
                 Text(entry.epLabel)
-                    .font(.system(size: theme.cardMetaSize))
+                    .font(JoePCType.outfit(theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                     .padding(.top, 3)
             }
             Text("Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
-                .font(.system(size: theme.cardMetaSize))
+                .font(JoePCType.outfit(theme.cardMetaSize))
                 .foregroundStyle(theme.meta)
                 .lineLimit(1)
                 .padding(.top, 3)
         }
         .frame(width: 320, alignment: .leading)
+        .joeCinemaCardFocus()
         // Keyed on the entry AND the series' arrival
         // (JoeYtCwPosterCard's rule: the catalogue
         // snapshot can land after the rail first paints).
@@ -2052,7 +2209,7 @@ struct JoeTVBSearchView: View {
             JoeLetterStrip(query: $query, focus: $keyFocus)
             if searched && results.isEmpty && ytResults.isEmpty {
                 Text("Không tìm thấy phim nào.")
-                    .font(.system(size: 29))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                     .foregroundStyle(theme.meta)
             }
             resultsArea
@@ -2078,7 +2235,10 @@ struct JoeTVBSearchView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 26, weight: .semibold))
                 Text(query.isEmpty ? "Tên phim, diễn viên…" : query)
-                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(29,
+                                             weight: .light)
+                          : .system(size: ThemeTokens.fieldTextSize))
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2101,7 +2261,9 @@ struct JoeTVBSearchView: View {
                 resultsGrid
                 if !ytResults.isEmpty {
                     Text("YouTube — TVB")
-                        .font(.system(size: 31, weight: .bold))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(31, weight: .bold)
+                              : .system(size: 31, weight: .bold))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
                     ytResultsGrid

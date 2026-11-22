@@ -110,6 +110,23 @@ struct JoeTorrentHome: View {
     @State private var topScrollSignal = 0
 
     var body: some View {
+        // GATE-213 R3 Lens 2 F1: the section's declared
+        // initial landing is theme-branched — under
+        // Private Cinema the letter strip does not exist
+        // (R2 furniture gate), so the landing is the PC
+        // hero's play button, as on the other PC homes;
+        // every other theme keeps the strip landing
+        // declared below torHomeContent's chain.
+        if theme.id == .privateCinema {
+            torHomeContent
+                .defaultFocus($torHeroPlayFocused, true)
+        } else {
+            torHomeContent
+                .defaultFocus($keyFocus, .key("a"))
+        }
+    }
+
+    private var torHomeContent: some View {
             // v2.0.49 (item 7): the ScrollView sits inside
             // a ScrollViewReader so Menu can jump straight
             // to the top of the page (see .onExitCommand).
@@ -117,16 +134,28 @@ struct JoeTorrentHome: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36,
                            pinnedViews: [.sectionHeaders]) {
-                    header
-                    searchRow
-                    // Fault (e): the in-app letter strip —
-                    // typing lives here now, under the query
-                    // display, exactly as on the Phim and TVB
-                    // search screens (JoeSearchView /
-                    // JoeTVBSearchView). The system TextField
-                    // it replaces summoned Apple's full-screen
-                    // keyboard and hid the home until "done".
-                    JoeLetterStrip(query: $query, focus: $keyFocus)
+                    // GATE-213 R2 Lens 3 F1 (RECALC-SPEC
+                    // §3.6 + §5 closed ruling): under
+                    // Private Cinema the Torrent home opens
+                    // STRAIGHT with the hero — no furniture
+                    // above it. The legacy header + in-home
+                    // search row + letter strip render only
+                    // on the legacy themes; under PC,
+                    // torrent titles are found through the
+                    // shell's Tìm phim (JoeSearchView routes
+                    // to the torrent detail by IMDb id).
+                    if theme.id != .privateCinema {
+                        header
+                        searchRow
+                        // Fault (e): the in-app letter strip —
+                        // typing lives here now, under the query
+                        // display, exactly as on the Phim and TVB
+                        // search screens (JoeSearchView /
+                        // JoeTVBSearchView). The system TextField
+                        // it replaces summoned Apple's full-screen
+                        // keyboard and hid the home until "done".
+                        JoeLetterStrip(query: $query, focus: $keyFocus)
+                    }
                     if searching {
                         // C-10: searching is a visible state, not
                         // an empty grid.
@@ -162,6 +191,15 @@ struct JoeTorrentHome: View {
                                 pcTorCwRail
                                 pcTorProviderRails
                                 pcTorExploreRails
+                                // FIX-213 (Fault 7) + GATE-213
+                                // R5 Lens 2 F1: favRail rides
+                                // the shared Rail, which since
+                                // the R4 gate fix carries the
+                                // design's 94 frame itself
+                                // under Private Cinema — no
+                                // wrapper inset here (it
+                                // double-inset the rail to
+                                // 108).
                                 favRail
                             } header: {
                                 torContextStrip
@@ -173,6 +211,14 @@ struct JoeTorrentHome: View {
                             // Section, never under the
                             // rails while browsing.
                             .background(theme.bg)
+                            // FIX-213 (Fault 7): the
+                            // design's bottom margin (64)
+                            // — this shared stack's own
+                            // spacing is 36, so a 28 pt
+                            // clear tail lands the last
+                            // rail exactly 64 above the
+                            // frame's bottom edge.
+                            Color.clear.frame(height: 28)
                         } else {
                         cwRail
                         favRail
@@ -201,7 +247,8 @@ struct JoeTorrentHome: View {
                         // rail has landed.
                         if store.loading && !store.loadTimedOut && torCatalogueEmpty {
                             ProgressView("Đang tải danh mục…")
-                                .font(.system(size: 29))
+                                .font(theme.id == .privateCinema
+                                      ? JoePCType.outfit(29) : .system(size: 29))
                                 .foregroundStyle(theme.text)
                                 .tint(.white)
                         }
@@ -210,23 +257,37 @@ struct JoeTorrentHome: View {
                         }
                         if torEmptyVisible {
                             Text("Chưa có danh mục nào.")
-                                .font(.system(size: 29))
+                                .font(theme.id == .privateCinema
+                                      ? JoePCType.outfit(29) : .system(size: 29))
                                 .foregroundStyle(theme.meta)
                         }
                         if !failedCatalogNames.isEmpty {
                             Text("Chưa tải được: " + failedCatalogNames.joined(separator: ", "))
-                                .font(.system(size: 25))
+                                .font(theme.id == .privateCinema
+                                      ? JoePCType.outfit(25) : .system(size: 25))
                                 .foregroundStyle(.orange)
                         }
                         if !TorrentSettings.isConfigured {
                             Text("Chưa cấu hình nguồn phát: vào Cài đặt nhập link Torrentio hoặc token Real-Debrid/TorBox của anh để lấy nguồn.")
-                                .font(.system(size: 25))
+                                .font(theme.id == .privateCinema
+                                      ? JoePCType.outfit(25) : .system(size: 25))
                                 .foregroundStyle(.orange)
                         }
                     }
                 }
                 .id("joeTorHomeTop")
+                // FIX-213 (Fault 16): under Private
+                // Cinema the stack rides up by the bar's
+                // height to cancel the scroll view's
+                // bar-clearance inset (joePCBarInset
+                // below) — rest geometry unchanged, but
+                // the pinned context strip now pins
+                // BELOW the bar instead of inside its
+                // band. Other themes: no inset, no
+                // compensation (their shell is a VStack).
+                .padding(.top, theme.id == .privateCinema ? -joePCBarHeight : 0)
             }
+            .joePCBarInset()
             // v2.1.1 (FIX-6): WS-I's ScrollView-background
             // backdrop placement is REMOVED — the shared
             // controller's layer now lives inside the PC
@@ -280,7 +341,10 @@ struct JoeTorrentHome: View {
         // Fault (e): the landing is the letter strip's first
         // key — the TextField this declaration used to name
         // (.field) no longer exists, exactly as in
-        // JoeSearchView since v2.0.17.
+        // JoeSearchView since v2.0.17. GATE-213 R3 Lens 2
+        // F1: that .defaultFocus declaration now sits in
+        // `body`, branched by theme (the hero play button
+        // under Private Cinema, the strip key elsewhere).
         .onExitCommand {
             // v2.0.49 (item 7, owner order 2026-11-21
             // 22:32): Menu jumps straight to the top of
@@ -291,14 +355,47 @@ struct JoeTorrentHome: View {
             // return to Phim; anywhere else, Menu scrolls
             // to the top and lands focus on the strip,
             // swallowing the exit.
-            if keyFocus != nil {
-                nav.section = .phim
+            // GATE-213 R3 Lens 2 F1: the Private Cinema
+            // arm mirrors the same two steps against the
+            // hero — focus on either hero button returns
+            // to Trang chủ; anywhere else, Menu scrolls
+            // to the top and lands on the hero play
+            // button. (The strip is not rendered under
+            // PC, so keyFocus can never be set there.)
+            if theme.id == .privateCinema {
+                if torHeroDisplayResolved() == nil {
+                    // GATE-213 R7 Lens 2 F1: no hero on
+                    // screen (initial load, error and
+                    // empty states — torHeroBlock renders
+                    // nothing until a title resolves), so
+                    // $torHeroPlayFocused has no holder:
+                    // the body's .defaultFocus names it,
+                    // but no view is bound to it, and the
+                    // state surface's own control (the
+                    // error surface's "Thử lại") holds the
+                    // focus. The landing write below was
+                    // a visibly dead press there — only a
+                    // scroll to the top of an already-top
+                    // page — and reaching Trang chủ
+                    // depended on the state flip surviving
+                    // to a second press. Mirror the R6
+                    // fixes on the sibling PC homes
+                    // (JoePhimHome / JoeTVB): go home on
+                    // the first press.
+                    nav.section = .home
+                } else if torHeroPlayFocused || torHeroInfoFocused {
+                    nav.section = .home
+                } else {
+                    topScrollSignal += 1
+                    torHeroPlayFocused = true
+                }
+            } else if keyFocus != nil {
+                nav.section = .home  // FIX-213 (Fault 13): return to Trang chủ (.home), the home surface since the split
             } else {
                 topScrollSignal += 1
                 keyFocus = .key("a")
             }
         }
-        .defaultFocus($keyFocus, .key("a"))
         // v2.1.1 (WS-I): focus-follows backdrop, PC arm
         // only (the resolver no-ops under every other
         // theme): focusedMeta / focusedEntry are the
@@ -564,16 +661,27 @@ struct JoeTorrentHome: View {
                     .init(color: .clear, location: 0.55),
                     .init(color: theme.bg, location: 1)
                 ], startPoint: .top, endPoint: .bottom)
-                LinearGradient(stops: [
-                    .init(color: theme.bg.opacity(0.55), location: 0),
-                    .init(color: .clear, location: 0.35)
-                ], startPoint: .top, endPoint: .bottom)
+                // FIX-213 (Fault 8): NO top scrim — the
+                // design draws exactly two scrims on this
+                // stage (left + bottom); the third one
+                // that stood here was added by the build
+                // for the OLD bar's legibility and
+                // darkened the art under the bar zone
+                // ("Làm che luôn backdrop"). See
+                // cinemaHeroBlock in JoePhimHome.swift.
                 torHeroText(resolved)
             }
             .frame(height: 485)
+            // FIX-213 (Fault 7): full-bleed stage, as
+            // on the Phim hero — the block bleeds
+            // across the shell's 80 pt ambient inset;
+            // the hero text keeps the design's x94
+            // inside torHeroText and the tagline ends
+            // at 1826.
+            .padding(.horizontal, -80)
             .overlay(alignment: .bottomTrailing) {
                 torHeroTagline
-                    .padding(.trailing, 14)
+                    .padding(.trailing, 94)
                     .padding(.bottom, 72)
             }
         }
@@ -593,26 +701,26 @@ struct JoeTorrentHome: View {
         let item = resolved.item
         return VStack(alignment: .leading, spacing: 0) {
             Text("THƯ VIỆN TORRENT CỦA BẠN / TORRENT")
-                .font(.system(size: 15, weight: .medium))
+                .font(JoePCType.outfit(15, weight: .medium))
                 .tracking(3.6)
                 .foregroundStyle(theme.heroMeta)
                 .lineLimit(1)
             Text(item.title)
-                .font(.system(size: 72, weight: .medium, design: .serif))
+                .font(JoePCType.display(72))
                 .tracking(-3)
                 .foregroundStyle(theme.text)
                 .lineLimit(2)
                 .padding(.top, 12)
             if !item.meta.isEmpty {
                 Text(item.meta)
-                    .font(.system(size: 20, weight: .regular))
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
                     .padding(.top, 12)
             }
             if !item.synopsis.isEmpty {
                 Text(item.synopsis)
-                    .font(.system(size: 18))
+                    .font(JoePCType.outfit(18))
                     .foregroundStyle(theme.text.opacity(0.92))
                     // FIX-12 / R7 C-F1: spec synopsis is
                     // 18/400 at line 1.5 → 9 pt extra.
@@ -641,7 +749,11 @@ struct JoeTorrentHome: View {
             }
             .padding(.top, 16)
         }
-        .padding(.leading, 13)
+        // FIX-213 (Fault 7): the hero block now bleeds
+        // to the frame's edges (see torHeroBlock), so
+        // this inset is the design's own hero x94
+        // (many-rail spec: hero x94, w850).
+        .padding(.leading, 94)
         .padding(.vertical, 36)
         .frame(maxWidth: 900, alignment: .leading)
     }
@@ -654,8 +766,7 @@ struct JoeTorrentHome: View {
     private var torHeroTagline: some View {
         VStack(alignment: .trailing, spacing: 8) {
             Text("Một buổi tối. Một thế giới khác.")
-                .font(.system(size: 28, weight: .regular, design: .serif))
-                .italic()
+                .font(JoePCType.editorial(28, italic: true))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
             HStack(spacing: 10) {
@@ -663,7 +774,7 @@ struct JoeTorrentHome: View {
                 Text("↓")
                 Text("TIẾP TỤC KHÁM PHÁ")
             }
-            .font(.system(size: 14, weight: .medium))
+            .font(JoePCType.outfit(14, weight: .medium))
             .tracking(3)
             .foregroundStyle(theme.heroMeta)
             .lineLimit(1)
@@ -696,7 +807,7 @@ struct JoeTorrentHome: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 26, weight: .semibold))
                 Text(query.isEmpty ? "Tìm phim torrent…" : query)
-                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(29, weight: .light) : .system(size: ThemeTokens.fieldTextSize))
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -894,14 +1005,17 @@ struct JoeTorrentHome: View {
                 .font(.system(size: 44))
                 .foregroundStyle(.orange)
             Text("Không tải được danh mục torrent.")
-                .font(.system(size: 29, weight: .semibold))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(29, weight: .semibold)
+                      : .system(size: 29, weight: .semibold))
                 .foregroundStyle(theme.text)
             // 1.9.2 (Team 9 item 6): the copy names the likely
             // cause — the torrent route itself, and the tunnel
             // profile's known habit of blocking it — instead of
             // a generic network shrug.
             Text("Chưa tải được mục Torrent — đường tới Torrentio/Cinemeta đang không thông. Nếu profile hầm đang bật, đường này thường bị chặn; thử tắt hầm rồi bấm Thử lại.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
             Button { store.reload() } label: {
                 JoePrimaryLabel(title: "Thử lại")
@@ -994,19 +1108,38 @@ struct JoeTorrentHome: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 27, weight: .medium))
+                .font(JoePCType.display(27, weight: .medium))
+                .tracking(-0.3)
                 .foregroundStyle(theme.text)
+                // FIX-213 (Fault 7): heading at the
+                // design's 94 (shell 80 + 14 here); the
+                // track below owns the frame, as on the
+                // Phim home's cinemaRailShell.
+                .padding(.leading, 14)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 25) { content() }
-                    .padding(.horizontal, 4)
-                    // FIX-5 / Lens C Finding 1 (C5): spec row padding 8 top / 9 bottom.
-                    .padding(.top, 8)
-                    .padding(.bottom, 9)
+                    // FIX-213 (Fault 7): the design's
+                    // track insets (94 / 94) inside a
+                    // track bled across the shell's 80 pt
+                    // ambient inset — first card at x94,
+                    // last card resting 94 short of the
+                    // right edge, scrolled cards painting
+                    // to both bezels, as drawn.
+                    .padding(.leading, 94)
+                    .padding(.trailing, 94)
+                    // FIX-5 / Lens C Finding 1 (C5) +
+                    // FIX-213 (Fault 14): track padding
+                    // 16/11 + row padding 8/9 — the
+                    // design's measured poster row (395)
+                    // is their sum; carrying only 8/9
+                    // compressed every rail by ~26.
+                    .padding(.top, 24)
+                    .padding(.bottom, 20)
             }
             .scrollClipDisabled()
+            .padding(.horizontal, -80)
         }
         .focusSection()
-        .padding(.leading, 14)
     }
 
     /// Design rail 1 (WS-H): Continue Watching FIRST as
@@ -1066,21 +1199,26 @@ struct JoeTorrentHome: View {
 
     /// Design rail 5 (WS-H): "Torrent · Khám phá
     /// catalogue" — the remaining catalogue rails plus
-    /// the genre rails, in existing order and existing
-    /// builders (the catalogue-exploration family; WS-H
-    /// mapping §5 flags the family mapping).
+    /// the genre rails, in existing order (the
+    /// catalogue-exploration family; WS-H mapping §5
+    /// flags the family mapping). GATE-213 R3 Lens 3
+    /// Finding 2: these are §3.6 DESIGN rails (rail 5,
+    /// "Khám phá catalogue"), so they build through the
+    /// PC rail construction (torPcMetaRail — torPcRail
+    /// Shell + JoeCinemaTorCard), NOT the legacy shared
+    /// metaRail/Rail they previously used.
     @ViewBuilder
     private var pcTorExploreRails: some View {
         ForEach(Array(pcTorLandedCatalogs.dropFirst(3).enumerated()), id: \.offset) { _, cat in
             if let metas = store.rails[cat.id + "|" + cat.type], !metas.isEmpty {
-                metaRail(cat.name, metas, base: cat.base,
-                         scope: "torCat:\(cat.id)|\(cat.type)")
+                torPcMetaRail(cat.name, metas, base: cat.base,
+                              scope: "torCat:\(cat.id)|\(cat.type)")
             }
         }
         ForEach(Array(store.genreRails.enumerated()), id: \.offset) { _, rail in
             if !rail.metas.isEmpty {
-                metaRail(rail.title, rail.metas, base: TorrentSettings.cinemeta,
-                         scope: "torGenre:\(rail.type):\(rail.genre)")
+                torPcMetaRail(rail.title, rail.metas, base: TorrentSettings.cinemeta,
+                              scope: "torGenre:\(rail.type):\(rail.genre)")
             }
         }
     }
@@ -1116,19 +1254,22 @@ struct JoeTorrentHome: View {
             // title's baseline beside it.
             VStack(alignment: .leading, spacing: 4) {
                 Text("TORRENT / ĐANG KHÁM PHÁ")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(JoePCType.outfit(15, weight: .medium))
                     .tracking(3.6)
                     .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     // FIX-5 / Lens C Finding 1 (C4): the spec's strip title is 34/500.
+                    // GATE-213 R1 Lens 3: the family is
+                    // Bricolage (RECALC-SPEC §2.3), meta
+                    // Outfit 20/400.
                     Text(info.title)
-                        .font(.system(size: 34, weight: .medium))
+                        .font(JoePCType.display(34, weight: .medium))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     if !info.meta.isEmpty {
                         Text(info.meta)
-                            .font(.system(size: 22))
+                            .font(JoePCType.outfit(20))
                             .foregroundStyle(theme.meta)
                             .lineLimit(1)
                     }
@@ -1142,12 +1283,12 @@ struct JoeTorrentHome: View {
             VStack(alignment: .trailing, spacing: 4) {
                 if !info.railName.isEmpty {
                     Text(info.railName)
-                        .font(.system(size: 22))
+                        .font(JoePCType.outfit(22))
                         .foregroundStyle(theme.heroMeta)
                         .lineLimit(1)
                 }
                 Text(info.railLine)
-                    .font(.system(size: 22))
+                    .font(JoePCType.outfit(22))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
@@ -1401,6 +1542,14 @@ struct JoeTorrentDetail: View {
     /// jump to the top of the page (owner order
     /// 2026-11-21).
     @State private var topScrollSignal = 0
+    /// FIX-213 (Fault 1, DIAG-20261122): the Menu exit's
+    /// second-press arm — Menu #1 jumps to the top and
+    /// arms this, Menu #2 closes, independent of whether
+    /// the jump's programmatic focusedRow write landed
+    /// (the chain detail's exitArmed, same construction).
+    /// Cleared by any focusedRow change (the .onChange
+    /// stage in body below).
+    @State private var exitArmed = false
     @FocusState private var focusedRow: String?
 
     private var meta: TorMeta { route.meta }
@@ -1453,11 +1602,21 @@ struct JoeTorrentDetail: View {
             // focus landing applies.)
             if focusedRow == "fav" {
                 nav.tor = nil
+            } else if exitArmed {
+                // FIX-213 (Fault 1): the previous Menu
+                // already jumped to the top and armed the
+                // exit; this press closes even if the
+                // focusedRow write never landed.
+                nav.tor = nil
             } else {
                 topScrollSignal += 1
                 focusedRow = "fav"
+                exitArmed = true
             }
         }
+        // FIX-213 (Fault 1): any focus change on this
+        // screen disarms the Menu exit (see exitArmed).
+        .onChange(of: focusedRow) { _, _ in exitArmed = false }
         .defaultFocus($focusedRow, "fav")
     }
 
@@ -1691,21 +1850,20 @@ struct JoeTorrentDetail: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(meta.type == "series" ? "PHIM BỘ / TORRENT"
                                        : "PHIM ĐIỆN ẢNH / TORRENT")
-                .font(.system(size: 23, weight: .semibold))
-                .tracking(3)
+                .font(JoePCType.outfit(15, weight: .medium))
+                .tracking(3.6)
                 .foregroundStyle(theme.heroMeta)
                 .lineLimit(1)
                 .padding(.top, 30)
             Text(meta.name)
-                .font(.system(size: 64, weight: .semibold,
-                              design: .serif))
-                .tracking(4)
+                .font(JoePCType.display(100))
+                .tracking(-3)
                 .foregroundStyle(theme.text)
                 .lineLimit(3)
                 .padding(.top, 16)
             if !meta.year.isEmpty {
                 Text(meta.year)
-                    .font(.system(size: 27, weight: .medium))
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.heroMeta)
                     .padding(.top, 12)
             }
@@ -1713,7 +1871,7 @@ struct JoeTorrentDetail: View {
                 favButton
                 if hasViSub {
                     Text("Phụ đề Việt: có (OpenSubtitles)")
-                        .font(.system(size: 25))
+                        .font(JoePCType.outfit(25))
                         .foregroundStyle(theme.text.opacity(0.8))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
@@ -1727,7 +1885,7 @@ struct JoeTorrentDetail: View {
                 // 1.55 line height (lineSpacing = 21 × 0.55
                 // ≈ 11.5 extra between lines), maxWidth 720.
                 Text(meta.desc)
-                    .font(.system(size: 21))
+                    .font(JoePCType.outfit(21))
                     .foregroundStyle(theme.text.opacity(0.92))
                     .lineSpacing(11.5)
                     // FIX-12 / R7 C-F3: 3 lines, matching
@@ -1738,7 +1896,7 @@ struct JoeTorrentDetail: View {
             }
             if let notice {
                 Text(notice)
-                    .font(.system(size: 25))
+                    .font(JoePCType.outfit(25))
                     .foregroundStyle(.orange)
                     .padding(.top, 14)
             }
@@ -1757,18 +1915,18 @@ struct JoeTorrentDetail: View {
         VStack(alignment: .leading, spacing: 14) {
             Divider()
             Text("Chọn nguồn phát")
-                .font(.system(size: 34, weight: .bold))
+                .font(JoePCType.display(34))
                 .foregroundStyle(theme.text)
                 .padding(.top, 8)
             if loadingStreams {
                 ProgressView("Đang lấy nguồn…")
-                    .font(.system(size: 29))
+                    .font(JoePCType.outfit(29))
                     .foregroundStyle(theme.text)
                     .tint(.white)
             } else if streamsFailed {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Không lấy được nguồn phát. Kiểm tra mạng rồi thử lại.")
-                        .font(.system(size: 25))
+                        .font(JoePCType.outfit(25))
                         .foregroundStyle(.orange)
                     retryButton(focusKey: "retry|streams") {
                         Task { await loadStreams() }
@@ -1778,7 +1936,7 @@ struct JoeTorrentDetail: View {
                 Text(TorrentSettings.isConfigured || TorrentSettings.mfBase != nil
                      ? "Chưa có nguồn phát."
                      : "Chưa cấu hình nguồn — vào Cài đặt nhập link Torrentio, token Real-Debrid/TorBox hoặc link MediaFusion.")
-                    .font(.system(size: 25))
+                    .font(JoePCType.outfit(25))
                     .foregroundStyle(theme.meta)
             } else {
                 LazyVStack(alignment: .leading, spacing: 12) {
@@ -1791,77 +1949,59 @@ struct JoeTorrentDetail: View {
         }
     }
 
-    /// One numbered PC source card: the serif number, the
-    /// role label (ĐỀ XUẤT for the pooled list's first —
-    /// the fetch ranks best-first — NGUỒN DỰ PHÒNG for the
-    /// rest), the play-state tag, the stream's own label /
-    /// title, and the spec + language lines tokenised from
-    /// the stream's OWN name/title text (ultraSpec — the
-    /// honesty rule: a fact the text does not state is
-    /// never shown). The face is the theme's Panel surface
-    /// token; focus is the shared JoeFocusRing, exactly as
-    /// streamRow dresses it. A tap plays through the same
-    /// play(_:) as every other theme.
+    /// One numbered PC source row. FIX-213 (Faults 3+4,
+    /// DIAG-20261122; owner ruling 2026-11-22 10:25 CST —
+    /// "Làm nút nhỏ nguồn ghi tắt nhỏ ít thông tin được
+    /// rồi", which OVERRIDES the drawing for these rows):
+    /// this is the row the owner's Fault-3 photo shows,
+    /// and it now carries the same ONE line as streamRow
+    /// — the number, the availability dot (the "PHÁT
+    /// NGAY" word-capsule's replacement, see streamDot)
+    /// and the compact line (provider short form · one
+    /// quality token · size, see streamCompactLine). The
+    /// role label, the full release name, the spec +
+    /// language lines and the chevron are gone; vertical
+    /// padding 16 → 8. The face is the theme's Panel
+    /// surface token; focus is the design's source-row
+    /// state (Fault 11 fix round: JoeSourceRowFace +
+    /// JoeDesignRing, exactly as streamRow dresses it).
+    /// A tap plays through the same play(_:) as every
+    /// other theme.
     private func cinemaStreamRow(_ stream: TorStream,
                                  number: Int) -> some View {
         Button {
             play(stream)
         } label: {
-            HStack(spacing: 18) {
+            HStack(spacing: 14) {
                 Text(String(format: "%02d", number))
-                    .font(.system(size: 30, weight: .semibold,
-                                  design: .serif))
+                    .font(JoePCType.editorial(24))
                     .foregroundStyle(theme.meta)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 12) {
-                        Text(number == 1 ? "ĐỀ XUẤT" : "NGUỒN DỰ PHÒNG")
-                            .font(.system(size: 19, weight: .bold))
-                            .tracking(2)
-                            .foregroundStyle(theme.heroMeta)
-                        Text(streamTag(stream))
-                            .font(.system(size: 21, weight: .heavy))
-                            .foregroundStyle(theme.text)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(stream.playable
-                                                       ? JoeTheme.okGreen.opacity(0.35)
-                                                       : Color.orange.opacity(0.35)))
-                    }
-                    Text(stream.label)
-                        .font(.system(size: 29, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(1)
-                    if !stream.title.isEmpty && stream.title != stream.label {
-                        Text(stream.title)
-                            .font(.system(size: 25))
-                            .foregroundStyle(theme.meta)
-                            .lineLimit(1)
-                    }
-                    let spec = Self.ultraSpec(stream)
-                    if !spec.line.isEmpty {
-                        Text(spec.line)
-                            .font(.system(size: 23))
-                            .foregroundStyle(theme.text.opacity(0.78))
-                            .lineLimit(1)
-                    }
-                    if !spec.lang.isEmpty {
-                        Text(spec.lang)
-                            .font(.system(size: 23, weight: .semibold))
-                            .foregroundStyle(theme.heroMeta)
-                            .lineLimit(1)
-                    }
-                }
+                streamDot(stream)
+                Text(Self.streamCompactLine(stream))
+                    .font(JoePCType.outfit(25, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(theme.meta)
             }
             .padding(.horizontal, 22)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: theme.rField)
-                .fill(theme.surface2))
-            .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
+            .padding(.vertical, 8)
+            .frame(width: Self.streamBarWidth)
+            // OWNER REFINEMENT 2026-11-22 12:28 CST
+            // (§3.12): the stacked list takes ONE uniform
+            // bar width (Self.streamBarWidth, applied
+            // above before the face/ring so both span the
+            // full width) — not the 12:15 content-hug
+            // (ragged column) and not the old full-width
+            // stretch.
+            // Fault 11 fix round: the design's source-row
+            // state, as on streamRow (JoeSourceRowFace +
+            // JoeDesignRing) — this row renders only under
+            // Private Cinema, so the celadon outset outline
+            // and the #304039DF focused face are its dress.
+            .background(JoeSourceRowFace(
+                shape: RoundedRectangle(cornerRadius: theme.rField),
+                restFill: theme.surface2))
+            .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
         }
         .joeCardButton()
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
@@ -1969,14 +2109,46 @@ struct JoeTorrentDetail: View {
             // 29 medium / vertical 16 with a JoeFocusRing
             // overlay, which paints no resting stroke.
             Text(isFav ? "♥ Đã thích" : "♡ Yêu thích")
-                .font(.system(size: 29, weight: .semibold))
-                .foregroundStyle(isFav ? JoeTheme.accentRed : .white)
-                .padding(.horizontal, 36)
-                .padding(.vertical, 17)
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(22, weight: .medium)
+                      : .system(size: 29, weight: .semibold))
+                .foregroundStyle(isFav ? JoeTheme.accentRed
+                                 : (theme.id == .privateCinema
+                                    ? theme.text : .white))
+                .padding(.horizontal, theme.id == .privateCinema ? 22 : 36)
+                .padding(.vertical, theme.id == .privateCinema ? 13 : 17)
                 .background(Capsule().fill(theme.surface2))
                 .overlay(Capsule().strokeBorder(
-                    focusedRow == "fav" ? theme.focus : theme.stroke,
-                    lineWidth: focusedRow == "fav" ? theme.ringWidth : 1.5))
+                    focusedRow == "fav" && theme.id != .privateCinema
+                        ? theme.focus : theme.stroke,
+                    lineWidth: focusedRow == "fav"
+                        && theme.id != .privateCinema
+                        ? theme.ringWidth : 1.5))
+                // Fault 11 fix round: this button also
+                // renders in the Private Cinema header
+                // (cinemaTorBody → cinemaTorHeader), where
+                // its focus is the design's action state —
+                // the ivory outset outline + 1.025 scale
+                // (the JoeSecondaryLabel cinema treatment);
+                // the inset stroke above rests there.
+                .overlay(JoeOutsetRing(
+                    shape: Capsule(), color: JoeCinemaFocus.ivory,
+                    lineWidth: 2, offset: 6,
+                    forced: theme.id == .privateCinema
+                        ? focusedRow == "fav" : false))
+                .scaleEffect(theme.id == .privateCinema
+                             && focusedRow == "fav" ? 1.025 : 1)
+                // GATE-213 R5 Lens 2 F2: this favourite
+                // button renders under EVERY theme, so its
+                // animation is theme-branched — the PC
+                // action curve (240 ms, RECALC R4) under
+                // Private Cinema, the pre-freeze 220 ms
+                // curve (same bézier points) elsewhere.
+                .animation(theme.id == .privateCinema
+                           ? JoeCinemaFocus.actionCurve
+                           : Animation.timingCurve(0.2, 0.7, 0.2, 1,
+                                                   duration: 0.22),
+                           value: focusedRow)
         }
         .joeCardButton()
         // 1.9.2 (Team 9 item 9): the button joins the detail's
@@ -2012,7 +2184,8 @@ struct JoeTorrentDetail: View {
         if videosFailed {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Không tải được danh sách tập.")
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(.orange)
                 retryButton(focusKey: "retry|videos") {
                     Task { await load() }
@@ -2037,7 +2210,8 @@ struct JoeTorrentDetail: View {
         if !videos.isEmpty {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Tập")
-                    .font(.system(size: 34, weight: .bold))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                     .foregroundStyle(theme.text)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 16)],
                           alignment: .leading, spacing: 16) {
@@ -2064,7 +2238,9 @@ struct JoeTorrentDetail: View {
                             // The row anatomy (25 pt, full-width
                             // rounded rect) is unchanged.
                             Text(video.label)
-                                .font(.system(size: 25, weight: selected ? .semibold : .medium))
+                                .font(theme.id == .privateCinema
+                                      ? JoePCType.outfit(25, weight: selected ? .semibold : .medium)
+                                      : .system(size: 25, weight: selected ? .semibold : .medium))
                                 .foregroundStyle(selected ? theme.onAccent : theme.text)
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2075,10 +2251,27 @@ struct JoeTorrentDetail: View {
                                           : theme.surface2))
                                 .overlay(RoundedRectangle(cornerRadius: theme.rField)
                                     .strokeBorder(rowFocused
+                                                  && theme.id != .privateCinema
                                                   ? (theme.id == .posterWall && selected
                                                      ? Color.white : theme.focus)
                                                   : (selected ? .clear : theme.stroke),
-                                                  lineWidth: rowFocused ? theme.ringWidth : 1.5))
+                                                  lineWidth: rowFocused
+                                                    && theme.id != .privateCinema
+                                                    ? theme.ringWidth : 1.5))
+                                // Fault 11 fix round: the
+                                // episode rows also render in
+                                // the Private Cinema body
+                                // (cinemaTorBody shares
+                                // episodeSection); there the
+                                // focus is the chip family's
+                                // ivory outset outline and the
+                                // inset stroke rests.
+                                .overlay(JoeOutsetRing(
+                                    shape: RoundedRectangle(cornerRadius: theme.rField),
+                                    color: JoeCinemaFocus.ivory,
+                                    lineWidth: 2, offset: 4,
+                                    forced: theme.id == .privateCinema
+                                        ? rowFocused : false))
                         }
                         .joeCardButton()
                         .focused($focusedRow, equals: "ep|" + video.id)
@@ -2094,7 +2287,8 @@ struct JoeTorrentDetail: View {
     private var streamSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Nguồn phát")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             if loadingStreams {
                 ProgressView("Đang lấy nguồn…")
@@ -2120,63 +2314,76 @@ struct JoeTorrentDetail: View {
                     .foregroundStyle(theme.meta)
             } else {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(streams) { stream in
-                        streamRow(stream)
+                    ForEach(Array(streams.enumerated()),
+                            id: \.element.id) { index, stream in
+                        streamRow(stream, number: index + 1)
                     }
                 }
             }
         }
     }
 
-    private func streamRow(_ stream: TorStream) -> some View {
+    /// FIX-213 (Faults 3+4, DIAG-20261122; owner ruling
+    /// 2026-11-22 10:25 CST — "Làm nút nhỏ nguồn ghi tắt
+    /// nhỏ ít thông tin được rồi"): the row is now ONE
+    /// line — the number, the availability dot (the
+    /// "PHÁT NGAY" word-capsule's replacement, see
+    /// streamDot) and the compact line (provider short
+    /// form · one quality token · size, see
+    /// streamCompactLine). The full release name and
+    /// the Ultra spec/language lines are gone from the
+    /// row face; vertical padding 14 → 8.
+    /// OWNER REFINEMENT 2026-11-22 12:28 CST ("Xem cân
+    /// bằng độ dài dự tính. Để các nguồn đều có thể vừa
+    /// khung chứ không phải khung dài khung ngắn"): the
+    /// stream rows form a VERTICALLY STACKED list, so
+    /// every bar in the list takes ONE uniform width —
+    /// estimated to fit the longest realistic compact
+    /// line (number + dot + provider · quality · size:
+    /// "Real-Debrid · 1080p · 18,4 GB" class ≈ 29
+    /// characters at Outfit 25 semibold, plus number,
+    /// dot, gaps and the row's horizontal padding, with
+    /// headroom) — never a per-bar hugged width (the
+    /// ragged column was the named fault) and never the
+    /// old full-width stretch. Both row constructions
+    /// (streamRow + cinemaStreamRow) share this width.
+    static let streamBarWidth: CGFloat = 560
+
+    private func streamRow(_ stream: TorStream,
+                           number: Int) -> some View {
         Button {
             play(stream)
         } label: {
-            HStack(spacing: 16) {
-                Text(streamTag(stream))
-                    .font(.system(size: 23, weight: .heavy))
+            HStack(spacing: 14) {
+                Text(String(format: "%02d", number))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.editorial(24)
+                          : .system(size: 24, weight: .light,
+                                    design: .serif))
+                    .foregroundStyle(theme.meta)
+                streamDot(stream)
+                Text(Self.streamCompactLine(stream))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(25, weight: .semibold)
+                          : .system(size: 25, weight: .semibold))
                     .foregroundStyle(theme.text)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(stream.playable
-                                               ? JoeTheme.okGreen.opacity(0.35)
-                                               : Color.orange.opacity(0.35)))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(stream.label)
-                        .font(.system(size: 29, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(1)
-                    if !stream.title.isEmpty && stream.title != stream.label {
-                        Text(stream.title)
-                            .font(.system(size: 25))
-                            .foregroundStyle(theme.meta)
-                            .lineLimit(1)
-                    }
-                    if theme.id == .ultra {
-                        // v2.0.19: the Sony panel's tech-spec +
-                        // language lines, parsed ONLY from
-                        // tokens the stream's own name/title
-                        // states — nothing inferred.
-                        let spec = Self.ultraSpec(stream)
-                        if !spec.line.isEmpty {
-                            Text(spec.line)
-                                .font(.system(size: 23))
-                                .foregroundStyle(theme.text.opacity(0.78))
-                                .lineLimit(1)
-                        }
-                        if !spec.lang.isEmpty {
-                            Text(spec.lang)
-                                .font(.system(size: 23, weight: .semibold))
-                                .foregroundStyle(theme.heroMeta)
-                                .lineLimit(1)
-                        }
-                    }
-                }
+                    .lineLimit(1)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+            .frame(width: Self.streamBarWidth)
+            // OWNER REFINEMENT 2026-11-22 12:28 CST
+            // ("Xem cân bằng độ dài dự tính. Để các nguồn
+            // đều có thể vừa khung chứ không phải khung
+            // dài khung ngắn"; RECALC-SPEC §3.12): the
+            // stacked list takes ONE uniform bar width
+            // (Self.streamBarWidth, applied above before
+            // the face/ring so both span the full width)
+            // — not the 12:15 content-hug (ragged
+            // long/short bars) and not the old full-width
+            // stretch. Row height, focus dress, ordering
+            // and actions are unchanged.
             // §7.6: stream rows are the one sanctioned outline-only
             // focus variant — the fill NEVER changes on focus (the
             // old white 0.06→0.13 brightening was a focus wash).
@@ -2188,81 +2395,112 @@ struct JoeTorrentDetail: View {
             // environment-driven like every other control in the
             // app (the hand-rolled copy here keyed off the
             // parent's FocusState instead).
-            .background(RoundedRectangle(cornerRadius: theme.rField)
-                .fill(theme.id == .ultra
-                      ? Color.white.opacity(0.16) : theme.surface2))
-            .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
+            // Fault 11 fix round: §7.6's never-change rule is a
+            // LEGACY-theme rule — the Private Cinema spec sheet
+            // explicitly draws the source row's focused face
+            // (#304039DF) with its celadon outset outline, and
+            // under PC the drawing governs (JoeSourceRowFace /
+            // JoeDesignRing below). Off the PC path both
+            // primitives reproduce the §7.6 values exactly.
+            // Fault 11 fix round: the face/ring pair is the
+            // shared source-row construction — under Private
+            // Cinema the design's source-row state (celadon
+            // outset outline + #304039DF focused face); under
+            // every other theme the values above, unchanged
+            // (JoeSourceRowFace restFill / JoeDesignRing's
+            // JoeFocusRing leg).
+            .background(JoeSourceRowFace(
+                shape: RoundedRectangle(cornerRadius: theme.rField),
+                restFill: theme.id == .ultra
+                    ? Color.white.opacity(0.16) : theme.surface2))
+            .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
         }
         .joeCardButton()
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
     }
 
-    private func streamTag(_ s: TorStream) -> String {
-        // v2.0.16: a playable row whose debrid is still
-        // fetching the release says so (the pooled ranking
-        // already sorts it below the cached rows).
-        if s.playable { return s.awaitingDisplay ? "CHỜ DEBRID" : "PHÁT NGAY" }
-        if !s.infoHash.isEmpty { return "RD · GIẢI LINK" }
-        return "TORRENT"
+    /// FIX-213 (Faults 3+4): the availability dot that
+    /// replaces the retired "PHÁT NGAY" word-capsule
+    /// (streamTag, removed with the compact pass): green
+    /// (JoeTheme.okGreen) when the row plays at once,
+    /// orange when it is still waiting on the debrid or
+    /// is hash-only — the old capsule's CHỜ DEBRID /
+    /// RD · GIẢI LINK / TORRENT states, carried by
+    /// colour alone under the owner's "ít thông tin"
+    /// ruling. The pooled ranking already sorts the
+    /// play-now rows first.
+    private func streamDot(_ stream: TorStream) -> some View {
+        Circle()
+            .fill(stream.playable && !stream.awaitingDisplay
+                  ? JoeTheme.okGreen : Color.orange)
+            .frame(width: 14, height: 14)
     }
 
-    /// v2.0.19 (Ultra): the server row's spec + language lines.
-    /// Every token is read from the stream's OWN name/title text
-    /// (the Torrentio grammar carries 💾 size and 👤 seeders in
-    /// the title) — a fact the text does not state is never
-    /// shown. Mirrors the Sony Feat tokenizer's honesty rule.
-    private static func ultraSpec(_ s: TorStream) -> (line: String, lang: String) {
-        let raw = s.name + " " + s.title
-        let up = raw.uppercased()
-        func has(_ tokens: [String]) -> Bool {
-            tokens.contains { up.contains($0) }
+    /// FIX-213: the compact row's provider short form —
+    /// the bracket tag the stream's label already
+    /// carries ("[TB+] Torrentio" → "TB+"), else the
+    /// MediaFusion gateway's short form, else the
+    /// label's first word.
+    private static func streamProviderShort(_ s: TorStream) -> String {
+        let label = s.label
+        if label.hasPrefix("["),
+           let close = label.firstIndex(of: "]") {
+            return String(label[label.index(after: label.startIndex)..<close])
         }
-        var parts: [String] = []
-        if has(["2160P", "2160", "4K"]) { parts.append("4K") }
-        else if has(["1080P", "1080"]) { parts.append("1080p") }
-        else if has(["720P", "720"]) { parts.append("720p") }
-        if up.contains("REMUX") { parts.append("REMUX") }
-        else if has(["BLURAY", "BLU-RAY", "BDRIP"]) { parts.append("BluRay") }
-        else if has(["WEB-DL", "WEBDL"]) { parts.append("WEB-DL") }
-        else if up.contains("WEBRIP") { parts.append("WEBRip") }
-        else if up.contains("HDTV") { parts.append("HDTV") }
-        if has(["DOLBY VISION", "DOVI", ".DV.", ".DV "]) {
-            parts.append("Dolby Vision")
-        }
-        else if up.contains("HDR10+") { parts.append("HDR10+") }
-        else if up.contains("HDR10") { parts.append("HDR10") }
-        else if up.contains("HDR") { parts.append("HDR") }
-        if has(["X265", "HEVC", "H.265", "H265"]) { parts.append("HEVC") }
-        else if has(["X264", "AVC", "H.264", "H264"]) { parts.append("AVC") }
-        else if up.contains("AV1") { parts.append("AV1") }
-        if up.contains("TRUEHD") { parts.append("TrueHD") }
-        if up.contains("ATMOS") { parts.append("Atmos") }
-        if has(["DTS-HD", "DTSHD"]) { parts.append("DTS-HD") }
-        else if up.contains("DTS") { parts.append("DTS") }
-        if has(["DDP", "EAC3", "E-AC-3", "DD+"]) { parts.append("DD+") }
-        else if up.contains("AAC") { parts.append("AAC") }
-        // 💾 size / 👤 seeders, copied verbatim from the title.
-        if let r = raw.range(of: "💾") {
-            let words = raw[r.upperBound...]
-                .split(whereSeparator: { $0 == " " || $0 == "\n" })
-                .prefix(2).map(String.init)
-            if !words.isEmpty { parts.append(words.joined(separator: " ")) }
-        }
-        if let r = raw.range(of: "👤") {
-            let words = raw[r.upperBound...]
-                .split(whereSeparator: { $0 == " " || $0 == "\n" })
-                .prefix(1).map(String.init)
-            if let n = words.first { parts.append("👤 " + n) }
-        }
-        var langs: [String] = []
-        if has(["VIETSUB", "VIET SUB", "VI.SUB"]) { langs.append("Vietsub") }
-        if has(["THUYET MINH", "THUYẾT MINH"]) { langs.append("Thuyết minh") }
-        if has(["LONG TIENG", "LỒNG TIẾNG"]) { langs.append("Lồng tiếng") }
-        if has(["ENGSUB", "ENG SUB"]) { langs.append("EngSub") }
-        if up.contains("MULTI") { langs.append("MultiSub") }
-        return (parts.joined(separator: " · "),
-                langs.joined(separator: " · "))
+        if s.gateway == "MF" { return "MF" }
+        return label.split(separator: " ").first.map(String.init) ?? label
     }
+
+    /// FIX-213: the ONE quality token the compact row
+    /// shows — the retired ultraSpec's quality branch
+    /// verbatim (4K / 1080p / 720p, read from the
+    /// stream's own name/title text; empty when the text
+    /// states none — a fact the text does not state is
+    /// never shown).
+    private static func streamQualityToken(_ s: TorStream) -> String {
+        let up = (s.name + " " + s.title).uppercased()
+        if up.contains("2160P") || up.contains("2160") || up.contains("4K") {
+            return "4K"
+        }
+        if up.contains("1080P") || up.contains("1080") { return "1080p" }
+        if up.contains("720P") || up.contains("720") { return "720p" }
+        return ""
+    }
+
+    /// FIX-213: the size the compact row keeps — the 💾
+    /// value copied verbatim from the stream's own text
+    /// (the retired ultraSpec's size branch), "" when
+    /// the text carries none.
+    private static func streamSizeText(_ s: TorStream) -> String {
+        let raw = s.name + " " + s.title
+        guard let r = raw.range(of: "💾") else { return "" }
+        let words = raw[r.upperBound...]
+            .split(whereSeparator: { $0 == " " || $0 == "\n" })
+            .prefix(2).map(String.init)
+        return words.joined(separator: " ")
+    }
+
+    /// FIX-213: the compact row's ONE line of text —
+    /// provider short form · quality token · size, each
+    /// part present only when the stream's own text
+    /// states it.
+    private static func streamCompactLine(_ s: TorStream) -> String {
+        var parts = [streamProviderShort(s)]
+        let quality = streamQualityToken(s)
+        if !quality.isEmpty { parts.append(quality) }
+        let size = streamSizeText(s)
+        if !size.isEmpty { parts.append(size) }
+        return parts.joined(separator: " · ")
+    }
+
+    // FIX-213 (Faults 3+4): the v2.0.19 ultraSpec
+    // tokenizer (the server rows' spec + language lines)
+    // is REMOVED — both of its row consumers took the
+    // compact one-line shape above, and its two surviving
+    // branches (quality, size) live on verbatim inside
+    // streamQualityToken / streamSizeText. The spec,
+    // seeders and language lines it used to build are
+    // exactly what the owner's compact ruling drops.
 
     // MARK: - Loading + playing
 
@@ -2323,13 +2561,14 @@ struct JoeTorrentDetail: View {
     /// button's action is torCastRow's cell action verbatim
     /// (the same actorRoute .tmdb(...) assignment), and the
     /// name is a plain TEXT line (JoeTorNameLabel, the
-    /// JoeActorNameLabel discipline) — no capsule pill:
-    /// focus changes only the name's colour value, with no
-    /// plate, fill or scale (no second focus layer).
+    /// JoeActorNameLabel discipline) — no capsule pill.
+    /// (RECALC-213 R6: the label's focused state now
+    /// carries semibold + the ivory outset ring, no
+    /// plate — see JoeTorNameLabel.)
     private var cinemaTorCredits: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("DIỄN VIÊN")
-                .font(.system(size: 24, weight: .bold))
+                .font(JoePCType.outfit(23, weight: .semibold))
                 .tracking(3)
                 .foregroundStyle(theme.meta)
             HStack(spacing: 16) {
@@ -2447,10 +2686,17 @@ private struct JoeTorCastCellLabel: View {
 /// (cinemaTorCredits) — the JoeActorNameLabel discipline
 /// (JoeMovieDetail.swift, private to that file) mirrored
 /// for this file: a plain text name at 25 pt to match the
-/// Private Cinema credits line, with NO capsule, plate,
-/// fill or scale. Focus is value-only: the name alone
-/// takes theme.focusTitle; its resting colour and the
-/// line's geometry never change.
+/// Private Cinema credits line, with NO capsule or scale.
+/// RECALC-213 R6 (RECALC-SPEC §4) SUPERSEDES the
+/// FIX-213 Fault-2 plate treatment recorded here
+/// before: the font is the theme's own family —
+/// Outfit 25 (the size is the app's; the drawing does
+/// not measure it) — and focus is semibold + an IVORY
+/// outset ring (the chip family: JoeChipRing, 2 px,
+/// offset 4), with NO plate and NO fill. The resting
+/// dress (Outfit 25 regular, theme.text, no ring, no
+/// plate) and the lineLimit/padding are unchanged, so
+/// the resting text line does not move.
 private struct JoeTorNameLabel: View {
     let name: String
     @Environment(\.isFocused) private var isFocused
@@ -2458,9 +2704,12 @@ private struct JoeTorNameLabel: View {
 
     var body: some View {
         Text(name)
-            .font(.system(size: 25))
+            .font(JoePCType.outfit(25, weight: isFocused ? .semibold : .regular))
             .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
             .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .overlay(JoeChipRing(shape: RoundedRectangle(cornerRadius: 8)))
     }
 }
 

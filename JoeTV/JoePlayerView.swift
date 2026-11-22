@@ -194,8 +194,22 @@ final class PlayDirector: ObservableObject {
     /// The handler is the host's closePicker, so focus
     /// landing and bar state are restored by the same code
     /// that closes the panel after a selection.
-    func requestPickerClose() {
-        pickerCloseHandler?()
+    /// FIX-213 (Fault 1, DIAG-20261122): the close now
+    /// REPORTS whether a live handler actually received
+    /// it. The flag and the handler live here, on the
+    /// director, which outlives every per-attempt host;
+    /// a host replaced without its teardown clearing the
+    /// flag leaves pickerOpen true with a nil (or dead)
+    /// handler, and the old silent no-op made every later
+    /// Menu press a consumed branch-1 press — the film
+    /// playing, Menu doing nothing, force-quit the only
+    /// exit. A false return means the flag is stranded:
+    /// the caller must NOT treat the press as consumed.
+    @discardableResult
+    func requestPickerClose() -> Bool {
+        guard let pickerCloseHandler else { return false }
+        pickerCloseHandler()
+        return true
     }
     /// The most recent candidate failure's short cause (an
     /// engine error's description, or a watchdog label) — the
@@ -740,6 +754,15 @@ final class PlayDirector: ObservableObject {
         // manual switch).
         candidateDeadlineTask?.cancel()
         candidateDeadlineTask = nil
+        // FIX-213 (Fault 1): a new attempt also retires
+        // the old attempt's picker state. The flag lives
+        // on this director and outlives the per-attempt
+        // host that owned the picker; carrying it into
+        // the next attempt would strand it with a dead
+        // handler (see requestPickerClose). The new host
+        // re-registers its own handler when ITS picker
+        // opens.
+        setPickerOpen(false)
         guard candidates.indices.contains(candidateIndex) else {
             resolutionTask = Task { await failoverStep() }
             return
@@ -2116,6 +2139,15 @@ private struct JoePlayerSessionView: View {
                                               director: director)
                             .id(director.attemptID)
                             .ignoresSafeArea()
+                            // FIX-213 (Fault 1): a freshly
+                            // created host starts with no
+                            // picker — re-validate the flag
+                            // at host creation, so a state
+                            // stranded by the previous host
+                            // is cleared here even if an
+                            // advance path ever bypasses
+                            // beginCandidate's own reset.
+                            .onAppear { director.setPickerOpen(false) }
                     } else {
                         PlayerController(candidate: candidate,
                                          director: director)
@@ -2174,7 +2206,15 @@ private struct JoePlayerSessionView: View {
                     .defaultFocus($slateFocus, .playNext)
             }
         }
-        .onAppear { director.start() }
+        .onAppear {
+            // FIX-213 (Fault 1): the view appearing is a
+            // fresh session surface — no picker can be
+            // open yet, so any flag a previous surface
+            // left on this director is stranded by
+            // definition and is cleared before start().
+            director.setPickerOpen(false)
+            director.start()
+        }
         .onDisappear {
             director.flush()
             // Teardown: a countdown must not outlive its
@@ -2194,7 +2234,14 @@ private struct JoePlayerSessionView: View {
             // countdown rule and the plain exit keep their
             // order behind it.
             if director.pickerOpen {
-                director.requestPickerClose()
+                // FIX-213 (Fault 1): a picker flag whose
+                // closer is gone can never consume a press
+                // again — the close reports false and the
+                // SAME press falls through to the plain
+                // exit below.
+                if !director.requestPickerClose() {
+                    dismiss()
+                }
             } else if director.upNextSecondsLeft != nil {
                 director.cancelAdvance()
             } else {

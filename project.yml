@@ -87,6 +87,8 @@ targets:
       - JoeTV/JoeTopShelfWriter.swift
       - JoeTV/JoeTVSection.swift
       - JoeTV/JoePhimHome.swift
+      - JoeTV/JoeHomeScreen.swift
+      - JoeTV/JoeHomeTVBFocus.swift
       - JoeTV/JoeBrowse.swift
       - JoeTV/JoeMovieDetail.swift
       - JoeTV/JoeDetailCache.swift
@@ -125,6 +127,33 @@ targets:
         buildPhase: resources
       - path: JoeTV/yt.solver.core.min.js
         buildPhase: resources
+      # Fault 17 fix round (2026-11-22): the Private Cinema
+      # design's three type families, bundled (the design's
+      # spec sheet names Outfit / Bricolage Grotesque /
+      # Instrument Serif; tvOS ships none of them). Static
+      # instances from Google Fonts (OFL), registered via
+      # UIAppFonts below; used ONLY by the Private Cinema
+      # theme through JoePCType (JoeTheme.swift).
+      - path: JoeTV/Fonts/Outfit-Light.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/Outfit-Regular.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/Outfit-Medium.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/Outfit-SemiBold.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/Outfit-Bold.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/BricolageGrotesque-Regular.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/BricolageGrotesque-Medium.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/BricolageGrotesque-SemiBold.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/InstrumentSerif-Regular.ttf
+        buildPhase: resources
+      - path: JoeTV/Fonts/InstrumentSerif-Italic.ttf
+        buildPhase: resources
       - JoeTV/JoeTorrent.swift
       - JoeTV/JoeTrendingFile.swift
       - JoeTV/JoeSettings.swift
@@ -149,15 +178,15 @@ targets:
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: JoeTV/JoeTV-Bridging-Header.h
-        MARKETING_VERSION: "2.1.2"
-        CURRENT_PROJECT_VERSION: "65"
+        MARKETING_VERSION: "2.1.3"
+        CURRENT_PROJECT_VERSION: "66"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.1.2"
-        CFBundleVersion: "65"
+        CFBundleShortVersionString: "2.1.3"
+        CFBundleVersion: "66"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:
@@ -175,6 +204,19 @@ targets:
           - CFBundleURLName: com.luun.nguyen.joetv
             CFBundleURLSchemes:
               - joetv
+        # Fault 17 fix round: the bundled Private Cinema
+        # type families (see the Fonts resources above).
+        UIAppFonts:
+          - Outfit-Light.ttf
+          - Outfit-Regular.ttf
+          - Outfit-Medium.ttf
+          - Outfit-SemiBold.ttf
+          - Outfit-Bold.ttf
+          - BricolageGrotesque-Regular.ttf
+          - BricolageGrotesque-Medium.ttf
+          - BricolageGrotesque-SemiBold.ttf
+          - InstrumentSerif-Regular.ttf
+          - InstrumentSerif-Italic.ttf
     entitlements:
       path: JoeTV/JoeTV.entitlements
       properties:

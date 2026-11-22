@@ -84,11 +84,13 @@ struct JoeTVApp: App {
 /// of assuming it.
 @MainActor
 final class JoeNavigator: ObservableObject {
-    /// The shell's five sections. Moved here from JoeRootView
-    /// in 1.9.2 (Team 9 item 4): the section views themselves
-    /// must be able to send the shell back to Phim (their Menu
-    /// handlers set section = .phim), so the state lives on
-    /// the navigator they all already observe.
+    /// The shell's sections (six since FIX-213 Fault 13
+    /// added Trang chủ). Moved here from JoeRootView in
+    /// 1.9.2 (Team 9 item 4): the section views themselves
+    /// must be able to send the shell back to the home
+    /// section (their Menu handlers set section = .home),
+    /// so the state lives on the navigator they all
+    /// already observe.
     enum Section: String, CaseIterable {
         // v2.1.1 (owner ruling): TV renders LAST in every shell
         // bar — all three bar arms iterate allCases, so the case
@@ -99,14 +101,27 @@ final class JoeNavigator: ObservableObject {
         // and the bar's .defaultFocus fallback) — it is persisted
         // NOWHERE (no @AppStorage/UserDefaults key stores a
         // section; `section` below is in-memory and starts at
-        // .phim on every launch, so the landing stays Phim).
+        // .home on every launch since FIX-213 Fault 13 —
+        // before that it started at .phim, when Phim WAS
+        // the home surface).
         // Pinning them means no future reorder can silently
         // change a focus identity.
-        case phim = "phim", tvb = "tvb", torrent = "torrent", settings = "settings", tv = "tv"
+        // FIX-213 (Fault 13): .home (Trang chủ) added
+        // FIRST — the Private Cinema design separates
+        // Trang chủ (the 11-rail Home) from Phim (its own
+        // 7-rail screen); the built shell had merged the
+        // two into the Phim pill. Both sections render
+        // JoePhimHome, which reads the section to pick its
+        // composition (under the other themes both render
+        // the theme's one home, exactly as before). The
+        // return-to-home assignments across the tree now
+        // target .home, and the launch landing is .home.
+        case home = "home", phim = "phim", tvb = "tvb", torrent = "torrent", settings = "settings", tv = "tv"
 
         var title: String {
             switch self {
             case .tv: return "TV"
+            case .home: return "Trang chủ"
             case .phim: return "Phim"
             case .tvb: return "TVB"
             case .torrent: return "Phim Torrent"
@@ -116,6 +131,7 @@ final class JoeNavigator: ObservableObject {
         var icon: String {
             switch self {
             case .tv: return "tv"
+            case .home: return "house"
             case .phim: return "film"
             case .tvb: return "play.tv"
             case .torrent: return "magnet"
@@ -124,7 +140,12 @@ final class JoeNavigator: ObservableObject {
         }
     }
 
-    @Published var section: Section = .phim
+    // FIX-213 (Fault 13): the launch landing is Trang
+    // chủ (.home) — under Private Cinema that is the
+    // design's 11-rail Home; under every other theme
+    // .home renders the same home surface .phim did, so
+    // their landing is unchanged in substance.
+    @Published var section: Section = .home
     @Published var movie: MovieRoute?
     @Published var tor: TorRoute?
     /// TVB YouTube feature (design §1.2/§1.5): the YouTube
@@ -144,6 +165,17 @@ final class JoeNavigator: ObservableObject {
     /// the named episode via the chain).
     @Published var ytChainPlay: JoeYtChainPlay?
     @Published var searchOpen = false
+    /// FIX-213 (Fault 5, DIAG-20261122): the shell bar's
+    /// search request INTO the TVB section. Under Private
+    /// Cinema the TVB home's own header search pill is
+    /// gone (the floating bar put it on top of the bar's
+    /// "Tìm phim" pill — the owner's "Đè nhau"), so while
+    /// the TVB section is active the bar's pill raises
+    /// THIS flag instead; JoeTVBView observes it (the
+    /// ytChainPlay pattern), opens its in-tab search and
+    /// resets the flag. The search view is not duplicated
+    /// — only the request is lifted to the shell.
+    @Published var tvbSearchRequested = false
     /// v2.0.5 (N3): the shell root's Menu delivery channel.
     /// Menu pressed while focus sits on a shell pill reaches
     /// JoeRootView's exit handler (the topBar is OUTSIDE the
@@ -537,8 +569,11 @@ struct JoeRootView: View {
                 nav.searchOpen = false
             } else if nav.browseOpen {
                 nav.browseOpen = false
-            } else if nav.section != .phim {
-                nav.section = .phim
+            } else if nav.section != .home {
+                // FIX-213 (Fault 13): the pre-exit return
+                // lands on Trang chủ (.home), the app's
+                // home surface since the split.
+                nav.section = .home
             } else {
                 nav.exitRequested = true
             }
@@ -614,10 +649,13 @@ struct JoeRootView: View {
     /// content — a transparent ZStack overlay — so the Home
     /// hero (WS-B's full-bleed stage) runs beneath it. The
     /// invariants are identical in both shapes: the bar keeps
-    /// its own .focusSection() + height 76 + .defaultFocus
-    /// entry landing (all inside topBar), and the content
-    /// keeps its single .focusSection() region — only the
-    /// PAINT order changes, never the focus geometry.
+    /// its own .focusSection() + height + .defaultFocus
+    /// entry landing (all inside topBar; height 76 on the
+    /// legacy arms, 132 on the PC arm since FIX-213
+    /// Fault 8 gave PC the design's own header), and the
+    /// content keeps its single .focusSection() region —
+    /// only the PAINT order changes, never the focus
+    /// geometry.
     @ViewBuilder
     private var shellStack: some View {
         if theme.id == .privateCinema {
@@ -684,31 +722,85 @@ struct JoeRootView: View {
             // movement (the sections do that).
             .defaultFocus($pillFocus, lastFocusedPill ?? nav.section.rawValue)
         } else if theme.id == .privateCinema {
-            // v2.1.0 (Private Cinema): wordmark left, clock alone
-            // on the right, and the centred pill group — the five
-            // section pills plus "Tìm phim" (Home / Movies /
-            // Series / TVB / Search) — centred. Same invariants
-            // as the other arms: height 76, .focusSection(), and
-            // the same .defaultFocus entry landing.
+            // FIX-213 (Fault 8): the PC design set's OWN
+            // header, replacing the legacy pill bar this arm
+            // previously borrowed from the other themes
+            // (owner 2026-11-22: "Giữ y chang theme cũ" —
+            // the old bar also sat as a filled furniture
+            // row over the hero: "Làm che luôn backdrop").
+            // Measured from delivery-joetv-HomeManyRails.png
+            // + the many-rail spec: fixed height 132, side
+            // inset 88 (the shell's 80 pt ambient + 8 here),
+            // TRANSPARENT over the backdrop (no band fill —
+            // the hero's backdrop shows through the whole
+            // bar zone, as drawn), the design wordmark
+            // (PCWordmark) at the left, the plain clock at
+            // the right, and the centred text nav (gap 16)
+            // whose selected item alone carries the ivory
+            // capsule (PCNavLabel). The nav carries the
+            // design's composition WITH the shell split of
+            // FIX-213 (Fault 13): Trang chủ (.home, the
+            // 11-rail Home) stands first in the design's
+            // own position, then Phim (.phim, its own
+            // 7-rail screen), TVB, Torrent, TV — the app's
+            // TV and Cài đặt sections stay (theme work
+            // never cuts function) — and, per the owner's
+            // ruling of 2026-11-22 10:56 CST ("Cài đặt ko
+            // ai để ở đây mà để cuối cùng"), Cài đặt stands
+            // LAST, after Tìm phim (owner override of the
+            // drawing's composition for this one position).
+            // FIX-213 (Fault 15): the wordmark is the
+            // design's own corner lockup (PCWordmark),
+            // pinned to the top-left corner as its OWN
+            // element — not a member of the nav row: the
+            // nav group is centred on the screen
+            // independently, the clock is pinned to the
+            // right corner, and the lockup rides 5 pt
+            // below the bar's centre line, exactly where
+            // the drawing puts its ink (measured: lockup
+            // ink y52–90, centre 71, against the nav
+            // capsule's centre 65.5 in the 132 header).
+            // The .focusSection() and .defaultFocus
+            // entry-landing invariants are the other
+            // arms' own, unchanged.
             ZStack {
                 HStack(alignment: .center, spacing: 20) {
-                    wordmark
+                    PCWordmark()
+                        .padding(.leading, 8)
+                        .padding(.top, 10)
                     Spacer()
                     PCClockLabel()
+                        .padding(.trailing, 8)
                 }
-                HStack(spacing: 20) {
-                    ForEach(JoeNavigator.Section.allCases, id: \.self) { s in
-                        sectionPill(s)
+                HStack(spacing: 16) {
+                    ForEach(JoeNavigator.Section.allCases.filter { $0 != .settings }, id: \.self) { s in
+                        pcNavPill(s)
                     }
-                    Button { openSearch() } label: {
-                        PillLabel(title: "Tìm phim", icon: "magnifyingglass", selected: false)
+                    Button {
+                        // FIX-213 (Fault 5): while the TVB
+                        // section is active, this item is
+                        // the TVB page's ONE search entry
+                        // (its own header pill is removed —
+                        // the two overlapped): it raises
+                        // the TVB in-tab search request
+                        // instead of the global search.
+                        if nav.section == .tvb {
+                            nav.tvbSearchRequested = true
+                        } else {
+                            openSearch()
+                        }
+                    } label: {
+                        PCNavLabel(title: "Tìm phim", systemImage: "magnifyingglass", selected: false)
                     }
                     .joeCardButton()
                     .focused($pillFocus, equals: "search")
+                    // Owner ruling 2026-11-22 10:56 CST:
+                    // Cài đặt LAST on the bar.
+                    pcNavPill(.settings)
                 }
                 .frame(maxWidth: .infinity, alignment: .center)
             }
-            .frame(height: 76)
+            .frame(height: joePCBarHeight)
             .focusSection()
             .defaultFocus($pillFocus, lastFocusedPill ?? nav.section.rawValue)
         } else {
@@ -780,7 +872,9 @@ struct JoeRootView: View {
             // failing soft on an empty store.
             guard let tmdbId = q["id"], !tmdbId.isEmpty else { return }
             let type = q["type"] ?? ""
-            nav.section = .phim
+            // FIX-213 (Fault 13): deep links land on
+            // Trang chủ (.home), the home surface.
+            nav.section = .home
             Task { @MainActor in
                 for _ in 0..<40 {
                     if let m = phim.merged.first(where: {
@@ -809,7 +903,9 @@ struct JoeRootView: View {
         case "movie":
             guard let provider = q["provider"], let slug = q["slug"],
                   !provider.isEmpty, !slug.isEmpty else { return }
-            nav.section = .phim
+            // FIX-213 (Fault 13): deep links land on
+            // Trang chủ (.home), the home surface.
+            nav.section = .home
             nav.movie = MovieRoute(provider: provider, slug: slug,
                                    name: q["name"] ?? "",
                                    poster: q["poster"] ?? "",
@@ -915,10 +1011,15 @@ struct JoeRootView: View {
     /// section-change consumer (S1.1) has run — so the layer
     /// opens instead of being closed by that rule.
     private func openSearch() {
-        if nav.section == .phim {
+        // FIX-213 (Fault 13): the search layer is hosted
+        // by JoePhimHome, which now serves BOTH the
+        // Trang chủ and Phim sections — it opens in
+        // place on either; from anywhere else the shell
+        // first lands on Trang chủ, the home surface.
+        if nav.section == .phim || nav.section == .home {
             nav.searchOpen = true
         } else {
-            nav.section = .phim
+            nav.section = .home
             Task { @MainActor in nav.searchOpen = true }
         }
     }
@@ -995,11 +1096,32 @@ struct JoeRootView: View {
         // the pillFocus note).
     }
 
+    /// FIX-213 (Fault 8): one section item of the PC
+    /// design bar — sectionPill's wiring (same action,
+    /// same .joeCardButton() construction, same pillFocus
+    /// binding) with the design's own label (PCNavLabel:
+    /// plain text, ivory capsule only when selected).
+    private func pcNavPill(_ s: JoeNavigator.Section) -> some View {
+        Button {
+            nav.section = s
+        } label: {
+            PCNavLabel(title: s.title, selected: nav.section == s)
+        }
+        .joeCardButton()
+        .focused($pillFocus, equals: s.rawValue)
+    }
+
     @ViewBuilder
     private var content: some View {
         switch nav.section {
         case .tv:
             JoeTVSection()
+        case .home:
+            // R7 (RECALC-SPEC §3.1): Trang chủ is its own
+            // screen (JoeHomeScreen, fixed .trangChu
+            // identity — the design's 11-rail Home), not
+            // the Phim surface reading nav.section.
+            JoeHomeScreen()
         case .phim:
             JoePhimHome()
         case .tvb:

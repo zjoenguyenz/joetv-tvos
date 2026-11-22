@@ -79,6 +79,14 @@ enum JoeTrendingFile {
             // (atomic, like JoeYtStore's refresh write). A
             // failed write is not a load failure — the
             // freshly parsed rails still publish.
+            // FAULT 10 (2026-11-22): same missing-directory
+            // trap as the TVB cache — urls(for:) never creates
+            // Application Support, so ensure it before writing
+            // or this write silently never lands on a fresh
+            // install.
+            try? FileManager.default.createDirectory(
+                at: cacheURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
             try? data.write(to: cacheURL, options: .atomic)
             return rails
         }

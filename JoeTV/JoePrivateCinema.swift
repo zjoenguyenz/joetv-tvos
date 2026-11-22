@@ -31,12 +31,149 @@ struct PCClockLabel: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             Text(context.date, format: PCClockLabel.clockStyle)
-                .font(.system(size: 25))
-                .foregroundStyle(theme.meta)
+                // FIX-213 (Fault 8): the design's bar clock
+                // is plain ivory text at the nav's own size
+                // (24) — no meta dimming.
+                .font(JoePCType.outfit(24))
+                .foregroundStyle(theme.text)
         }
     }
 
     static let clockStyle = Date.FormatStyle().hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
+}
+
+/// FIX-213 (Faults 8/16): the PC design bar's height —
+/// the single source both the bar itself (JoeTVApp
+/// .topBar's PC arm) and the bar-clearance inset below
+/// read, so the two can never drift apart.
+let joePCBarHeight: CGFloat = 132
+
+/// FIX-213 (Fault 16): the bar-clearance inset for the
+/// PC homes' scroll views. The shell's PC bar OVERLAYS
+/// the content (ZStack), and a pinned Section header
+/// (the 88 pt context strip) pins at its scroll view's
+/// top edge — which is the bar's own band, so the
+/// strip's text line stood inside the band, colliding
+/// with the wordmark and the nav items in EVERY pinned
+/// state (owner 2026-11-22, corrected: "Ko hẳn là lúc
+/// quay về mà hầu như lúc nào cũng vậy"). The design
+/// pins its strip BELOW the header (deep context strip:
+/// y132, directly under the 132 header, on plain Ink).
+/// This inset reserves exactly the bar's height at the
+/// scroll view's top: the strip now pins under the bar,
+/// scrolled cards can never enter the band, and the
+/// band's backdrop at rest is preserved by the homes'
+/// own compensation (their stacks carry a matching
+/// negative top padding, so the hero still paints
+/// behind the transparent bar exactly as before).
+/// PC-only: every other theme's scroll views are
+/// untouched (their shell is a VStack — bar above
+/// content, nothing pins into it).
+private struct JoePCBarInset: ViewModifier {
+    @Environment(\.joeTheme) private var theme
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if theme.id == .privateCinema {
+            content.safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear.frame(height: joePCBarHeight)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func joePCBarInset() -> some View {
+        modifier(JoePCBarInset())
+    }
+}
+
+// MARK: - Design top bar pieces (FIX-213, Fault 8)
+//
+// The Private Cinema design set's own header (measured
+// from delivery-joetv-HomeManyRails.png /
+// delivery-joetv-Home.png and the many-rail spec: fixed
+// height 132, side inset 88, transparent over the
+// backdrop — NO band fill): a lowercase serif "joe" with
+// a small outlined "tv" badge at the left, a centred
+// text nav whose SELECTED item alone carries an ivory
+// capsule, and the plain clock at the right. These two
+// pieces are that header's wordmark and nav item; the
+// bar itself is composed in JoeTVApp.topBar's PC arm.
+// Focus follows the design's own language (the spec's
+// focus treatment): an ivory 3 pt outline offset 5 pt
+// outside the item's capsule shape — value-only, drawn
+// by the label itself, exactly like the house's other
+// PC labels.
+
+/// The design's wordmark: "joe" in bold serif with the
+/// outlined rounded-square "tv" badge (measured from the
+/// design header: wordmark ≈38 pt against the nav's
+/// 24 pt text; badge text ≈17 pt, stroke 2, radius 6).
+struct PCWordmark: View {
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 7) {
+            Text("joe")
+                .font(JoePCType.editorial(38))
+                .fontWeight(.bold)
+                .foregroundStyle(theme.text)
+            Text("tv")
+                .font(JoePCType.outfit(17, weight: .semibold))
+                .foregroundStyle(theme.text)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(theme.text, lineWidth: 2))
+        }
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+/// One item of the design's centred nav (spec: text
+/// 24/400, item gap 16, the selected item's capsule
+/// padded 13 vertical × 27 horizontal, radius 30):
+/// unselected items are PLAIN ivory text — no fill, no
+/// border, no icon (the search item alone carries the
+/// magnifier, as drawn). Selected = ivory capsule with
+/// ink text. Focus = the design's ivory outline, 3 pt,
+/// offset 5 pt outside the capsule.
+struct PCNavLabel: View {
+    let title: String
+    var systemImage: String? = nil
+    let selected: Bool
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 20))
+            }
+            Text(title)
+                .font(JoePCType.outfit(24))
+        }
+        .foregroundStyle(selected ? theme.bg : theme.text)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 27)
+        .padding(.vertical, 13)
+        .background(Capsule().fill(selected ? theme.text : Color.clear))
+        .overlay {
+            if isFocused {
+                Capsule()
+                    .stroke(JoeCinemaFocus.celadon, lineWidth: 3)
+                    .padding(-5)
+            }
+        }
+        .scaleEffect(isFocused ? 1.035 : 1.0)
+        .animation(JoeCinemaFocus.tileCurve, value: isFocused)
+    }
 }
 
 // MARK: - Focus-follows backdrop (v2.1.1, WS-I)

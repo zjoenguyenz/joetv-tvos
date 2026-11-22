@@ -198,7 +198,7 @@ struct JoeSettingsView: View {
                     // green whenever torrent is configured in
                     // either shape, orange when it is not.
                     Text(torrentHeaderText)
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(TorrentSettings.isConfigured
                                          ? JoeTheme.okGreen : .orange)
                 }
@@ -344,7 +344,7 @@ struct JoeSettingsView: View {
             // else, Menu scrolls to the top and lands
             // focus on that chip, swallowing the exit.
             if themeChipFocused == JoeThemeID.billboard.rawValue {
-                nav.section = .phim
+                nav.section = .home  // FIX-213 (Fault 13): return to Trang chủ (.home), the home surface since the split
             } else {
                 topScrollSignal += 1
                 themeChipFocused = JoeThemeID.billboard.rawValue
@@ -367,7 +367,8 @@ struct JoeSettingsView: View {
     private var themeBlock: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Giao diện")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             HStack(spacing: 14) {
                 ForEach(JoeThemeID.allCases, id: \.self) { id in
@@ -382,7 +383,7 @@ struct JoeSettingsView: View {
                 }
             }
             Text("Đổi giao diện áp dụng ngay cho toàn app: trang chủ, trang phim, tìm kiếm và trình phát.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1250, alignment: .leading)
             defaultThemeBlock
@@ -402,7 +403,8 @@ struct JoeSettingsView: View {
     private var defaultThemeBlock: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Giao diện mở app")
-                .font(.system(size: 29, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(29, weight: .bold)
+                              : .system(size: 29, weight: .bold))
                 .foregroundStyle(theme.text)
             HStack(spacing: 14) {
                 ForEach(JoeThemeID.allCases, id: \.self) { id in
@@ -417,7 +419,7 @@ struct JoeSettingsView: View {
                 }
             }
             Text("App mở lên sẽ vào thẳng giao diện này. Đổi giao diện hiện tại ở hàng trên không làm thay đổi lựa chọn này.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1250, alignment: .leading)
         }
@@ -598,7 +600,7 @@ struct JoeSettingsView: View {
                     Text(tmdbKey.trimmingCharacters(in: .whitespaces).isEmpty
                          ? "TMDB: đang dùng key tích hợp sẵn ✓"
                          : "TMDB: đang dùng key anh nhập ✓")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
             }
@@ -610,16 +612,16 @@ struct JoeSettingsView: View {
             HStack(spacing: 14) {
                 if savedTick {
                     Text("Đã lưu ✓")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(JoeTheme.okGreen)
                 } else {
                     Text("Mọi thay đổi tự lưu ngay khi nhập — không cần bấm Lưu.")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
             }
             Text("Trên Apple TV không có công tắc hầm trong app: đường truyền Việt Nam do profile Sing-box của hệ thống đảm nhiệm. Token chỉ lưu trong app này trên Apple TV của anh, không gửi đi đâu ngoài dịch vụ tương ứng.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1200, alignment: .leading)
         }
@@ -667,6 +669,17 @@ struct JoeSettingsView: View {
                     .focusSection()
                 }
             }
+            // FIX-213 (Fault 7, settings arm): this root
+            // carried NO horizontal padding of its own —
+            // it borrowed the shell's ambient 80 like the
+            // PC homes did, so its left rail stood 14 pt
+            // proud of the design frame the rest of the
+            // theme now owns (owner photo 2026-11-22: the
+            // settings left column hard against the
+            // screen's left edge). +14 both sides puts
+            // the rail at the design's 94 and the pane's
+            // right edge at 1826.
+            .padding(.horizontal, 14)
             .onChange(of: pcTopScrollSignal) { _, _ in
                 proxy.scrollTo("joePCSettingsTop", anchor: .top)
             }
@@ -680,7 +693,7 @@ struct JoeSettingsView: View {
         // home inside the page (rail selection + pane to top).
         .onExitCommand {
             if pcCategoryFocused == PCCategory.appearance.rawValue {
-                nav.section = .phim
+                nav.section = .home  // FIX-213 (Fault 13): return to Trang chủ (.home), the home surface since the split
             } else {
                 pcCategory = .appearance
                 pcTopScrollSignal += 1
@@ -697,7 +710,7 @@ struct JoeSettingsView: View {
         ZStack {
             HStack(alignment: .center, spacing: 20) {
                 Button {
-                    nav.section = .phim
+                    nav.section = .home  // FIX-213 (Fault 13): return to Trang chủ (.home), the home surface since the split
                 } label: {
                     PCBackLabel()
                 }
@@ -707,7 +720,7 @@ struct JoeSettingsView: View {
                 PCClockLabel()
             }
             Text("JOETV / KHÔNG GIAN CỦA BẠN")
-                .font(.system(size: 22, weight: .semibold))
+                .font(JoePCType.outfit(22, weight: .semibold))
                 .tracking(3)
                 .foregroundStyle(theme.accent2)
                 .lineLimit(1)
@@ -718,15 +731,18 @@ struct JoeSettingsView: View {
     private var pcLeftRail: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("PRIVATE CINEMA")
-                .font(.system(size: 20, weight: .semibold))
+                .font(JoePCType.outfit(20, weight: .semibold))
                 .tracking(4)
                 .foregroundStyle(theme.accent2)
             Text("Cài đặt")
-                .font(.system(size: 64, design: .serif))
+                // RECALC-213 correction: same Times-class
+                // serif family as the Search headline
+                // (RECALC-SPEC §2.3), not Instrument Serif.
+                .font(JoePCType.timesSerif(64))
                 .foregroundStyle(theme.text)
                 .padding(.top, 16)
             Text("Một vài lựa chọn nhỏ.\nMột buổi xem đúng ý bạn.")
-                .font(.system(size: 24))
+                .font(JoePCType.outfit(24))
                 .foregroundStyle(theme.meta)
                 .padding(.top, 18)
             VStack(alignment: .leading, spacing: 8) {
@@ -762,10 +778,10 @@ struct JoeSettingsView: View {
     private func pcPaneHeader(_ title: String, _ subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.system(size: 40, weight: .semibold))
+                .font(JoePCType.display(34))
                 .foregroundStyle(theme.text)
             Text(subtitle)
-                .font(.system(size: 24))
+                .font(JoePCType.outfit(24))
                 .foregroundStyle(theme.meta)
         }
     }
@@ -789,7 +805,7 @@ struct JoeSettingsView: View {
                     .font(.system(size: 24))
                     .foregroundStyle(theme.meta)
                 Text("Private Cinema là một lựa chọn bổ sung, không thay thế Ultra. Đổi giao diện áp dụng ngay cho toàn app: trang chủ, trang phim, tìm kiếm và trình phát.")
-                    .font(.system(size: 24))
+                    .font(JoePCType.outfit(24))
                     .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1100, alignment: .leading)
             }
@@ -863,7 +879,7 @@ struct JoeSettingsView: View {
             diagnosticsBlock
             signpostBlock
             Text("Joe TV v\(JoeRootView.appVersion)")
-                .font(.system(size: 23))
+                .font(JoePCType.outfit(23))
                 .foregroundStyle(theme.meta)
         }
     }
@@ -873,7 +889,7 @@ struct JoeSettingsView: View {
             pcPaneHeader("Tài khoản debrid",
                          "Token và link nguồn torrent — chỉ lưu trong app này trên Apple TV của anh.")
             Text(torrentHeaderText)
-                .font(.system(size: 25))
+                .font(JoePCType.outfit(25))
                 .foregroundStyle(TorrentSettings.isConfigured
                                  ? JoeTheme.okGreen : .orange)
             torrentioField
@@ -1004,7 +1020,8 @@ struct JoeSettingsView: View {
                        inForce: Bool? = nil) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
-                .font(.system(size: 29, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(29, weight: .bold)
+                              : .system(size: 29, weight: .bold))
                 .foregroundStyle(theme.text)
             HStack(alignment: .center, spacing: 16) {
                 Group {
@@ -1036,7 +1053,17 @@ struct JoeSettingsView: View {
                 .textFieldStyle(.plain)
                 // UI-6 defect D-22: field text is 31 pt at
                 // every field site (the shared token).
-                .font(.system(size: ThemeTokens.fieldTextSize))
+                // RECALC-213 (R3): under Private Cinema the
+                // field family takes the designer's one
+                // measured input size — Outfit 29/300 (the
+                // Type sheet's search-input value; the
+                // drawing set carries no Settings-field
+                // size, so the input family rules). The
+                // legacy themes keep the 31 pt token.
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(29,
+                                         weight: .light)
+                      : .system(size: ThemeTokens.fieldTextSize))
                 // v2.0.39 (owner order 2026-11-19): Settings
                 // fields wear the Settings-only chrome — no
                 // light outer plate, one per-theme bar, and a
@@ -1065,18 +1092,18 @@ struct JoeSettingsView: View {
             // hint so the state reads as the field's own.
             if let status {
                 Text(status.text)
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(status.filled
                                      ? JoeTheme.okGreen : theme.meta)
                     .frame(maxWidth: 1250, alignment: .leading)
             }
             Text(hint)
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1250, alignment: .leading)
             if let inputHint = inputHints[id] {
                 Text(inputHint)
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(.orange)
                     .frame(maxWidth: 1250, alignment: .leading)
             }
@@ -1126,7 +1153,8 @@ struct JoeSettingsView: View {
                     .fill(kkStatusColor)
                     .frame(width: 16, height: 16)
                 Text(kkStatusText)
-                    .font(.system(size: 29))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(29) : .system(size: 29))
                     .foregroundStyle(theme.text)
                     .frame(maxWidth: 1250, alignment: .leading)
             }
@@ -1181,7 +1209,8 @@ struct JoeSettingsView: View {
     private var tvbGoldBlock: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("TVB Gold (YouTube)")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             Button {
                 nav.ytSignInOpen = true
@@ -1191,7 +1220,7 @@ struct JoeSettingsView: View {
             .joeCardButton()
             .focused($tvbGoldFocused)
             Text("Đăng nhập một lần bằng tài khoản Gold của anh; app chỉ ghi nhớ trạng thái đăng nhập, không lưu mật khẩu. Mỗi lần cài lại app qua Signulous cần đăng nhập lại một lần.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1200, alignment: .leading)
         }
@@ -1227,12 +1256,13 @@ struct JoeSettingsView: View {
     private var historyBlock: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Lịch sử đã mở")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             Text(watch.progress().isEmpty
                  ? "Chưa có phim nào trong mục Đang xem dở."
                  : "Đang lưu \(watch.progress().count) mục xem tiếp — gồm cả những phim chỉ mở lỡ một lần. Xoá hết để danh sách sạch lại; phim Yêu thích không bị xoá.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1200, alignment: .leading)
             Button {
@@ -1263,17 +1293,19 @@ struct JoeSettingsView: View {
     private var diagnosticsBlock: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Kiểm tra nguồn phim")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             Text("Đo từng nguồn phim ngay trên máy này.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
             if probing {
                 HStack(spacing: 14) {
                     ProgressView()
                         .tint(.white)
                     Text("Đang kiểm tra…")
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(theme.text)
                 }
             } else if !probeResults.isEmpty {
@@ -1286,14 +1318,15 @@ struct JoeSettingsView: View {
                                       : JoeTheme.accentRed)
                                 .frame(width: 16, height: 16)
                             Text(result.name)
-                                .font(.system(size: 29))
+                                .font(theme.id == .privateCinema
+                                      ? JoePCType.outfit(29) : .system(size: 29))
                                 .foregroundStyle(theme.text)
                             Spacer()
                             Text("\(result.millis) ms")
-                                .font(.system(size: 25))
+                                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                                 .foregroundStyle(theme.meta)
                             Text(result.note)
-                                .font(.system(size: 25))
+                                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                                 .foregroundStyle(result.ok ? .white.opacity(0.7) : .orange)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
@@ -1327,11 +1360,12 @@ struct JoeSettingsView: View {
         let entries = LoadSignpost.entries()
         VStack(alignment: .leading, spacing: 12) {
             Text("Nhật ký tải phim (chẩn đoán)")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             if entries.isEmpty {
                 Text("Chưa có dữ liệu — mở trang Phim một lần rồi quay lại.")
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1200, alignment: .leading)
             } else {
@@ -1369,10 +1403,11 @@ struct JoeSettingsView: View {
     private var previewToggleBlock: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Xem trước trên ảnh nền")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             Text("Khi mở một phim, ảnh nền của màn chi tiết tự chạy một đoạn ngắn của chính phim đó (tắt tiếng). Bấm phím bất kỳ là dừng ngay.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1200, alignment: .leading)
             Button {
@@ -1392,10 +1427,11 @@ struct JoeSettingsView: View {
     private var logExportBlock: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Log chẩn đoán")
-                .font(.system(size: 34, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
                 .foregroundStyle(theme.text)
             Text("App ghi lại một bản log chẩn đoán để truy vết lỗi — không bao giờ ghi mật khẩu, token hay link vào log. Khi có lỗi cần bằng chứng, anh bấm nút dưới đây và gửi file log cho em.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1200, alignment: .leading)
             Button {
@@ -1452,18 +1488,26 @@ private struct JoeTVBGoldRowLabel: View {
                 .font(.system(size: 28, weight: .bold))
                 .foregroundStyle(signedIn ? JoeTheme.okGreen : theme.meta)
             Text(signedIn ? "Đã đăng nhập" : "Chưa đăng nhập")
-                .font(.system(size: 29, weight: .semibold))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(29, weight: .semibold)
+                      : .system(size: 29, weight: .semibold))
                 .foregroundStyle(theme.text)
             Text("— bấm để mở trang đăng nhập")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
         }
         .padding(.horizontal, 36)
         .padding(.vertical, 17)
         .background(Capsule().fill(theme.surface2))
-        .overlay(Capsule().strokeBorder(
-            isFocused ? theme.focus : theme.stroke,
-            lineWidth: isFocused ? theme.ringWidth : 1.5))
+        // Fault 11 fix round: the resting hairline is its
+        // own overlay and the focus ring is the chip
+        // family's (JoeChipRing) — under Private Cinema the
+        // ivory outset outline; under every other theme the
+        // house JoeFocusRing over the hairline, which the
+        // inside band covers exactly as the single-overlay
+        // expression did.
+        .overlay(Capsule().strokeBorder(theme.stroke, lineWidth: 1.5))
+        .overlay(JoeChipRing(shape: Capsule()))
     }
 }
 
@@ -1480,8 +1524,10 @@ private struct JoeTVBGoldRowLabel: View {
 /// The left rail's category row: icon + title on a rounded
 /// panel face. The SELECTED row wears the filled Panel face
 /// (theme.surface2 = #182024 under PC) per the drawing; an
-/// unselected row is transparent. Focus adds the inside
-/// theme.focus stroke, the JoeChipLabel recipe.
+/// unselected row is transparent. Focus adds the drawn
+/// ivory outset outline (Fault 11 fix round — the inside
+/// theme.focus stroke it first shipped with was the legacy
+/// pattern).
 private struct PCCategoryRowLabel: View {
     let title: String
     let icon: String
@@ -1494,7 +1540,7 @@ private struct PCCategoryRowLabel: View {
             Image(systemName: icon)
                 .font(.system(size: 26, weight: .medium))
             Text(title)
-                .font(.system(size: 28, weight: (selected || isFocused) ? .semibold : .regular))
+                .font(JoePCType.outfit(28, weight: (selected || isFocused) ? .semibold : .regular))
                 .lineLimit(1)
             Spacer()
         }
@@ -1504,9 +1550,13 @@ private struct PCCategoryRowLabel: View {
         .frame(width: 440, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14)
             .fill(selected ? theme.surface2 : Color.clear))
-        .overlay(RoundedRectangle(cornerRadius: 14)
-            .strokeBorder(isFocused ? theme.focus : .clear,
-                          lineWidth: isFocused ? theme.ringWidth : 0))
+        // Fault 11 fix round: the drawn Settings rail focus
+        // is an ivory OUTSET outline around the row (the
+        // build-Settings render's focused "Giao diện" row),
+        // not the legacy inside ring.
+        .overlay(JoeOutsetRing(shape: RoundedRectangle(cornerRadius: 14),
+                               color: JoeCinemaFocus.ivory,
+                               lineWidth: 2, offset: 4))
     }
 }
 
@@ -1522,7 +1572,7 @@ private struct PCBackLabel: View {
             Image(systemName: "arrow.left")
                 .font(.system(size: 24, weight: .medium))
             Text("Quay lại")
-                .font(.system(size: 26))
+                .font(JoePCType.outfit(26))
         }
         .foregroundStyle(isFocused ? theme.focus : theme.text)
         .padding(.horizontal, 10)
@@ -1558,10 +1608,10 @@ private struct PCThemeCardLabel: View {
             HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(tokens.id.pickerLabel)
-                        .font(.system(size: 29, weight: .semibold))
+                        .font(JoePCType.outfit(29, weight: .semibold))
                         .foregroundStyle(theme.text)
                     Text(subtitle)
-                        .font(.system(size: 23))
+                        .font(JoePCType.outfit(23))
                         .foregroundStyle(theme.meta)
                         .lineLimit(1)
                 }
@@ -1572,7 +1622,7 @@ private struct PCThemeCardLabel: View {
                         .foregroundStyle(theme.accent2)
                 } else {
                     Text("Chọn")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(JoePCType.outfit(22, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
@@ -1584,9 +1634,17 @@ private struct PCThemeCardLabel: View {
         }
         .background(RoundedRectangle(cornerRadius: 16).fill(theme.surface2))
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        // Fault 11 fix round: the concept Settings render's
+        // selected card wears an ivory OUTSET outline (the
+        // tile family's 3 px / offset 5 px at this size);
+        // the selected hairline stays as its own overlay
+        // under it.
         .overlay(RoundedRectangle(cornerRadius: 16)
-            .strokeBorder(isFocused ? theme.focus : (selected ? theme.stroke : .clear),
-                          lineWidth: isFocused ? theme.ringWidth : 1.5))
+            .strokeBorder(selected ? theme.stroke : .clear,
+                          lineWidth: 1.5))
+        .overlay(JoeOutsetRing(shape: RoundedRectangle(cornerRadius: 16),
+                               color: JoeCinemaFocus.ivory,
+                               lineWidth: 2, offset: 4))
     }
 }
 
@@ -1631,7 +1689,7 @@ private struct LogExportView: View {
             theme.bg.ignoresSafeArea()
             VStack(alignment: .center, spacing: 36) {
                 Text("Gửi log chẩn đoán")
-                    .font(.system(size: 44, weight: .bold))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(44, weight: .bold) : .system(size: 44, weight: .bold))
                     .foregroundStyle(theme.text)
 
                 switch serverState {
@@ -1639,11 +1697,11 @@ private struct LogExportView: View {
                     ProgressView()
                         .tint(.white)
                     Text("Đang mở kênh gửi log…")
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(theme.text)
                 case .serving(let url):
                     Text(url)
-                        .font(.system(size: 44, weight: .bold))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(44, weight: .bold) : .system(size: 44, weight: .bold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     // v2.0.40 (P0.2 / H-1): the address above
@@ -1656,7 +1714,7 @@ private struct LogExportView: View {
                     // tries pause the channel for 60 seconds.
                     if !server.pin.isEmpty {
                         Text("Mã PIN một lần: \(server.pin)")
-                            .font(.system(size: 36, weight: .semibold))
+                            .font(theme.id == .privateCinema ? JoePCType.outfit(36, weight: .semibold) : .system(size: 36, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                     if let qr = Self.qrImage(for: url) {
@@ -1672,13 +1730,13 @@ private struct LogExportView: View {
                                 .fill(Color.white))
                     }
                     Text("Trên iPhone, mở Safari và nhập đúng địa chỉ trên (địa chỉ đã gồm mã PIN một lần) — file log sẽ tải về máy. Hoặc dùng Camera của iPhone quét mã QR. Kênh gửi log mở sẵn từ khi app khởi động và mở trong suốt lúc app đang chạy. Lấy xong, gửi file vào cuộc trò chuyện với em.")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 1250, alignment: .center)
                 case .failed(let message):
                     Text(message)
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(.orange)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 1250, alignment: .center)

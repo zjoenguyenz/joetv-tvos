@@ -153,6 +153,18 @@ struct JoeMovieDetail: View {
     /// make detailScrollContent's ScrollViewReader jump
     /// to the top of the page (owner order 2026-11-21).
     @State private var topScrollSignal = 0
+    /// FIX-213 (Fault 1, DIAG-20261122): the Menu exit's
+    /// second-press arm. Menu #1 jumps to the top and arms
+    /// this; Menu #2 closes — INDEPENDENT of whether the
+    /// jump's programmatic focus write landed on Play (a
+    /// write aimed at a view the lazy stack has not
+    /// re-realised yet is dropped silently, and pre-fix
+    /// each dropped write cost another apparently-dead
+    /// Menu press). Cleared by any focus change and any
+    /// button press (see focusLandingChanged /
+    /// killPreviewOnInput), so an armed exit never
+    /// survives the user navigating or interacting.
+    @State private var exitArmed = false
     @FocusState private var focusedPlay: Bool
     /// v2.0.5 (N1, pair h): the favourite button joins the
     /// detail's focus system — pre-fix it was the one header
@@ -251,7 +263,9 @@ struct JoeMovieDetail: View {
                         // C-9: a failed provider switch reverted —
                         // say so, naming both providers (§8).
                         Text(switchNotice)
-                            .font(.system(size: 25))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(25)
+                                  : .system(size: 25))
                             .foregroundStyle(.orange)
                     }
                     // v2.0.0 (UI-5): the detail's anatomy follows
@@ -292,12 +306,15 @@ struct JoeMovieDetail: View {
                         Text(tvbNoExactSource
                              ? "Không mở được đúng phim này."
                              : "Không tải được thông tin phim.")
-                            .font(.system(size: 29, weight: .semibold))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(29, weight: .semibold)
+                                  : .system(size: 29, weight: .semibold))
                             .foregroundStyle(theme.text)
                         Text(tvbNoExactSource
                              ? "Các nguồn TVB đều không dùng được hoặc không khớp đúng phim — app không mở thay bằng phim khác."
                              : "Kiểm tra mạng rồi thử lại.")
-                            .font(.system(size: 25))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(25) : .system(size: 25))
                             .foregroundStyle(theme.meta)
                         Button {
                             retryButtonTapped()
@@ -317,7 +334,8 @@ struct JoeMovieDetail: View {
                 } else {
                     placeholderHeader
                     ProgressView("Đang tải danh sách tập…")
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(theme.text)
                         .tint(theme.text)
                 }
@@ -565,12 +583,18 @@ struct JoeMovieDetail: View {
     /// chain): the optional bindings land when the
     /// value goes unset → set.
     private func focusLandingChanged<T>(old: T?, new: T?) {
+        // FIX-213 (Fault 1): any focus change disarms the
+        // Menu exit — the arm belongs to the exact moment
+        // after the jump-to-top, and any navigation since
+        // means the next Menu is a fresh first press.
+        exitArmed = false
         preview.focusInput(landingShaped: old == nil && new != nil)
     }
 
     /// The Bool bindings' landing report: a landing
     /// is the false → true transition.
     private func focusLandingChanged(old: Bool, new: Bool) {
+        exitArmed = false
         preview.focusInput(landingShaped: !old && new)
     }
 
@@ -632,10 +656,20 @@ struct JoeMovieDetail: View {
         if focusedPlay == true {
             preview.kill(reason: "menu")
             nav.movie = nil
+        } else if exitArmed {
+            // FIX-213 (Fault 1): the previous Menu already
+            // jumped to the top and armed the exit; the
+            // focus write did not land (or focus has since
+            // rested somewhere the write cannot be proven
+            // from), so this press closes — the exit no
+            // longer depends on the programmatic write.
+            preview.kill(reason: "menu")
+            nav.movie = nil
         } else {
             preview.killIfAttempting(reason: "menu")
             topScrollSignal += 1
             focusedPlay = true
+            exitArmed = true
         }
     }
 
@@ -660,6 +694,10 @@ struct JoeMovieDetail: View {
     /// action (the source rows) stays a pair of
     /// plain calls.
     private func killPreviewOnInput() {
+        // FIX-213 (Fault 1): a button press is owner
+        // input — it disarms the Menu exit arm like any
+        // focus change does (see focusLandingChanged).
+        exitArmed = false
         preview.kill(reason: "input")
     }
 
@@ -875,15 +913,14 @@ struct JoeMovieDetail: View {
             // the page keeps its shape when the detail lands.
             VStack(alignment: .leading, spacing: 0) {
                 Text(route.name)
-                    .font(.system(size: 92, weight: .semibold,
-                                  design: .serif))
+                    .font(JoePCType.display(100))
                     .tracking(6)
                     .foregroundStyle(theme.text)
                     .lineLimit(2)
                     .padding(.top, 30)
                 if !route.year.isEmpty {
                     Text(route.year)
-                        .font(.system(size: 29))
+                        .font(JoePCType.outfit(29))
                         .foregroundStyle(theme.heroMeta)
                         .padding(.top, 12)
                 }
@@ -959,7 +996,9 @@ struct JoeMovieDetail: View {
 
     private var providerChip: some View {
         Text(Providers.displayName(provider))
-            .font(.system(size: 25, weight: .semibold))
+            .font(theme.id == .privateCinema
+                  ? JoePCType.outfit(25, weight: .semibold)
+                  : .system(size: 25, weight: .semibold))
             .foregroundStyle(theme.text.opacity(0.85))
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
@@ -1591,25 +1630,24 @@ struct JoeMovieDetail: View {
             pcBackRow
             VStack(alignment: .leading, spacing: 0) {
                 Text(eyebrow)
-                    .font(.system(size: 23, weight: .semibold))
-                    .tracking(3)
+                    .font(JoePCType.outfit(15, weight: .medium))
+                    .tracking(3.6)
                     .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
                     .padding(.top, 30)
                 Text(d.movie.name)
                     // FIX-10b / F5: spec type sheet — Detail
                     // title 100/500, tracking −3.
-                    .font(.system(size: 100, weight: .medium,
-                                  design: .serif))
+                    .font(JoePCType.display(100))
                     .tracking(-3)
                     .foregroundStyle(theme.text)
                     .lineLimit(2)
                     .padding(.top, 16)
                 if !d.movie.originName.isEmpty,
                    d.movie.originName != d.movie.name {
-                    Text(d.movie.originName)
-                        .font(.system(size: 27))
-                        .tracking(3)
+                    Text(d.movie.originName.uppercased())
+                        .font(JoePCType.outfit(20, weight: .medium))
+                        .tracking(6)
                         .foregroundStyle(theme.meta)
                         .lineLimit(1)
                         .padding(.top, 10)
@@ -1618,7 +1656,7 @@ struct JoeMovieDetail: View {
                     HStack(spacing: 16) {
                         if !metaText.isEmpty {
                             Text(metaText)
-                                .font(.system(size: 27, weight: .medium))
+                                .font(JoePCType.outfit(20))
                                 .foregroundStyle(theme.heroMeta)
                                 .lineLimit(1)
                         }
@@ -1630,7 +1668,7 @@ struct JoeMovieDetail: View {
                             // 14 regular on black 0.35, r4,
                             // stroke 1 — no oversized label.
                             Text(d.movie.quality)
-                                .font(.system(size: 14, weight: .regular))
+                                .font(JoePCType.outfit(14))
                                 .foregroundStyle(theme.text)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 4)
@@ -1649,7 +1687,7 @@ struct JoeMovieDetail: View {
                     // max width 720; the drawing shows 3
                     // lines at that width, so the limit is 3.
                     Text(synopsisText)
-                        .font(.system(size: 21))
+                        .font(JoePCType.outfit(21))
                         .foregroundStyle(theme.text.opacity(0.92))
                         .lineSpacing(11.55)
                         .lineLimit(3)
@@ -1661,7 +1699,7 @@ struct JoeMovieDetail: View {
                 if let tmdb, !tmdb.cast.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("DIỄN VIÊN")
-                            .font(.system(size: 23, weight: .semibold))
+                            .font(JoePCType.outfit(23, weight: .semibold))
                             .tracking(3)
                             .foregroundStyle(theme.heroMeta)
                         HStack(spacing: 18) {
@@ -1753,7 +1791,7 @@ struct JoeMovieDetail: View {
             playButton(d)
             if !infoText.isEmpty {
                 Text(infoText)
-                    .font(.system(size: 25))
+                    .font(JoePCType.outfit(25))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
@@ -1773,11 +1811,21 @@ struct JoeMovieDetail: View {
             favButtonAction(d)
         } label: {
             Text(isFav ? "♥ Đã thích" : "♡ Yêu thích")
-                .font(.system(size: 25, weight: .semibold))
+                .font(JoePCType.outfit(25, weight: .semibold))
                 .foregroundStyle(focusedFav
                     ? theme.focusTitle
                     : (isFav ? JoeTheme.accentRed : theme.text))
                 .lineLimit(1)
+                // Fault 11 fix round: the unfavourited
+                // resting colour IS the focus colour under
+                // this theme (text ≈ focusTitle), so the
+                // colour swap alone was the Fault-2 disease
+                // — the focused state also raises the Panel
+                // plate, exactly as the F2 name labels do.
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 8)
+                    .fill(focusedFav ? theme.surface2 : Color.clear))
         }
         .joeCardButton()
         .focused($focusedFav)
@@ -1796,12 +1844,19 @@ struct JoeMovieDetail: View {
                 followButtonAction(d)
             } label: {
                 Text(isFollowing(d) ? "Đang theo dõi" : "Theo dõi")
-                    .font(.system(size: 25, weight: .semibold))
+                    .font(JoePCType.outfit(25, weight: .semibold))
                     .foregroundStyle(focusedFollow
                         ? theme.focusTitle
                         : (isFollowing(d)
                            ? JoeTheme.accentRed : theme.text))
                     .lineLimit(1)
+                    // Fault 11 fix round: the focused
+                    // Panel plate, as pcFavTextButton.
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 8)
+                        .fill(focusedFollow ? theme.surface2
+                                            : Color.clear))
             }
             .joeCardButton()
             .focused($focusedFollow)
@@ -1828,7 +1883,7 @@ struct JoeMovieDetail: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 14) {
                 Text("Chọn nguồn phát")
-                    .font(.system(size: 34, weight: .bold))
+                    .font(JoePCType.display(34))
                     .foregroundStyle(theme.text)
                 if switching {
                     ProgressView().tint(theme.text)
@@ -1837,9 +1892,10 @@ struct JoeMovieDetail: View {
             }
             pcSourceCardGrid(d)
             // No torrentUnresolvedNote here: the Torrent
-            // card's own sub-line carries the entry state
-            // (pcCardSubLine) — the chip anatomies need
-            // the note because a chip has no state slot.
+            // card's own name line carries the entry state
+            // as a suffix (pcCardStateSuffix) — the chip
+            // anatomies need the note because a chip has
+            // no state slot.
             servers(d, heading: "Chọn tập", headingSize: 30)
                 .padding(.top, 20)
         }
@@ -1848,22 +1904,33 @@ struct JoeMovieDetail: View {
     /// FIX-10b / F6: the drawing's source-card layout —
     /// a HORIZONTAL row of cards, 3 per row, wrapping to
     /// a second row when the membership carries more
-    /// (the app carries up to ~6 entries). Measured from
-    /// delivery-joetv-Detail.png (1920×1080): cards
-    /// ≈563×128 pt, gap 20 pt, side margins 95 pt — the
-    /// grid's three flexible columns with 20 pt gaps
-    /// reproduce that rhythm at this composition's own
-    /// width. The card anatomy (pcSourceCard) is
-    /// unchanged; the servers/episode block below the
-    /// block stays exactly as it was.
+    /// (the app carries up to ~6 entries).
+    /// OWNER OVERRIDE 2026-11-22 12:15 CST ("Thanh vẫn
+    /// còn rất dài làm vừa đủ cho cân bằng bố cục thôi";
+    /// RECALC-SPEC §3.10): the cards are sized to their
+    /// CONTENT — the old three flexible columns stretched
+    /// every card to the column width, so the grid is now
+    /// leading-aligned HStacks of up to 3 cards, each
+    /// card .fixedSize(horizontal:) so it hugs its one
+    /// line, with the design's 18 pt horizontal gap and
+    /// the grid's existing 20 pt vertical rhythm. The
+    /// card anatomy (pcSourceCard), ordering and actions
+    /// are unchanged; the servers/episode block below
+    /// the block stays exactly as it was.
     private func pcSourceCardGrid(_ d: Detail) -> some View {
-        LazyVGrid(columns: Array(
-                    repeating: GridItem(.flexible(), spacing: 20),
-                    count: 3),
-                  alignment: .leading, spacing: 20) {
-            ForEach(Array(sourceEntries.enumerated()),
-                    id: \.element.id) { index, entry in
-                pcSourceCard(entry, detail: d, index: index)
+        let rowCount = (sourceEntries.count + 2) / 3
+        return VStack(alignment: .leading, spacing: 20) {
+            ForEach(0..<rowCount, id: \.self) { row in
+                HStack(spacing: 18) {
+                    ForEach((row * 3)..<min(row * 3 + 3,
+                                            sourceEntries.count),
+                            id: \.self) { index in
+                        pcSourceCard(sourceEntries[index],
+                                     detail: d, index: index)
+                            .fixedSize(horizontal: true,
+                                       vertical: false)
+                    }
+                }
             }
         }
         .focusSection()
@@ -1901,64 +1968,24 @@ struct JoeMovieDetail: View {
         }
     }
 
-    /// The card's sub/audio line, from REAL FIELDS ONLY:
-    /// the record's Movie.lang (subtitle/audio descriptor)
-    /// plus the entry's own shipped data line — for the
-    /// current source, its server names exactly as
-    /// servers(…) renders them (a server's name IS its
-    /// sub/audio descriptor in the payloads, so the lang
-    /// is not repeated beside it); for YouTube, the
-    /// match's episode count + tier label (sourceRowEntry's
-    /// own meta); for Torrent and an alternative, those
-    /// rows' shipped meta strings. A part the record
-    /// does not carry is omitted, never filled in.
-    private func pcCardSubLine(_ entry: SourceEntry,
-                               detail d: Detail) -> String {
-        var parts: [String] = []
-        switch entry {
-        case .current:
-            let serverNames = d.servers.map { $0.name }
-                .filter { !$0.isEmpty }
-            if !serverNames.isEmpty {
-                parts.append(serverNames.joined(separator: " · "))
-            } else if !d.movie.lang.isEmpty {
-                parts.append(d.movie.lang)
-            }
-        case .youtube:
-            if !d.movie.lang.isEmpty { parts.append(d.movie.lang) }
-            if let yt = ytMatch {
-                parts.append("\(yt.eps.count) tập")
-                if !yt.tierLabel.isEmpty { parts.append(yt.tierLabel) }
-            }
-        case .torrent:
-            parts.append("Nguồn thay thế tự động khi các nguồn trên đều chết")
-            // FIX-10b / F9: the entry STATE rides this
-            // sub-line now (the card's right slot is
-            // quality-only, as drawn) — appended only
-            // when the line does not already state it.
-            let stateText = pcTorrentStateText()
-            if !stateText.isEmpty
-                && !parts.joined(separator: " · ").contains(stateText) {
-                parts.append(stateText)
-            }
-        case .alternative:
-            if !d.movie.lang.isEmpty { parts.append(d.movie.lang) }
-            parts.append("Nguồn khác của phim này")
-        case .auto:
-            if !d.movie.lang.isEmpty { parts.append(d.movie.lang) }
-        }
-        return joinParts(parts, " · ")
-    }
-
-    /// The Torrent entry's state text (the F row's state
-    /// strings, verbatim): Cần token / Đang tìm mã
-    /// IMDb… / Chưa tìm được mã IMDb / Sẵn sàng.
-    private func pcTorrentStateText() -> String {
+    /// FIX-213 (Faults 3+4, DIAG-20261122): the ONE
+    /// state that still rides the compact card's face —
+    /// a Torrent state that BLOCKS use, as a short suffix
+    /// on the name line (without it the card would look
+    /// pressable when it is not). The transient (.pending)
+    /// and ready states paint nothing. This replaces the
+    /// old sub-line construction (pcCardSubLine, removed):
+    /// under the owner's compact ruling ("Làm nút nhỏ
+    /// nguồn ghi tắt nhỏ ít thông tin được rồi") the
+    /// descriptive sub-lines — server names, episode
+    /// counts, the Torrent card's "Nguồn thay thế tự
+    /// động…" sentence — are dropped from the card face.
+    private func pcCardStateSuffix(_ entry: SourceEntry) -> String {
+        guard case .torrent = entry else { return "" }
         switch torrentEntryState {
         case .notConfigured: return "Cần token"
-        case .pending: return "Đang tìm mã IMDb…"
         case .unresolved: return "Chưa tìm được mã IMDb"
-        case .ready: return "Sẵn sàng"
+        case .pending, .ready: return ""
         }
     }
 
@@ -1971,8 +1998,8 @@ struct JoeMovieDetail: View {
     /// is quality-only, as drawn — the Torrent entry
     /// returns EMPTY here (a torrent quality is not
     /// known on this screen and is never invented); its
-    /// entry state rides the card's sub-line instead
-    /// (pcCardSubLine via pcTorrentStateText).
+    /// entry state rides the card's name line instead
+    /// (pcCardStateSuffix).
     private func pcCardRightText(_ entry: SourceEntry,
                                  detail d: Detail) -> String {
         switch entry {
@@ -1985,79 +2012,77 @@ struct JoeMovieDetail: View {
 
     /// One numbered PC source card: Panel #182024 face
     /// (the design token, spelt out — the theme's
-    /// surface gradient is NOT the design's flat Panel),
-    /// big number, role label (ĐỀ XUẤT on the first card,
-    /// NGUỒN DỰ PHÒNG on the rest), the source name, the
-    /// sub/audio line under it (the Torrent card's
-    /// sub-line also carries its entry state), quality
-    /// right-aligned and the design's chevron. Focus is the
-    /// shipped construction: a Button over $focusedAlt
-    /// with the entry's own id (the chips' binding), the
-    /// label carrying JoeFocusRing inside the resting
-    /// stroke — no scale, no hand-drawn ring. The
-    /// unconfigured Torrent entry stays a non-focusable
-    /// status card, exactly as F's "Cần token" row.
+    /// surface gradient is NOT the design's flat Panel).
+    /// FIX-213 (Faults 3+4, DIAG-20261122; owner ruling
+    /// 2026-11-22 10:25 CST — "Làm nút nhỏ nguồn ghi tắt
+    /// nhỏ ít thông tin được rồi", which OVERRIDES the
+    /// drawing for these cards): the face is now ONE
+    /// line — the number (24 pt), the short source name
+    /// (25 pt semibold), a blocking-state suffix for the
+    /// Torrent entry only (pcCardStateSuffix), and the
+    /// quality right-aligned. The role line (ĐỀ XUẤT /
+    /// NGUỒN DỰ PHÒNG), the sub/audio line, the play
+    /// glyph and the chevron are gone; vertical padding
+    /// 22 → 10. Focus is the shipped construction: a
+    /// Button over $focusedAlt with the entry's own id
+    /// (the chips' binding); the label's focus treatment
+    /// is the design's source-row state (Fault 11 fix
+    /// round: celadon outset outline via JoeDesignRing +
+    /// the #304039DF focused face via JoeSourceRowFace,
+    /// over the resting stroke). The unconfigured
+    /// Torrent entry stays a non-focusable status card,
+    /// exactly as F's "Cần token" row.
+    /// OWNER OVERRIDE 2026-11-22 12:15 CST (§3.10): the
+    /// card's width is its content's width — never the
+    /// column's or the frame's (see pcSourceCardGrid).
     @ViewBuilder
     private func pcSourceCard(_ entry: SourceEntry, detail d: Detail,
                               index: Int) -> some View {
         let panel = Color(red: 0.094, green: 0.125, blue: 0.141)
         let numberText = String(format: "%02d", index + 1)
-        let roleText = index == 0 ? "ĐỀ XUẤT" : "NGUỒN DỰ PHÒNG"
         let nameText = pcCardName(entry)
-        let subText = pcCardSubLine(entry, detail: d)
+        let stateText = pcCardStateSuffix(entry)
         let rightText = pcCardRightText(entry, detail: d)
-        let cardBase = HStack(alignment: .center, spacing: 24) {
+        let cardBase = HStack(alignment: .center, spacing: 16) {
             Text(numberText)
-                .font(.system(size: 32, weight: .light,
-                              design: .serif))
+                .font(JoePCType.editorial(24))
                 .foregroundStyle(theme.meta)
-            Image(systemName: "play")
-                .font(.system(size: 22, weight: .semibold))
+            Text(nameText)
+                .font(JoePCType.outfit(25, weight: .semibold))
                 .foregroundStyle(theme.text)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(roleText)
-                    .font(.system(size: 19, weight: .semibold))
-                    .tracking(2)
-                    .foregroundStyle(index == 0
-                                     ? theme.heroMeta : theme.meta)
-                Text(nameText)
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(theme.text)
+                .lineLimit(1)
+            if !stateText.isEmpty {
+                Text(stateText)
+                    .font(JoePCType.outfit(22))
+                    .foregroundStyle(theme.meta)
                     .lineLimit(1)
-                if !subText.isEmpty {
-                    Text(subText)
-                        .font(.system(size: 24))
-                        .foregroundStyle(theme.meta)
-                        .lineLimit(1)
-                }
             }
             Spacer(minLength: 0)
-            // FIX-5 / Lens C Finding 2 (R2 C7 residual): the
-            // design's card right side is quality only — no
-            // "● Đang chọn" / "Sẵn sàng" state line. The
-            // underlying selection state and the card's
-            // action are untouched; role label + focus carry
-            // the design's treatment.
-            VStack(alignment: .trailing, spacing: 6) {
-                if !rightText.isEmpty {
-                    Text(rightText)
-                        .font(.system(size: 25, weight: .medium))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(1)
-                }
+            if !rightText.isEmpty {
+                Text(rightText)
+                    .font(JoePCType.outfit(25, weight: .medium))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
             }
-            Image(systemName: "chevron.right")
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(theme.meta)
         }
         let cardPadded = cardBase
-            .padding(.horizontal, 30)
-            .padding(.vertical, 22)
-        let cardFramed = cardPadded
-            .frame(maxWidth: .infinity, alignment: .leading)
-        let cardFilled = cardFramed
-            .background(RoundedRectangle(cornerRadius: theme.rField)
-                .fill(panel))
+            // RECALC-213: horizontal padding takes the
+            // drawing's card value 25 (§3.10); the compact
+            // override set only the vertical (10).
+            .padding(.horizontal, 25)
+            .padding(.vertical, 10)
+        // OWNER OVERRIDE 2026-11-22 12:15 CST (§3.10):
+        // no full-width frame — the card hugs its one
+        // line (the Spacer above collapses to its 0
+        // minimum at the card's ideal width, which
+        // pcSourceCardGrid pins with .fixedSize).
+        let cardFilled = cardPadded
+            // Fault 11 fix round: the face is JoeSourceRowFace —
+            // Panel at rest, the spec sheet's #304039DF when
+            // focused (the design's source-row state).
+            .background(JoeSourceRowFace(
+                shape: RoundedRectangle(cornerRadius: theme.rField),
+                restFill: panel))
         let card = cardFilled
             .overlay(RoundedRectangle(cornerRadius: theme.rField)
                 .strokeBorder(theme.stroke, lineWidth: 1.5))
@@ -2066,7 +2091,7 @@ struct JoeMovieDetail: View {
             card
         } else {
             Button(action: pcCardAction(entry)) {
-                card.overlay(JoeFocusRing(
+                card.overlay(JoeDesignRing(
                     shape: RoundedRectangle(cornerRadius: theme.rField)))
             }
             .joeCardButton()
@@ -2100,27 +2125,26 @@ struct JoeMovieDetail: View {
         if trailerSignInPrompt {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Trailer cần đăng nhập YouTube")
-                    .font(.system(size: 30, weight: .bold))
+                    .font(JoePCType.outfit(30, weight: .bold))
                     .foregroundStyle(theme.text)
                 Text("Trailer phát qua YouTube nên cần anh duyệt mã kích hoạt một lần trên điện thoại — không gõ mật khẩu trên TV. Duyệt xong, trailer của các phim sau tự chạy.")
-                    .font(.system(size: 25))
+                    .font(JoePCType.outfit(25))
                     .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1150, alignment: .leading)
                 if let code = ytIdentity.userCode {
                     Text("MÃ KÍCH HOẠT")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(JoePCType.outfit(22, weight: .semibold))
                         .tracking(2)
                         .foregroundStyle(theme.meta)
                     Text(code)
-                        .font(.system(size: 54, weight: .heavy,
-                                      design: .monospaced))
+                        .font(JoePCType.outfit(54, weight: .bold))
                         .foregroundStyle(theme.text)
                     Text("Mở \(ytIdentity.verificationURL) trên iPhone → nhập mã này → duyệt bằng tài khoản của anh.")
-                        .font(.system(size: 25))
+                        .font(JoePCType.outfit(25))
                         .foregroundStyle(theme.meta)
                 } else if let error = ytIdentity.flowError {
                     Text(error)
-                        .font(.system(size: 25))
+                        .font(JoePCType.outfit(25))
                         .foregroundStyle(theme.text)
                         .frame(maxWidth: 1150, alignment: .leading)
                     Button {
@@ -2134,7 +2158,7 @@ struct JoeMovieDetail: View {
                     HStack(spacing: 12) {
                         ProgressView().tint(theme.text)
                         Text("Đang lấy mã kích hoạt…")
-                            .font(.system(size: 25))
+                            .font(JoePCType.outfit(25))
                             .foregroundStyle(theme.meta)
                     }
                 }
@@ -2359,6 +2383,15 @@ struct JoeMovieDetail: View {
             .padding(.horizontal, 30)
         let rowSpaced = rowPadded
             .padding(.vertical, 22)
+        // RECALC-213 note: the 2026-11-22 12:15 CST
+        // content-hug override was refined the same day
+        // (12:28 CST) — a VERTICALLY STACKED source list
+        // keeps ONE uniform bar width, never ragged
+        // per-bar widths. This legacy row's uniform form
+        // is its established full-width frame (state
+        // pinned right), so it is restored unchanged;
+        // the refinement's fitted uniform width applies
+        // to the torrent stream rows (§3.12).
         let rowFramed = rowSpaced
             .frame(maxWidth: .infinity, alignment: .leading)
         let rowFilled = rowFramed
@@ -2619,12 +2652,17 @@ private struct JoeActorNameLabel: View {
 /// in dress to JoeTorNameLabel (JoeTorrent.swift) so the
 /// chain and torrent PC credits render as the same
 /// element (the deviation table's "same text-line
-/// credits"): 25 pt, theme.text at rest, and focus is
-/// value-only — the name alone takes theme.focusTitle;
-/// no plate, fill, weight change or scale, and the
-/// line's geometry never changes. (The shared
-/// JoeActorNameLabel above keeps its own dress for the
-/// themes that already use it.)
+/// credits"): 25 pt, theme.text at rest.
+/// RECALC-213 R6 (RECALC-SPEC §4) SUPERSEDES the
+/// FIX-213 Fault-2 plate treatment recorded here
+/// before: the font is the theme's own family —
+/// Outfit 25 (the size is the app's; the drawing does
+/// not measure it) — and focus is semibold + an IVORY
+/// outset ring (the chip family: JoeChipRing, 2 px,
+/// offset 4), with NO plate and NO fill. The resting
+/// dress (Outfit 25 regular, theme.text, no ring, no
+/// plate) and the lineLimit/padding are unchanged, so
+/// the resting text line does not move.
 private struct JoeCinemaNameLabel: View {
     let name: String
     @Environment(\.isFocused) private var isFocused
@@ -2632,9 +2670,12 @@ private struct JoeCinemaNameLabel: View {
 
     var body: some View {
         Text(name)
-            .font(.system(size: 25))
+            .font(JoePCType.outfit(25, weight: isFocused ? .semibold : .regular))
             .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
             .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .overlay(JoeChipRing(shape: RoundedRectangle(cornerRadius: 8)))
     }
 }
 
@@ -2655,7 +2696,7 @@ private struct PCDetailBackLabel: View {
             Image(systemName: "arrow.left")
                 .font(.system(size: 24, weight: .medium))
             Text("Quay lại")
-                .font(.system(size: 26))
+                .font(JoePCType.outfit(26))
         }
         .foregroundStyle(isFocused ? theme.focus : theme.text)
         .padding(.horizontal, 10)
@@ -3618,7 +3659,9 @@ private struct JoeCastCellLabel: View {
         VStack(alignment: centered ? .center : .leading, spacing: 18) {
             if let heading {
                 Text(heading)
-                    .font(.system(size: headingSize, weight: .bold))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(headingSize, weight: .bold)
+                          : .system(size: headingSize, weight: .bold))
                     .foregroundStyle(theme.text)
             }
             serverGroups(d, centered: centered)
@@ -3653,11 +3696,14 @@ private struct JoeCastCellLabel: View {
             if route.tvb != nil && tvbNoPlayableSource {
                 VStack(alignment: centered ? .center : .leading, spacing: 8) {
                     Text("Không có nguồn phát cho phim này.")
-                        .font(.system(size: 25, weight: .semibold))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(25, weight: .semibold)
+                              : .system(size: 25, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .multilineTextAlignment(centered ? .center : .leading)
                     Text("Không nguồn TVB nào phát được phim này — anh thử lại sau, hoặc chọn phim khác.")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                         .multilineTextAlignment(centered ? .center : .leading)
                 }
@@ -3676,7 +3722,9 @@ private struct JoeCastCellLabel: View {
                 VStack(alignment: centered ? .center : .leading, spacing: 14) {
                     if d.servers.count > 1 || !server.name.isEmpty {
                         Text(server.name)
-                            .font(.system(size: 25, weight: .semibold))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(25, weight: .semibold)
+                                  : .system(size: 25, weight: .semibold))
                             .foregroundStyle(theme.meta)
                     }
                     // Design chip-row gap: 14 (design-A detail
@@ -3714,11 +3762,16 @@ private struct JoeCastCellLabel: View {
         // every server has its own "Tập 1", and keying by name
         // alone lit up one chip per server at once (C-3).
         let focused: Bool = focusedEp == focusKey
-        let chipStroke: Color = focused
+        // Fault 11 fix round: under Private Cinema the
+        // inset stroke rests (the focus moves to the
+        // outset outline below); every other theme keeps
+        // the expression value-for-value.
+        let chipStroke: Color = focused && theme.id != .privateCinema
             ? (theme.id == .posterWall && preselected
                ? Color.white : theme.focus)
             : (preselected ? Color.clear : theme.stroke)
-        let chipLineWidth: CGFloat = focused ? theme.ringWidth : 1.5
+        let chipLineWidth: CGFloat = focused && theme.id != .privateCinema
+            ? theme.ringWidth : 1.5
         let chipForeground: Color = !playable
             ? theme.text.opacity(0.35)
             : (preselected ? theme.onAccent : theme.text)
@@ -3732,7 +3785,9 @@ private struct JoeCastCellLabel: View {
             // theme ring value inside the always-installed
             // capsule stroke.
             Text(ep.name)
-                .font(.system(size: 24, weight: preselected ? .semibold : .medium))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(24, weight: preselected ? .semibold : .medium)
+                      : .system(size: 24, weight: preselected ? .semibold : .medium))
                 .foregroundStyle(chipForeground)
                 .lineLimit(1)
                 .padding(.horizontal, 22)
@@ -3751,6 +3806,15 @@ private struct JoeCastCellLabel: View {
                 // unchanged.
                 .overlay(Capsule()
                     .strokeBorder(chipStroke, lineWidth: chipLineWidth))
+                // Fault 11 fix round: the Private Cinema
+                // chip focus — the ivory outset outline
+                // (the JoeChipRing family), driven by this
+                // chip's own focus value; forced off on
+                // every other theme.
+                .overlay(JoeOutsetRing(
+                    shape: Capsule(), color: JoeCinemaFocus.ivory,
+                    lineWidth: 2, offset: 4,
+                    forced: theme.id == .privateCinema ? focused : false))
         }
         .joeCardButton()
         .focused($focusedEp, equals: focusKey)
@@ -3786,7 +3850,9 @@ private struct JoeCastCellLabel: View {
         let count = max(names.count, yt.eps.count)
         return VStack(alignment: centered ? .center : .leading, spacing: 14) {
             Text("YouTube · \(yt.tierLabel)")
-                .font(.system(size: 25, weight: .semibold))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(25, weight: .semibold)
+                      : .system(size: 25, weight: .semibold))
                 .foregroundStyle(theme.meta)
             FlowLayout(spacing: 14, centered: centered) {
                 ForEach(0..<count, id: \.self) { i in
@@ -3814,16 +3880,22 @@ private struct JoeCastCellLabel: View {
             ? names[index]
             : (yt.epTitle(at: index).isEmpty
                ? "Tập \(index + 1)" : yt.epTitle(at: index))
-        let chipStroke: Color = focused
+        // Fault 11 fix round: as epChip — under Private
+        // Cinema the inset stroke rests and the outset
+        // outline below carries the focus.
+        let chipStroke: Color = focused && theme.id != .privateCinema
             ? (theme.id == .posterWall && preselected
                ? Color.white : theme.focus)
             : (preselected ? Color.clear : theme.stroke)
-        let chipLineWidth: CGFloat = focused ? theme.ringWidth : 1.5
+        let chipLineWidth: CGFloat = focused && theme.id != .privateCinema
+            ? theme.ringWidth : 1.5
         return Button {
             ytPlayEpisode(d, yt: yt, names: names, index: index)
         } label: {
             Text(label)
-                .font(.system(size: 24, weight: preselected ? .semibold : .medium))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(24, weight: preselected ? .semibold : .medium)
+                      : .system(size: 24, weight: preselected ? .semibold : .medium))
                 .foregroundStyle(preselected ? theme.onAccent : theme.text)
                 .lineLimit(1)
                 .padding(.horizontal, 22)
@@ -3832,6 +3904,13 @@ private struct JoeCastCellLabel: View {
                     .fill(preselected ? theme.accent : theme.surface2))
                 .overlay(Capsule()
                     .strokeBorder(chipStroke, lineWidth: chipLineWidth))
+                // Fault 11 fix round: the Private Cinema
+                // chip focus (ivory outset outline), as
+                // epChip.
+                .overlay(JoeOutsetRing(
+                    shape: Capsule(), color: JoeCinemaFocus.ivory,
+                    lineWidth: 2, offset: 4,
+                    forced: theme.id == .privateCinema ? focused : false))
         }
         .joeCardButton()
         .focused($ytEpFocus, equals: index)

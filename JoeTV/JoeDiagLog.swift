@@ -122,6 +122,11 @@ enum DiagLog {
     /// file header) and flattened to a single line, so one
     /// write is always exactly one log line.
     static func write(_ category: String, _ message: String) {
+        // FIX-213 (Fault 6): the first write of the
+        // process arms the stall heartbeat below — no
+        // call-site wiring, and the guard inside makes
+        // every later write a no-op for this.
+        startStallWatchdogIfNeeded()
         let clean = scrubbed(message)
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
@@ -133,6 +138,86 @@ enum DiagLog {
         writeCounter += 1
         if writeCounter % 64 == 0 {
             rotateIfNeededLocked()
+        }
+    }
+
+    // MARK: - Stall + focus breadcrumbs (FIX-213, Fault 6)
+    //
+    // INSTRUMENTATION ONLY — nothing in this section
+    // changes any behaviour; it exists so the owner's
+    // next test session produces conviction-grade
+    // evidence for the TVB-home lag fault (DIAG-20261122
+    // Fault 6: mechanism unconvicted; the log previously
+    // carried no frame-time, hitch or focus-latency
+    // instrumentation at all). Two pieces:
+    //  • a main-queue stall heartbeat: every probe
+    //    interval a block is posted to the main queue,
+    //    and the delay between its deadline and its
+    //    execution IS the main queue's stall. A stall
+    //    beyond the threshold writes ONE [stall] line
+    //    carrying the last focus context (below), so a
+    //    hitch is attributable to a surface + focus step.
+    //  • noteFocus: the focus-step breadcrumb — one
+    //    [focus] line per focus step on a named surface,
+    //    and the context the next [stall] line carries.
+    // Both state values follow this file's standing
+    // discipline: touched only under `lock`, hence the
+    // nonisolated(unsafe) statics (see the serialisation
+    // note above).
+
+    private nonisolated(unsafe) static var stallWatchdogStarted = false
+    private nonisolated(unsafe) static var lastFocusContext = "none"
+    private static let stallProbeQueue =
+        DispatchQueue(label: "joetv.diaglog.stallwatch")
+    private static let stallThresholdSeconds = 0.25
+    private static let stallProbeIntervalSeconds = 0.5
+
+    /// The focus-step breadcrumb: records the context
+    /// for the next [stall] line and writes one [focus]
+    /// line. Called from the TVB home's card-focus hook
+    /// in this pass (JoeTVB.swift, pcHome).
+    static func noteFocus(surface: String, key: String?) {
+        let context = "\(surface)|\(key ?? "nil")"
+        lock.lock()
+        lastFocusContext = context
+        lock.unlock()
+        write("focus", "step \(context)")
+    }
+
+    /// Arm the stall heartbeat (once per process).
+    private static func startStallWatchdogIfNeeded() {
+        lock.lock()
+        if stallWatchdogStarted {
+            lock.unlock()
+            return
+        }
+        stallWatchdogStarted = true
+        lock.unlock()
+        scheduleStallProbe()
+    }
+
+    /// One heartbeat round: after the probe interval a
+    /// block is posted to the main queue; its execution
+    /// delay past the deadline is the stall. Beyond the
+    /// threshold it is written as one [stall] line with
+    /// the last focus context; either way the next round
+    /// is scheduled. The probe lives on its own serial
+    /// queue and touches shared state only under `lock`.
+    private static func scheduleStallProbe() {
+        let deadline = Date().addingTimeInterval(stallProbeIntervalSeconds)
+        stallProbeQueue.asyncAfter(
+            deadline: .now() + stallProbeIntervalSeconds) {
+            DispatchQueue.main.async {
+                let stall = Date().timeIntervalSince(deadline)
+                if stall > stallThresholdSeconds {
+                    lock.lock()
+                    let context = lastFocusContext
+                    lock.unlock()
+                    write("stall", "main-queue stall "
+                          + "\(Int(stall * 1000))ms focus=\(context)")
+                }
+                scheduleStallProbe()
+            }
         }
     }
 

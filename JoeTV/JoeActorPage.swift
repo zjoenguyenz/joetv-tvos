@@ -245,7 +245,7 @@ struct JoeActorPage: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(route.name)
                     .font(theme.id == .privateCinema
-                          ? .system(size: 44, weight: .semibold, design: .serif)
+                          ? JoePCType.display(44, weight: .semibold)
                           : .system(size: 44, weight: .heavy))
                     .foregroundStyle(theme.text)
                     .lineLimit(2)
@@ -429,9 +429,12 @@ struct JoeActorPage: View {
     /// when both records state one) — a title lookalike is
     /// never opened. No ID match: the press does nothing
     /// and the row keeps its honest "Chưa có nguồn phát"
-    /// place. Focus paints the house JoeFocusRing around
-    /// the row (clear at rest — the resting row is
-    /// pixel-identical to the pre-fix plain row).
+    /// place. Focus paints the row-family ring around the
+    /// row (JoeDesignRing — the house JoeFocusRing off the
+    /// PC path, the design's celadon outset outline under
+    /// Private Cinema; clear at rest either way — the
+    /// resting row is pixel-identical to the pre-fix
+    /// plain row).
     private func unmatchedRow(_ credit: TMDBCreditTitle) -> some View {
         Button {
             Task { await resolveAndOpen(credit) }
@@ -479,7 +482,11 @@ struct JoeActorPage: View {
             }
             Spacer(minLength: 0)
         }
-        .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: 12)))
+        // Fault 11 fix round: JoeDesignRing — under Private
+        // Cinema (this page's designed composition) the
+        // row-family celadon outset outline; under every
+        // other theme the house JoeFocusRing, value-for-value.
+        .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: 12)))
     }
 
     /// The unmatched row's press resolution (item 1c):
@@ -661,7 +668,7 @@ struct JoeActorPage: View {
                     Text("←")
                     Text("Quay lại")
                 }
-                .font(.system(size: 24))
+                .font(JoePCType.outfit(24))
                 .foregroundStyle(backFocused
                     ? theme.text : theme.text.opacity(0.75))
             }
@@ -679,12 +686,12 @@ struct JoeActorPage: View {
                     Text("Search")
                 }
             }
-            .font(.system(size: 24))
+            .font(JoePCType.outfit(24))
             .foregroundStyle(theme.text)
             Spacer()
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 Text(context.date, format: PCClockLabel.clockStyle)
-                    .font(.system(size: 24))
+                    .font(JoePCType.outfit(24))
                     .foregroundStyle(theme.text)
             }
         }
@@ -720,20 +727,18 @@ struct JoeActorPage: View {
                 Text("PHIM ĐÃ THAM GIA")
                     .foregroundStyle(theme.accent2)
             }
-            .font(.system(size: 15, weight: .semibold))
+            .font(JoePCType.outfit(15, weight: .semibold))
             .tracking(5)
             .offset(x: 296, y: 180)
             Text(cinemaDisplayName)
-                .font(.system(size: 104, weight: .light,
-                              design: .serif))
+                .font(JoePCType.editorial(104))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
                 .minimumScaleFactor(60.0 / 104.0)
                 .frame(width: 548, alignment: .leading)
                 .offset(x: 296, y: 202)
             Text(cinemaTagline)
-                .font(.system(size: 27, design: .serif))
-                .italic()
+                .font(JoePCType.editorial(27, italic: true))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
                 .frame(width: 604, height: 34, alignment: .leading)
@@ -752,7 +757,7 @@ struct JoeActorPage: View {
                              anchor: 0.18, portraitMode: .slice)
             } else {
                 Text(String(cinemaDisplayName.prefix(1)))
-                    .font(.system(size: 44, design: .serif))
+                    .font(JoePCType.editorial(44))
                     .foregroundStyle(theme.text)
             }
         }
@@ -795,7 +800,7 @@ struct JoeActorPage: View {
             Text("\(cinemaCards.count) phim trong tuyển tập")
                 .foregroundStyle(theme.meta)
         }
-        .font(.system(size: 20))
+        .font(JoePCType.outfit(20))
         .lineLimit(1)
     }
 
@@ -811,24 +816,24 @@ struct JoeActorPage: View {
         HStack(alignment: .center, spacing: 16) {
             if case .tmdb(_, _, _) = route, creditsLoadFailed {
                 Text("Không tải được danh sách phim")
-                    .font(.system(size: 27, weight: .medium))
+                    .font(JoePCType.outfit(27, weight: .medium))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             } else if cinemaCards.isEmpty {
                 Text("Chưa có dữ liệu phim")
-                    .font(.system(size: 27, weight: .medium))
+                    .font(JoePCType.outfit(27, weight: .medium))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             } else {
                 Text("Phim có \(cinemaDisplayName)")
-                    .font(.system(size: 27, weight: .medium))
+                    .font(JoePCType.outfit(27, weight: .medium))
                     .foregroundStyle(theme.text)
                     .lineLimit(1)
                 Spacer()
                 Text(String(format: "%02d / %02d",
                             (cinemaFocusedItem?.index ?? 0) + 1,
                             cinemaCards.count))
-                    .font(.system(size: 15))
+                    .font(JoePCType.outfit(15))
                     .foregroundStyle(theme.meta)
             }
         }
@@ -894,7 +899,7 @@ struct JoeActorPage: View {
     private var cinemaBottomBar: some View {
         ZStack(alignment: .topLeading) {
             Text("Mới nhất trước · ↑↓ Duyệt thêm · Giữ tiêu điểm để xem trailer")
-                .font(.system(size: 13))
+                .font(JoePCType.outfit(13))
                 .foregroundStyle(theme.meta)
                 .lineLimit(1)
                 .offset(x: 94, y: 941)
@@ -926,14 +931,14 @@ struct JoeActorPage: View {
                             .foregroundStyle(theme.text)
                     }
                 }
-                .font(.system(size: 20))
+                .font(JoePCType.outfit(20))
                 .lineLimit(1)
             } else if !item.year.isEmpty {
                 // Spec §8: a credit with no character on
                 // record leaves the line with the year
                 // alone — no label, no separator.
                 Text(item.year)
-                    .font(.system(size: 20))
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.text)
                     .lineLimit(1)
             }
@@ -965,13 +970,13 @@ struct JoeActorPage: View {
         ZStack(alignment: .topLeading) {
             HStack(spacing: 16) {
                 Text("TRAILER THEO TIÊU ĐIỂM")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(JoePCType.outfit(15, weight: .semibold))
                     .tracking(5)
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                 Spacer()
                 Text("Tắt tiếng")
-                    .font(.system(size: 15))
+                    .font(JoePCType.outfit(15))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
@@ -983,7 +988,7 @@ struct JoeActorPage: View {
                 .offset(x: 930, y: 912)
             if let item = cinemaFocusedItem, !item.synopsis.isEmpty {
                 Text(item.synopsis)
-                    .font(.system(size: 18))
+                    .font(JoePCType.outfit(18))
                     .foregroundStyle(theme.text.opacity(0.92))
                     .lineLimit(1)
                     .frame(width: 896, alignment: .leading)
@@ -1008,7 +1013,7 @@ struct JoeActorPage: View {
                                  anchor: 0.35, portraitMode: .slice)
                 } else {
                     Text(item.title)
-                        .font(.system(size: 20))
+                        .font(JoePCType.outfit(20))
                         .foregroundStyle(theme.meta)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
@@ -1042,12 +1047,12 @@ struct JoeActorPage: View {
             if let item = cinemaFocusedItem {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(item.title)
-                        .font(.system(size: 26, weight: .medium))
+                        .font(JoePCType.outfit(26, weight: .medium))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     if !item.year.isEmpty {
                         Text(item.year)
-                            .font(.system(size: 20))
+                            .font(JoePCType.outfit(20))
                             .foregroundStyle(theme.meta)
                             .lineLimit(1)
                     }
@@ -1057,7 +1062,7 @@ struct JoeActorPage: View {
                                 .foregroundStyle(theme.text)
                             + Text(" · điểm TMDB")
                                 .foregroundStyle(theme.meta))
-                            .font(.system(size: 20))
+                            .font(JoePCType.outfit(20))
                             .lineLimit(1)
                     }
                 }
@@ -1066,7 +1071,7 @@ struct JoeActorPage: View {
             Spacer()
             Text(cinemaPreview.visible
                     ? "Đang phát · Tắt tiếng" : cinemaTrailerNote)
-                .font(.system(size: 15))
+                .font(JoePCType.outfit(15))
                 .foregroundStyle(theme.meta)
                 .lineLimit(1)
         }
@@ -1616,11 +1621,12 @@ struct JoeActorPage: View {
 /// carries the same frame (A7): the poster when the
 /// record has one, else its backdrop cover-cropped
 /// into the same 205×263. The focus treatment is the
-/// house PC construction (A1): the system platter is
-/// stripped by the caller's .joeCardButton() and the
-/// ring drawn here is the theme's own inset ivory ring
-/// — the same ring PosterCard's cinema body paints —
-/// so focus reads as the design's pale outline without
+/// design's tile treatment (A1 as rebuilt by the
+/// Fault 11 fix round): the system platter is stripped
+/// by the caller's .joeCardButton() and the art wears
+/// the ivory OUTSET outline + 1.045 scale — the same
+/// treatment PosterCard's cinema body paints — so
+/// focus reads as the design's pale outline without
 /// a second geometry fighting the OS. The quality chip
 /// of the drawing is NOT painted: no per-title measured
 /// quality exists at this surface (A4 — a chip only
@@ -1690,26 +1696,36 @@ private struct CinemaPosterCard: View {
             }
             .frame(width: 205, height: 263)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                if isFocused {
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(theme.focus,
-                                      lineWidth: theme.ringWidth)
-                }
-            }
+            // Fault 11 fix round: the focus is the design's
+            // tile treatment, exactly as PosterCard's cinema
+            // body now paints it — the ivory OUTSET outline
+            // (3 pt, offset 5) plus the 1.045 focus scale on
+            // the art; the focus-conditional inset ring that
+            // stood here was the legacy construction (and its
+            // structure changed with focus). The card root
+            // below carries the rest-state opacity (.83).
+            .overlay(JoeOutsetRing(
+                shape: RoundedRectangle(cornerRadius: 7),
+                color: JoeCinemaFocus.ivory, lineWidth: 3, offset: 5))
+            .scaleEffect(isFocused ? 1.045 : 1)
+            .animation(JoeCinemaFocus.tileCurve, value: isFocused)
             Text(title)
-                .font(.system(size: 18))
+                .font(JoePCType.outfit(18))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .padding(.top, 13)
             Text(year)
-                .font(.system(size: 14))
+                .font(JoePCType.outfit(14))
                 .foregroundStyle(theme.meta)
                 .lineLimit(1)
                 .padding(.top, 9)
         }
         .frame(width: 205, height: 324, alignment: .top)
+        // Fault 11 fix round: the completion
+        // specification's rest state for poster tiles
+        // (opacity .83 at rest, 1 focused).
+        .joeCinemaCardFocus()
     }
 }
 

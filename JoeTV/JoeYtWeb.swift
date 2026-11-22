@@ -703,6 +703,15 @@ final class JoeYtSession: ObservableObject {
             }
         guard records.contains(where: { $0.name == "SAPISID" }) else { return }
         if let data = try? JSONEncoder().encode(records) {
+            // FAULT 10 (2026-11-22): same missing-directory
+            // trap as the TVB cache — urls(for:) never creates
+            // Application Support, so ensure it before writing
+            // or the session mirror silently never persists on
+            // a fresh install and restoreFromMirror has nothing
+            // to restore.
+            try? FileManager.default.createDirectory(
+                at: Self.mirrorURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
             try? data.write(to: Self.mirrorURL, options: .atomic)
             DiagLog.write("YT", "session mirror saved cookies=\(records.count)")
         }

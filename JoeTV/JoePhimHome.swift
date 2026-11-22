@@ -139,7 +139,26 @@ struct MovieRoute: Hashable, Sendable {
 /// mutation (1.9.2), so the destructive action's flush is
 /// already done by construction; it dismisses the alert and
 /// exits on the next main-actor turn.
+/// The Phim screen (RECALC-SPEC §3.3 / R7): a thin screen
+/// struct with its identity fixed to Phim — the shared
+/// core's composition is decided by this fixed identity,
+/// never by reading the live navigation section.
 struct JoePhimHome: View {
+    var body: some View {
+        JoePhimHomeCore(screen: .phim)
+    }
+}
+
+struct JoePhimHomeCore: View {
+    /// R7 (RECALC-SPEC §3.1–3.3): this screen's FIXED
+    /// identity, set at init — composition branches read
+    /// `screen`, never the live `nav.section`.
+    let screen: JoeCinemaScreen
+
+    init(screen: JoeCinemaScreen) {
+        self.screen = screen
+    }
+
     @EnvironmentObject private var watch: WatchStore
     @EnvironmentObject private var nav: JoeNavigator
     @EnvironmentObject private var phim: PhimStore
@@ -406,10 +425,25 @@ struct JoePhimHome: View {
                     && !heroPlayFocused && !heroBrowseFocused
                     && !heroInfoFocused
                     && !headerFocused {
-                    topScrollSignal += 1
                     if heroMovie != nil {
+                        topScrollSignal += 1
                         heroPlayFocused = true
+                    } else if theme.id == .privateCinema {
+                        // GATE-213 R6 Lens 2 F3: under
+                        // Private Cinema with no hero on
+                        // screen (the loading / error /
+                        // empty states), $headerFocused is
+                        // bound only by slimHeader's browse
+                        // button, which never renders under
+                        // PC — writing it made this press
+                        // visibly dead, and only the SECOND
+                        // press (the flag now reading true)
+                        // reached the exit confirmation.
+                        // Fall through to that confirmation
+                        // on the first press.
+                        exitConfirm = true
                     } else {
+                        topScrollSignal += 1
                         headerFocused = true
                     }
                 } else {
@@ -456,7 +490,10 @@ struct JoePhimHome: View {
             guard wasOpen, !isOpen else { return }
             let target = browseReturnTarget
             browseReturnTarget = nil
-            guard let target, nav.section == .phim,
+            // FIX-213 (Fault 13): the browse surface is
+            // hosted by this view under BOTH the Trang
+            // chủ and Phim sections since the split.
+            guard let target, nav.section == .phim || nav.section == .home,
                   !nav.searchOpen else { return }
             switch target {
             case .heroBrowse:
@@ -685,15 +722,27 @@ struct JoePhimHome: View {
                        pinnedViews: [.sectionHeaders]) {
                 if heroMovie != nil {
                     cinemaHeroBlock
-                } else {
+                } else if theme.id != .privateCinema {
                     slimHeader
                 }
+                // GATE-213 R3 Lens 3 Finding 4: under
+                // Private Cinema the no-hero state renders
+                // NO substitute header — slimHeader is the
+                // legacy Design-F chrome (system 44 heavy +
+                // browse button) and the drawing set has
+                // no such element (§3.1/§3.3: hero + rails
+                // only). The rails below render as usual;
+                // the hero takes its place when the
+                // featured title lands.
                 Section {
                 // v2.1.1 (WS-H): below the hero, the home is
                 // a discrete ordered array of rail builders
                 // (cinemaRailStack) in the MANY-RAIL design
                 // order. See the note on cinemaRailStack.
-                ForEach(cinemaRailStack, id: \.self) { item in
+                // FIX-213 (Fault 13): the array is the
+                // ACTIVE section's — the Phim section
+                // renders its own 7-rail stack.
+                ForEach(cinemaActiveRailStack, id: \.self) { item in
                     cinemaRailStackItem(item)
                 }
                 } header: {
@@ -701,7 +750,7 @@ struct JoePhimHome: View {
                 }
                 if catalogueEmpty && phim.loading && !phim.loadTimedOut {
                     ProgressView("Đang tải thư viện phim…")
-                        .font(.system(size: 29))
+                        .font(JoePCType.outfit(29))
                         .foregroundStyle(theme.text)
                         .tint(theme.text)
                         .padding(.top, 30)
@@ -711,18 +760,34 @@ struct JoePhimHome: View {
                 }
                 if showPhimEmpty {
                     Text("Thư viện chưa có dữ liệu.")
-                        .font(.system(size: 29))
+                        .font(JoePCType.outfit(29))
                         .foregroundStyle(theme.meta)
                         .padding(.top, 30)
                 }
                 if phim.hasData && !failedProviders.isEmpty {
                     Text("Chưa tải được: " + failedProviders.joined(separator: ", "))
-                        .font(.system(size: 25))
+                        .font(JoePCType.outfit(25))
                         .foregroundStyle(.orange)
                 }
             }
             .id("joePhimHomeTop")
+            // FIX-213 (Fault 16): the stack rides up by
+            // the bar's height to cancel the scroll
+            // view's bar-clearance inset (joePCBarInset
+            // on the ScrollView below) — rest geometry is
+            // unchanged (the hero still paints behind
+            // the transparent bar), but the pinned
+            // context strip now pins BELOW the bar
+            // instead of inside its band.
+            .padding(.top, -joePCBarHeight)
+            // FIX-213 (Fault 7): the design's library block
+            // ends 64 above the frame's bottom edge (spec:
+            // library y485 + h531 = 1016 of 1080); the
+            // stack previously ended flush, so the last
+            // rail sat cut at the frame's bottom.
+            .padding(.bottom, 64)
         }
+        .joePCBarInset()
         // v2.1.0 (Private Cinema): the Menu-to-top jump's
         // scroll hook, inside the reader — ultraHome's hook,
         // unchanged.
@@ -766,6 +831,9 @@ struct JoePhimHome: View {
         case following
         case addon
         case catalogue
+        /// FIX-213 (Fault 13): the Phim screen's seventh
+        /// rail (single movies) — Phim stack only.
+        case phimLe
     }
 
     /// v2.1.1 (WS-H): the MANY-RAIL order (owner-ordered
@@ -788,6 +856,48 @@ struct JoePhimHome: View {
          .addon, .catalogue]
     }
 
+    /// FIX-213 (Fault 13): the Phim screen's own stack —
+    /// the design's seven rails (PhimManyRails): Xem
+    /// tiếp → Trending → the four named sources
+    /// (KKPhim / VSMOV / Film4K / Tủ Phim · Mới cập
+    /// nhật) → Phim lẻ.
+    private var cinemaPhimRailStack: [CinemaRailStackItem] {
+        [.continueWatching, .trending,
+         .providerNewest("kkNew"), .providerNewest("vsNew"),
+         .providerNewest("f4kNew"), .providerNewest("tpNew"),
+         .phimLe]
+    }
+
+    /// The stack the surface renders: the Phim screen's
+    /// own under the Phim section, the Home stack under
+    /// Trang chủ (and anywhere else this surface is
+    /// hosted).
+    private var cinemaActiveRailStack: [CinemaRailStackItem] {
+        screen == .phim ? cinemaPhimRailStack : cinemaRailStack
+    }
+
+    /// FIX-213 (Fault 13): the Phim screen's seventh
+    /// rail's data — single movies from the first
+    /// non-empty movies spec the catalogue load built
+    /// (the provider movie shelves / the VN single
+    /// shelf, in railSpecs order).
+    private var cinemaPhimLeSpec: JoeRailSpec? {
+        railSpecs.first {
+            ["kkMovies", "f4kMovies", "tpMovies", "vnSingle"].contains($0.scope)
+                && !$0.movies.isEmpty
+        }
+    }
+
+    /// The "Phim lẻ" rail itself, on the PC movie-rail
+    /// construction (cinemaMovieRail) under its own
+    /// focus scope.
+    @ViewBuilder
+    private var cinemaPhimLeRail: some View {
+        if let spec = cinemaPhimLeSpec {
+            cinemaMovieRail(title: "Phim lẻ", movies: spec.movies, scope: "phimLe")
+        }
+    }
+
     /// Render one stack slot. Every builder is a named
     /// rail view — this switch adds no rendering of its
     /// own.
@@ -806,6 +916,15 @@ struct JoePhimHome: View {
             cinemaTVBStackRail(hot: false)
         case .torrentProviders:
             cinemaTorrentStackRails
+        // FIX-213 (Fault 7) + GATE-213 R5 Lens 2 F1:
+        // the appended slots below are app-extra rails
+        // (not in the design's eleven) on the SHARED Rail
+        // construction. Since the R4 gate fix the shared
+        // Rail carries the design's 94 frame itself under
+        // Private Cinema (heading +14 inside, track
+        // 94/94 over a −80 bleed) — no wrapper inset is
+        // applied here any more (the old +14 wrappers
+        // double-inset the slots to 108).
         case .tvbContinueWatching:
             tvbCwRail
         case .favourites:
@@ -816,6 +935,8 @@ struct JoePhimHome: View {
             addonSection
         case .catalogue:
             cinemaCatalogueRails
+        case .phimLe:
+            cinemaPhimLeRail
         }
     }
 
@@ -905,19 +1026,51 @@ struct JoePhimHome: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 27, weight: .medium))
+                .font(JoePCType.display(27, weight: .medium))
+                .tracking(-0.3)
                 .foregroundStyle(theme.text)
+                // FIX-213 (Fault 7): the heading keeps the
+                // design's 94 pt inset (the shell's 80 +
+                // 14 here); the card track below now OWNS
+                // the design's frame instead of borrowing
+                // the ambient inset.
+                .padding(.leading, 14)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 25) { content() }
-                    .padding(.horizontal, 4)
-                    // FIX-4 / C5: spec row padding 8 top / 9 bottom.
-                    .padding(.top, 8)
-                    .padding(.bottom, 9)
+                    // FIX-213 (Fault 7): the design's rail
+                    // track spans the full 1920 width (spec
+                    // track padding "16px 94px 11px"): the
+                    // first card rests at exactly x94, the
+                    // last card's rest position ends 94
+                    // short of the right edge, and scrolled
+                    // cards paint to both bezels, as drawn.
+                    // The ScrollView bleeds across the
+                    // shell's 80 pt ambient inset (the
+                    // negative padding below cancels it
+                    // exactly), so these insets are the
+                    // design's own 94 / 94.
+                    .padding(.leading, 94)
+                    .padding(.trailing, 94)
+                    // FIX-4 / C5 + FIX-213 (Fault 14): the
+                    // design's vertical track air is the
+                    // SUM of its track padding (16 top /
+                    // 11 bottom) and its row padding
+                    // (8 top / 9 bottom) — with both, the
+                    // design's own numbers reproduce its
+                    // measured rows exactly (poster row
+                    // 395, landscape row 312). The build
+                    // carried only the row padding, which
+                    // compressed every rail by ~26 and
+                    // made the theme read cramped (owner
+                    // 2026-11-22: "Cách làm làm chật chội
+                    // hẳn cái theme").
+                    .padding(.top, 24)
+                    .padding(.bottom, 20)
             }
             .scrollClipDisabled()
+            .padding(.horizontal, -80)
         }
         .focusSection()
-        .padding(.leading, 14)
     }
 
     /// Design rail 1 (WS-H): Continue Watching FIRST, as
@@ -1061,19 +1214,22 @@ struct JoePhimHome: View {
             // title's baseline beside it.
             VStack(alignment: .leading, spacing: 4) {
                 Text("TRANG CHỦ / ĐANG KHÁM PHÁ")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(JoePCType.outfit(15, weight: .medium))
                     .tracking(3.6)
                     .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     // FIX-4 / C4: the spec's strip title is 34/500.
+                    // GATE-213 R1 Lens 3: the family is
+                    // Bricolage (RECALC-SPEC §2.3), meta
+                    // Outfit 20/400.
                     Text(info.title)
-                        .font(.system(size: 34, weight: .medium))
+                        .font(JoePCType.display(34, weight: .medium))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     if !info.meta.isEmpty {
                         Text(info.meta)
-                            .font(.system(size: 22))
+                            .font(JoePCType.outfit(20))
                             .foregroundStyle(theme.meta)
                             .lineLimit(1)
                     }
@@ -1087,12 +1243,12 @@ struct JoePhimHome: View {
             VStack(alignment: .trailing, spacing: 4) {
                 if !info.railName.isEmpty {
                     Text(info.railName)
-                        .font(.system(size: 22))
+                        .font(JoePCType.outfit(22))
                         .foregroundStyle(theme.heroMeta)
                         .lineLimit(1)
                 }
                 Text(info.railLine)
-                    .font(.system(size: 22))
+                    .font(JoePCType.outfit(22))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
@@ -1110,7 +1266,7 @@ struct JoePhimHome: View {
     /// ("scope|provider|slug"), a CW/favourite entry
     /// ("cw|key" / "fav|key"), or the hero at rest.
     private var cinemaContextInfo: (title: String, meta: String, railName: String, railLine: String) {
-        let total = cinemaVisibleRailTitles.count
+        let total = cinemaActiveRailTitles.count
         if let focusedMovie {
             let parts = focusedMovie.split(separator: "|", maxSplits: 1)
             let scope = parts.isEmpty ? "" : String(parts[0])
@@ -1226,7 +1382,7 @@ struct JoePhimHome: View {
     /// reopen, the TVB-CW YouTube route, the file-
     /// trending tap resolution). Before any focus, the
     /// featured title's own mint.
-    private enum CinemaHeroTarget {
+    enum CinemaHeroTarget {
         case movie(Movie, scope: String)
         case fileTrending(Movie)
         case tvb(TVBTitle)
@@ -1238,7 +1394,7 @@ struct JoePhimHome: View {
 
     /// A resolved hero: the controller's item (text +
     /// art ladder) and the actions' target.
-    private struct CinemaHeroResolved {
+    struct CinemaHeroResolved {
         var item: JoeCinemaHeroItem
         var target: CinemaHeroTarget
     }
@@ -1564,14 +1720,41 @@ struct JoePhimHome: View {
         return titles
     }
 
+    /// FIX-213 (Fault 13): the Phim screen's visible
+    /// rails, mirroring cinemaPhimRailStack's builders'
+    /// own gates — the strip's denominator and the
+    /// tagline's count while the Phim section is active.
+    private var cinemaPhimVisibleRailTitles: [String] {
+        var titles: [String] = []
+        if !movieProgress.isEmpty { titles.append("Xem tiếp") }
+        if let railSpec = railSpecs.first(where: { $0.scope == "trending" }),
+           !railSpec.movies.isEmpty { titles.append("Trending") }
+        for scope in ["kkNew", "vsNew", "f4kNew", "tpNew"] {
+            if let railSpec = railSpecs.first(where: { $0.scope == scope }),
+               !railSpec.movies.isEmpty {
+                titles.append(cinemaProviderRailTitle(scope))
+            }
+        }
+        if cinemaPhimLeSpec != nil { titles.append("Phim lẻ") }
+        return titles
+    }
+
+    /// The visible-rail list of the section actually on
+    /// screen — the strip and the tagline read this, so
+    /// their counts always name the rails on the page.
+    private var cinemaActiveRailTitles: [String] {
+        screen == .phim ? cinemaPhimVisibleRailTitles : cinemaVisibleRailTitles
+    }
+
     /// A scope's (position, name) inside the visible PC
     /// rail list, for the strip's "Dãy NN/TT" line.
     private func cinemaRailPosition(ofScope scope: String)
         -> (pos: String, name: String) {
-        let titles = cinemaVisibleRailTitles
+        let titles = cinemaActiveRailTitles
         let name: String
         switch scope {
         case "trending": name = "Trending"
+        case "phimLe": name = "Phim lẻ"
         case "kkNew", "vsNew", "f4kNew", "tpNew":
             name = cinemaProviderRailTitle(scope)
         case "tvbHot": name = "TVB · Đang được quan tâm"
@@ -1602,7 +1785,7 @@ struct JoePhimHome: View {
     /// "Dãy 01 · Torrent".
     private func cinemaTorrentRailPosition(forFocusedMovie focused: String)
         -> (pos: String, name: String) {
-        let titles = cinemaVisibleRailTitles
+        let titles = cinemaActiveRailTitles
         if focused.hasPrefix("torCat:") {
             let catId = focused.dropFirst("torCat:".count)
                 .split(separator: "|").first.map(String.init) ?? ""
@@ -1628,7 +1811,7 @@ struct JoePhimHome: View {
             let metaId = String(focused.dropFirst(prefix.count))
             guard let meta = rail.metas.first(where: { $0.id == metaId })
             else { continue }
-            let titles = cinemaVisibleRailTitles
+            let titles = cinemaActiveRailTitles
             let idx = titles.firstIndex(of: rail.catalog.name)
             return (meta, String(format: "%02d", (idx ?? 0) + 1),
                     rail.catalog.name)
@@ -1714,14 +1897,16 @@ struct JoePhimHome: View {
                     .init(color: .clear, location: 0.55),
                     .init(color: theme.bg, location: 1)
                 ], startPoint: .top, endPoint: .bottom)
-                // v2.1.1: the top scrim — the stage now
-                // paints under the shell's transparent PC
-                // bar, so the art darkens toward the top
-                // edge and the bar's pills stay legible.
-                LinearGradient(stops: [
-                    .init(color: theme.bg.opacity(0.55), location: 0),
-                    .init(color: .clear, location: 0.35)
-                ], startPoint: .top, endPoint: .bottom)
+                // FIX-213 (Fault 8): NO top scrim — the
+                // design draws exactly two scrims on this
+                // stage (left + bottom); the third one that
+                // stood here (bg 0.55 → clear at 0.35) was
+                // added by the build to keep the OLD bar's
+                // pills legible, and it darkened the art
+                // under the bar zone ("Làm che luôn
+                // backdrop"). The design's own bar is
+                // transparent text over the art and needs
+                // no such darkening.
                 // v2.1.1 (WS-I): the hero text follows the
                 // FOCUSED title (cinemaHeroResolved — the
                 // featured title before any focus), rendered
@@ -1734,6 +1919,16 @@ struct JoePhimHome: View {
                 }
             }
             .frame(height: 485)
+            // FIX-213 (Fault 7): the design's hero stage
+            // is FULL-BLEED (backdrop x0, w1920) — the
+            // block bleeds across the shell's 80 pt
+            // ambient inset on both sides (negative
+            // padding cancels it exactly), so the
+            // backdrop + scrims span the whole frame
+            // while the hero text (leading 94 inside
+            // cinemaHeroText) and the tagline (trailing
+            // 94 below) keep the design's insets.
+            .padding(.horizontal, -80)
             // v2.1.1 (FIX-6): the drawing's right-side
             // tagline block — it was MISSING from the
             // built hero (checked first-hand: no tagline
@@ -1742,7 +1937,7 @@ struct JoePhimHome: View {
             // Torrent heroes built in the same round.
             .overlay(alignment: .bottomTrailing) {
                 cinemaHeroTagline
-                    .padding(.trailing, 14)
+                    .padding(.trailing, 94)
                     .padding(.bottom, 72)
             }
             .defaultFocus($heroPlayFocused, true)
@@ -1816,21 +2011,70 @@ struct JoePhimHome: View {
     /// chain title that is the hero's existing detail-open
     /// MovieRoute, exactly as the pre-WS-I hero wired its
     /// featured title).
+    /// GATE-213 R2 Lens 3 F3 (RECALC-SPEC §3.2): the
+    /// HomeTVBFocus eyebrow is the title's OWN TVB line —
+    /// "TVB · <genre>" from the catalogue title's first
+    /// category. A .tvb target carries its TVBTitle
+    /// directly; a .tvbEntry (Continue Watching) links
+    /// through its YouTube series (byPid[entry.slug]) to
+    /// the series' tmdbId and the same pcTVBById map the
+    /// resolver uses. Only a target with NO category
+    /// anywhere (unmatched YouTube-only entries) falls
+    /// back to the drawing's static §3.5 line.
+    private func cinemaTVBEyebrowLine(_ target: CinemaHeroTarget) -> String {
+        let category: String?
+        switch target {
+        case .tvb(let title):
+            category = title.categories.first
+        case .tvbEntry(let entry):
+            if let series = ytStore.snapshot?.byPid[entry.slug],
+               series.tmdbId != 0 {
+                category = pcTVBById[series.tmdbId]?.categories.first
+            } else {
+                category = nil
+            }
+        default:
+            category = nil
+        }
+        if let category, !category.isEmpty {
+            return "TVB · \(category.uppercased())"
+        }
+        return "MỘT THỜI HỒNG KÔNG / TVB"
+    }
+
     private func cinemaHeroText(_ resolved: CinemaHeroResolved) -> some View {
+        // R7 (RECALC-SPEC §3.2): the HomeTVBFocus form is
+        // its own standalone view (JoeHomeTVBFocus.swift);
+        // this function renders ONLY the movie form and
+        // delegates a TVB target to it.
+        if cinemaIsTVBTarget(resolved) {
+            return AnyView(JoeHomeTVBFocusHero(
+                resolved: resolved,
+                eyebrowLine: cinemaTVBEyebrowLine(resolved.target),
+                heroPlayFocused: $heroPlayFocused,
+                heroInfoFocused: $heroInfoFocused,
+                openTarget: { cinemaOpenHeroTarget($0) }))
+        }
         let item = resolved.item
-        return VStack(alignment: .leading, spacing: 0) {
+        return AnyView(VStack(alignment: .leading, spacing: 0) {
             // FIX-10a / ADJUDICATION F1: the many-rail
             // drawing's hero eyebrow is the STATIC line
             // below (the same pattern as the TVB /
             // Torrent heroes' static eyebrows) — NOT the
             // resolved title's genres.
-            Text("TỐI NAY, XEM GÌ? / TRANG CHỦ")
-                .font(.system(size: 15, weight: .medium))
+            // FIX-213 (Fault 13): the static line is now
+            // per-screen (cinemaHeroEyebrow): the Phim
+            // screen's own "PHIM · ĐANG CHỌN", the Home
+            // line otherwise. (A TVB hero target never
+            // reaches this form — it is delegated to
+            // JoeHomeTVBFocusHero above.)
+            Text(cinemaHeroEyebrow(resolved))
+                .font(JoePCType.outfit(15, weight: .medium))
                 .tracking(3.6)
                 .foregroundStyle(theme.heroMeta)
                 .lineLimit(1)
             Text(item.title)
-                .font(.system(size: 72, weight: .medium, design: .serif))
+                .font(JoePCType.display(72))
                 .tracking(-3)
                 .foregroundStyle(theme.text)
                 .lineLimit(2)
@@ -1839,7 +2083,7 @@ struct JoePhimHome: View {
                !movie.originName.isEmpty,
                movie.originName != movie.name {
                 Text(movie.originName.uppercased())
-                    .font(.system(size: 20, weight: .medium))
+                    .font(JoePCType.outfit(20, weight: .medium))
                     .tracking(6)
                     .foregroundStyle(theme.heroMeta)
                     .lineLimit(1)
@@ -1848,7 +2092,7 @@ struct JoePhimHome: View {
             cinemaHeroMetaRow(resolved)
             if !item.synopsis.isEmpty {
                 Text(item.synopsis)
-                    .font(.system(size: 18))
+                    .font(JoePCType.outfit(18))
                     .foregroundStyle(theme.text.opacity(0.92))
                     // FIX-12 / R7 C-F1: spec synopsis is
                     // 18/400 at line 1.5 → 9 pt extra.
@@ -1863,29 +2107,69 @@ struct JoePhimHome: View {
             // title (cinemaOpenHeroTarget — the focused
             // card's own tap mint); before any focus, the
             // featured title, exactly as the pre-WS-I hero.
-            HStack(spacing: 16) {
-                Button {
-                    cinemaOpenHeroTarget(resolved.target)
-                } label: {
-                    JoePrimaryLabel(title: "Chọn nguồn phát", systemImage: "play.fill")
-                }
-                .joeCardButton()
-                .focused($heroPlayFocused)
-                Button {
-                    cinemaOpenHeroTarget(resolved.target)
-                } label: {
-                    JoeSecondaryLabel(title: "Thông tin phim",
-                                      systemImage: "info.circle")
-                }
-                .joeCardButton()
-                .focused($heroInfoFocused)
-            }
+            // FIX-213 (Fault 13): the action SET is
+            // cinemaHeroActions' movie pair (the TVB
+            // target's episode-first set lives in
+            // JoeHomeTVBFocusHero).
+            cinemaHeroActions(resolved)
             // FIX-4 / C6: spec actions margin-top 16.
             .padding(.top, 16)
         }
-        .padding(.leading, 13)
+        // FIX-213 (Fault 7): the hero block now bleeds
+        // to the frame's edges (see cinemaHeroBlock), so
+        // this inset is the design's own hero x94
+        // (many-rail spec: hero x94, w850).
+        .padding(.leading, 94)
         .padding(.vertical, 36)
-        .frame(maxWidth: 900, alignment: .leading)
+        .frame(maxWidth: 900, alignment: .leading))
+    }
+
+    /// FIX-213 (Fault 13): is the resolved hero target
+    /// a TVB one (catalogue title or continue-watching
+    /// entry)? The HomeTVBFocus form keys on this.
+    private func cinemaIsTVBTarget(_ resolved: CinemaHeroResolved) -> Bool {
+        switch resolved.target {
+        case .tvb, .tvbEntry: return true
+        default: return false
+        }
+    }
+
+    /// The hero eyebrow by screen (FIX-213, Fault 13;
+    /// R7): the Phim screen's own line under the fixed
+    /// .phim identity (its drawing: "PHIM · ĐANG
+    /// CHỌN"), the Home line otherwise. The TVB line
+    /// for a TVB hero target moved with the HomeTVBFocus
+    /// form to JoeHomeTVBFocusHero.
+    private func cinemaHeroEyebrow(_ resolved: CinemaHeroResolved) -> String {
+        return screen == .phim
+            ? "TỐI NAY, XEM GÌ? / PHIM · ĐANG CHỌN"
+            : "TỐI NAY, XEM GÌ? / TRANG CHỦ · ĐANG CHỌN"
+    }
+
+    /// The hero's action set (movie form): the built
+    /// pair verbatim ("Chọn nguồn phát" / "Thông tin
+    /// phim"). The TVB target's EPISODE-FIRST set moved
+    /// with the HomeTVBFocus form to
+    /// JoeHomeTVBFocusHero (JoeHomeTVBFocus.swift).
+    @ViewBuilder
+    private func cinemaHeroActions(_ resolved: CinemaHeroResolved) -> some View {
+        HStack(spacing: 16) {
+            Button {
+                cinemaOpenHeroTarget(resolved.target)
+            } label: {
+                JoePrimaryLabel(title: "Chọn nguồn phát", systemImage: "play.fill")
+            }
+            .joeCardButton()
+            .focused($heroPlayFocused)
+            Button {
+                cinemaOpenHeroTarget(resolved.target)
+            } label: {
+                JoeSecondaryLabel(title: "Thông tin phim",
+                                  systemImage: "info.circle")
+            }
+            .joeCardButton()
+            .focused($heroInfoFocused)
+        }
     }
 
     /// The hero's right-side tagline block (v2.1.1,
@@ -1898,16 +2182,15 @@ struct JoePhimHome: View {
     private var cinemaHeroTagline: some View {
         VStack(alignment: .trailing, spacing: 8) {
             Text("Một buổi tối. Một thế giới khác.")
-                .font(.system(size: 28, weight: .regular, design: .serif))
-                .italic()
+                .font(JoePCType.editorial(28, italic: true))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
             HStack(spacing: 10) {
-                Text("\(cinemaVisibleRailTitles.count) DÃY PHIM")
+                Text("\(cinemaActiveRailTitles.count) DÃY PHIM")
                 Text("↓")
                 Text("TIẾP TỤC KHÁM PHÁ")
             }
-            .font(.system(size: 14, weight: .medium))
+            .font(JoePCType.outfit(14, weight: .medium))
             .tracking(3)
             .foregroundStyle(theme.heroMeta)
             .lineLimit(1)
@@ -1946,14 +2229,14 @@ struct JoePhimHome: View {
                 if !resolved.item.meta.isEmpty {
                     Text(resolved.item.meta)
                         // FIX-4 / C6: design meta 20/400.
-                        .font(.system(size: 20, weight: .regular))
+                        .font(JoePCType.outfit(20))
                         .foregroundStyle(theme.heroMeta)
                         .lineLimit(1)
                 }
                 if !quality.isEmpty {
                     Text(quality)
                         // FIX-4 / C6: design badges 14/400.
-                        .font(.system(size: 14, weight: .regular))
+                        .font(JoePCType.outfit(14))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
@@ -2007,16 +2290,23 @@ struct JoePhimHome: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 16) {
                 Text("Trending")
-                    .font(.system(size: 27, weight: .medium))
+                    .font(JoePCType.display(27, weight: .medium))
+                    .tracking(-0.3)
                     .foregroundStyle(theme.text)
                 Text("Được yêu thích hôm nay")
-                    .font(.system(size: 22))
+                    .font(JoePCType.outfit(14))
                     .foregroundStyle(theme.meta)
                 Spacer()
                 Text(String(format: "%02d / %02d", 1, railSpec.movies.count))
-                    .font(.system(size: 22))
+                    .font(JoePCType.outfit(22))
                     .foregroundStyle(theme.meta)
             }
+            // FIX-213 (Fault 7): the heading row spans the
+            // design's inset pair — "Trending" at x94 and
+            // the counter's right edge at 1826 (94 short
+            // of the right edge), as drawn.
+            .padding(.leading, 14)
+            .padding(.trailing, 14)
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 25) {
                     ForEach(Array(railSpec.movies.enumerated()), id: \.offset) { pair in
@@ -2031,15 +2321,24 @@ struct JoePhimHome: View {
                         .focused($focusedMovie, equals: railSpec.scope + "|" + pair.element.id)
                     }
                 }
-                .padding(.horizontal, 4)
-                // FIX-4 / C5: spec row padding 8 top / 9 bottom.
-                .padding(.top, 8)
-                .padding(.bottom, 9)
+                // FIX-213 (Fault 7): the design's track
+                // insets, as in cinemaRailShell — first
+                // card at x94, last card resting 94 short
+                // of the right edge, scrolled cards
+                // painting to both bezels.
+                .padding(.leading, 94)
+                .padding(.trailing, 94)
+                // FIX-4 / C5 + FIX-213 (Fault 14): track
+                // padding 16/11 + row padding 8/9, as in
+                // cinemaRailShell — the design's measured
+                // poster row (395) is their sum.
+                .padding(.top, 24)
+                .padding(.bottom, 20)
             }
             .scrollClipDisabled()
+            .padding(.horizontal, -80)
         }
         .focusSection()
-        .padding(.leading, 14)
     }
 
     /// One Private Cinema trending card (v2.1.1): the
@@ -2076,7 +2375,7 @@ struct JoePhimHome: View {
                             typeBadge: cinemaTrendingTypeBadge(movie))
         .overlay(alignment: .topTrailing) {
             Text(String(format: "%02d", index + 1))
-                .font(.system(size: 46, weight: .bold, design: .serif))
+                .font(JoePCType.display(46, weight: .bold))
                 .foregroundStyle(.white.opacity(0.88))
                 .shadow(color: .black.opacity(0.55), radius: 6, x: 0, y: 2)
                 .padding(.top, 263 - 58)
@@ -3029,10 +3328,14 @@ struct JoePhimHome: View {
     private func bandHeader(name: String, note: String, scope: String) -> some View {
         HStack(alignment: .center, spacing: 22) {
             Text(name)
-                .font(.system(size: 34, weight: .heavy))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.display(27, weight: .medium)
+                      : .system(size: 34, weight: .heavy))
+                .tracking(theme.id == .privateCinema ? -0.3 : 0)
                 .foregroundStyle(theme.text)
             Text(note)
-                .font(.system(size: 24))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(24) : .system(size: 24))
                 .foregroundStyle(theme.meta)
                 .lineLimit(1)
             Spacer()
@@ -3041,7 +3344,9 @@ struct JoePhimHome: View {
                 nav.browseOpen = true
             } label: {
                 Text("Xem tất cả ›")
-                    .font(.system(size: 25, weight: .semibold))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(25, weight: .semibold)
+                          : .system(size: 25, weight: .semibold))
                     .foregroundStyle(theme.focusTitle)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
@@ -3068,6 +3373,13 @@ struct JoePhimHome: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(theme.surface2))
         .overlay(RoundedRectangle(cornerRadius: 14)
             .strokeBorder(theme.stroke, lineWidth: 1.5))
+        // GATE-213 R5 Lens 2 F1: under Private Cinema the
+        // band panel itself sits in the design's 94 frame
+        // (the cinema catalogue stack's old +14 wrapper
+        // is gone — the shared Rail carries its own frame
+        // now, and this panel takes the same inset on
+        // both edges so it aligns with the rails below).
+        .padding(.horizontal, theme.id == .privateCinema ? 14 : 0)
     }
 
     // MARK: - Load states (§8)
@@ -3131,12 +3443,15 @@ struct JoePhimHome: View {
                 .font(.system(size: 44))
                 .foregroundStyle(.orange)
             Text("Không tải được thư viện phim.")
-                .font(.system(size: 29, weight: .semibold))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(29, weight: .semibold)
+                      : .system(size: 29, weight: .semibold))
                 .foregroundStyle(theme.text)
             Text(phim.loadTimedOut
                  ? "Quá 20 giây chưa có dữ liệu. Kiểm tra mạng và profile Sing-box trên Apple TV."
                  : "Các nguồn phim đều lỗi hoặc trả về trống. Kiểm tra mạng rồi thử lại.")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema
+                      ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
             // G3: the cause line carries the store's REAL captured
             // errors (providerErrors — what each provider actually
@@ -3146,7 +3461,8 @@ struct JoePhimHome: View {
                         .sorted { $0.key < $1.key }
                         .map { "\(providerDisplayName($0.key)): \($0.value)" }
                         .joined(separator: " · "))
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(theme.meta)
             }
             Button { phim.retry() } label: {
@@ -3619,11 +3935,12 @@ func joeRailSpecs(phim: PhimStore, themeID: JoeThemeID) -> [JoeRailSpec] {
 // from theme tokens (JoeTheme.swift — another workstream's
 // file): portrait art 205×263, CW landscape art 320×180,
 // title/meta below the art, NO provider badge, and the
-// PC family's value-only ivory focus ring on the art
-// (the PosterCard.cinemaBody pattern — no scaleEffect,
-// no hand-drawn focus layer). The WS-E precedent:
-// JoeSearchDiscoveryCard, built locally at 205:263 for
-// the same reason.
+// design's tile focus on the art (Fault 11 fix round: the
+// ivory OUTSET outline + 1.045 scale in JoeCinemaArt, the
+// .83 rest opacity at each card root — the inside ring
+// these cards first shipped with was the legacy pattern).
+// The WS-E precedent: JoeSearchDiscoveryCard, built
+// locally at 205:263 for the same reason.
 
 /// The PC cards' shared art block: the image slot with
 /// the TMDB poster fallback leg (PosterCard's ladder,
@@ -3661,9 +3978,19 @@ private struct JoeCinemaArt: View {
         .frame(width: width, height: height)
         // FIX-4 / C1: spec image radius 6 (was 12).
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6)
-            .strokeBorder(isFocused ? theme.focus : .clear,
-                          lineWidth: isFocused ? theme.ringWidth : 0))
+        // Fault 11 fix round: the design's tile focus — an
+        // ivory OUTSET outline (3 px, offset 5 px, on the
+        // drawing's 7 px button radius) + the 1.045 scale,
+        // replacing the legacy inside ring (theme.focus at
+        // ringWidth) this block originally carried. The
+        // card roots' rest opacity (.83) is
+        // joeCinemaCardFocus at each card below.
+        .overlay(JoeOutsetRing(
+            shape: RoundedRectangle(cornerRadius: 7),
+            color: JoeCinemaFocus.ivory,
+            lineWidth: 3, offset: 5))
+        .scaleEffect(isFocused ? 1.045 : 1)
+        .animation(JoeCinemaFocus.tileCurve, value: isFocused)
     }
 }
 
@@ -3693,7 +4020,7 @@ struct JoeCinemaPosterCard: View {
                         // regular, r3 rect filled #0C1215E8,
                         // padding 5×7, set top 11 / left 10.
                         Text(typeBadge)
-                            .font(.system(size: 11))
+                            .font(JoePCType.outfit(11))
                             .foregroundStyle(theme.badgeText)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 5)
@@ -3709,7 +4036,7 @@ struct JoeCinemaPosterCard: View {
                         // set top 11 / left 10 (was 19 pt bold
                         // in a Capsule).
                         Text(movie.quality)
-                            .font(.system(size: 11))
+                            .font(JoePCType.outfit(11))
                             .foregroundStyle(theme.badgeText)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 5)
@@ -3721,19 +4048,20 @@ struct JoeCinemaPosterCard: View {
                     }
                 }
             Text(movie.name)
-                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .font(JoePCType.outfit(theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 10)
             if !movie.cardMeta.isEmpty {
                 Text(movie.cardMeta)
-                    .font(.system(size: theme.cardMetaSize))
+                    .font(JoePCType.outfit(theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                     .padding(.top, 3)
             }
         }
         .frame(width: 205, alignment: .leading)
+        .joeCinemaCardFocus()
     }
 }
 
@@ -3748,19 +4076,20 @@ struct JoeCinemaTVBCard: View {
         VStack(alignment: .leading, spacing: 0) {
             JoeCinemaArt(url: title.posterURL, width: 205, height: 263)
             Text(title.titleVi)
-                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .font(JoePCType.outfit(theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 10)
             if !title.cardMeta.isEmpty {
                 Text(title.cardMeta)
-                    .font(.system(size: theme.cardMetaSize))
+                    .font(JoePCType.outfit(theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                     .padding(.top, 3)
             }
         }
         .frame(width: 205, alignment: .leading)
+        .joeCinemaCardFocus()
     }
 }
 
@@ -3775,19 +4104,20 @@ struct JoeCinemaTorCard: View {
         VStack(alignment: .leading, spacing: 0) {
             JoeCinemaArt(url: meta.posterURL, width: 205, height: 263)
             Text(meta.name)
-                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .font(JoePCType.outfit(theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 10)
             if !meta.year.isEmpty {
                 Text(meta.year)
-                    .font(.system(size: theme.cardMetaSize))
+                    .font(JoePCType.outfit(theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                     .padding(.top, 3)
             }
         }
         .frame(width: 205, alignment: .leading)
+        .joeCinemaCardFocus()
     }
 }
 
@@ -3813,7 +4143,7 @@ struct JoeCinemaCwCard: View {
                 // no episode number, no suffix.
                 .overlay(alignment: .topLeading) {
                     Text(cwStateBadge)
-                        .font(.system(size: 11))
+                        .font(JoePCType.outfit(11))
                         .foregroundStyle(theme.badgeText)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 5)
@@ -3841,13 +4171,13 @@ struct JoeCinemaCwCard: View {
                     .frame(height: 5)
                 }
             Text(entry.title)
-                .font(.system(size: theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
+                .font(JoePCType.outfit(theme.cardTitleSize)) // FIX-4 / C1: spec title 18/400 regular
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 10)
             if !entry.epLabel.isEmpty {
                 Text(entry.epLabel)
-                    .font(.system(size: theme.cardMetaSize))
+                    .font(JoePCType.outfit(theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                     .padding(.top, 3)
@@ -3856,12 +4186,13 @@ struct JoeCinemaCwCard: View {
             // muted meta treatment (14 pt, theme.meta) —
             // was 21 pt in accentRed.
             Text("Còn \(WatchStore.fmtClock(entry.dur - entry.pos))")
-                .font(.system(size: theme.cardMetaSize))
+                .font(JoePCType.outfit(theme.cardMetaSize))
                 .foregroundStyle(theme.meta)
                 .lineLimit(1)
                 .padding(.top, 3)
         }
         .frame(width: 320, alignment: .leading)
+        .joeCinemaCardFocus()
     }
 
     /// FIX-4 / C7: the CW state badge's text — "ĐANG XEM",

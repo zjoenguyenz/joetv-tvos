@@ -308,6 +308,287 @@ struct JoeFocusRing<S: InsettableShape>: View {
     }
 }
 
+// MARK: - Private Cinema focus family (Fault 11/12 fix round, 2026-11-22)
+//
+// The owner convicted the Private Cinema build's controls as
+// legacy-theme carry-overs ("Các nút focus e đều mang từ theme
+// cũ qua" — 2026-11-22 10:59 CST; the Settings fields again at
+// 11:00, Fault 12). He was right in code: the PC surfaces were
+// dressed with the shared labels' legacy focus pattern (an
+// INSIDE strokeBorder in theme.focus at ringWidth 4, no scale,
+// no rest dimming). The design's own focus language — the
+// Private Cinema spec sheet's "Focus & states" tab and the
+// completion specification's per-screen focus lines — is
+// OUTSET outlines, per-family:
+//
+//   poster / grid tile ... scale 1.045; opacity 1 (rest .83 —
+//                          the completion specification's value,
+//                          stated for every poster surface; the
+//                          spec sheet's .77 is superseded by it);
+//                          ivory outline 3 px, offset 5 px;
+//                          240 ms cubic-bezier(.2,.7,.2,1)
+//   primary / secondary .. scale 1.025; ivory outline 2 px,
+//     action               offset 6 px; celadon primary fill;
+//                          Buttons type 22/500, icon gap 14
+//   source row ........... celadon outline 2 px, offset 4 px;
+//                          focused face #304039DF
+//   search input ......... celadon border + parent outline
+//                          2 px, offset 4 px; no duplicate
+//                          input outline
+//   settings rows ........ ivory outset outline (drawn on the
+//                          Settings renders: the focused rail
+//                          row and the selected theme card both
+//                          wear it)
+//
+// Everything below is value-only in the house sense: shapes
+// are always installed, focus changes colours / widths /
+// scale / opacity values, never the view structure — the
+// same discipline the legacy pattern claims, now with the
+// design's values. Non-PC themes never take these branches:
+// their rendering is byte-identical to before this round.
+
+/// Fault 17 fix round (2026-11-22): the Private Cinema
+/// design's TYPE families. The build's PC text wore the
+/// system font everywhere (the Ultra theme's typeface) —
+/// the design's spec sheet (Type tab) names three
+/// families: Outfit (body/UI), Bricolage Grotesque
+/// (display titles), Instrument Serif (editorial). tvOS
+/// ships none of them, so static instances are bundled
+/// (JoeTV/Fonts, Google Fonts, OFL) and registered via
+/// UIAppFonts in project.yml. These constructors are the
+/// ONLY way PC text should take a font from now on; the
+/// weight maps onto the bundled static instance of that
+/// weight (Font.custom names are the fonts' PostScript
+/// names, verified from the files' name tables).
+/// Coverage note (measured from the font files
+/// themselves): Bricolage Grotesque carries the full
+/// Vietnamese set; Outfit and Instrument Serif do NOT
+/// contain the horn letters (Ơ/Ư), the Latin Extended
+/// Additional block or the combining hook/dot marks —
+/// CoreText falls back per-glyph for those characters,
+/// exactly as the designer's own web rendering of this
+/// design does (same fonts, same subsets).
+enum JoePCType {
+    static func outfit(_ size: CGFloat,
+                       weight: Font.Weight = .regular) -> Font {
+        if weight == .light {
+            return .custom("Outfit-Light", size: size)
+        }
+        if weight == .medium {
+            return .custom("Outfit-Medium", size: size)
+        }
+        if weight == .semibold {
+            return .custom("Outfit-SemiBold", size: size)
+        }
+        if weight == .bold || weight == .heavy
+            || weight == .black {
+            return .custom("Outfit-Bold", size: size)
+        }
+        return .custom("Outfit-Regular", size: size)
+    }
+
+    /// Bricolage Grotesque (display). The spec's title
+    /// weight is 500; 400 and 600 statics are bundled for
+    /// the family's other drawn uses.
+    static func display(_ size: CGFloat,
+                        weight: Font.Weight = .medium) -> Font {
+        if weight == .regular {
+            return .custom("BricolageGrotesque-Regular",
+                           size: size)
+        }
+        if weight == .semibold || weight == .bold
+            || weight == .heavy || weight == .black {
+            return .custom("BricolageGrotesque-SemiBold",
+                           size: size)
+        }
+        return .custom("BricolageGrotesque-Medium", size: size)
+    }
+
+    /// Instrument Serif (editorial): the curation/tagline
+    /// lines, the source-card serials and the wordmark.
+    /// The family ships only 400, in roman and italic.
+    static func editorial(_ size: CGFloat,
+                          italic: Bool = false) -> Font {
+        .custom(italic ? "InstrumentSerif-Italic"
+                       : "InstrumentSerif-Regular",
+                size: size)
+    }
+
+    /// Times-class serif (RECALC-213 correction, design
+    /// team overlay measurement 2026-11-22): the Search
+    /// headline and the Settings "Cài đặt" headline in the
+    /// DELIVERED drawings are an upright Times-family
+    /// serif, NOT Instrument Serif — the Type sheet's
+    /// "Instrument Serif 63" label does not match the
+    /// delivered Search drawing (IoU 0.82 vs Times-class,
+    /// 0.14 vs Instrument Serif; RECALC-SPEC §3.8 + §2.3).
+    /// The drawing is the standard: render these two
+    /// headlines in the platform's Times-class serif
+    /// (the system serif design). Sizes follow the
+    /// measured ink boxes: Search 60, Settings 64.
+    static func timesSerif(_ size: CGFloat) -> Font {
+        .system(size: size, weight: .regular, design: .serif)
+    }
+}
+
+enum JoeCinemaFocus {
+    /// The design's Ivory, exact (#F2EEE5).
+    static let ivory = Color(red: 0.949, green: 0.933, blue: 0.898)
+    /// The design's Celadon, exact (#D8E6BB).
+    static let celadon = Color(red: 0.847, green: 0.902, blue: 0.733)
+    /// The spec sheet's focused source-row face, #304039DF.
+    static let sourceRowBg = Color(red: 0.188, green: 0.251,
+                                   blue: 0.224).opacity(0.875)
+    /// The completion specification's tile transform curve:
+    /// 240 ms cubic-bezier(.2,.7,.2,1).
+    static let tileCurve = Animation.timingCurve(0.2, 0.7, 0.2, 1,
+                                                 duration: 0.24)
+    /// The action buttons' transform curve. RECALC-213
+    /// (R4): the many-rail + completion specifications set
+    /// ONE motion value for the whole theme — 240 ms
+    /// cubic-bezier(.2,.7,.2,1) for every transform/opacity
+    /// change — so the action family rides the same 240 ms
+    /// as tileCurve above (the focus sheet's 220 ms was a
+    /// tile-family value, not the action value).
+    static let actionCurve = Animation.timingCurve(0.2, 0.7, 0.2, 1,
+                                                   duration: 0.24)
+}
+
+/// An OUTSET outline in the design's manner (CSS outline +
+/// outline-offset): the band sits entirely OUTSIDE the
+/// shape's bounds, its inner edge `offset` away from the
+/// bounds edge, so it can never paint over the element's own
+/// content. Always installed; at rest it paints clear/0, so
+/// the layout frame never changes. `forced` lets a caller
+/// whose focus lives in a @FocusState binding (the field
+/// chromes) drive the ring from that binding instead of the
+/// environment.
+struct JoeOutsetRing<S: InsettableShape>: View {
+    let shape: S
+    let color: Color
+    var lineWidth: CGFloat = 2
+    var offset: CGFloat = 4
+    var forced: Bool? = nil
+    @Environment(\.isFocused) private var isFocused
+
+    private var active: Bool { forced ?? isFocused }
+
+    var body: some View {
+        shape.inset(by: -(offset + lineWidth))
+            .strokeBorder(active ? color : .clear,
+                          lineWidth: active ? lineWidth : 0)
+    }
+}
+
+/// The row-family focus ring as a drop-in overlay: under
+/// Private Cinema the design's celadon outset outline
+/// (2 px, offset 4 px); under every other theme the house
+/// JoeFocusRing, value-for-value. Used by the source rows
+/// (torrent streams, the chain card, addon streams, the
+/// actor page's unmatched rows).
+struct JoeDesignRing<S: InsettableShape>: View {
+    let shape: S
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        if theme.id == .privateCinema {
+            JoeOutsetRing(shape: shape, color: JoeCinemaFocus.celadon,
+                          lineWidth: 2, offset: 4)
+        } else {
+            JoeFocusRing(shape: shape)
+        }
+    }
+}
+
+/// The chip-family focus ring as a drop-in overlay: under
+/// Private Cinema the IVORY outset outline (2 px, offset
+/// 4 px) — ivory, not celadon, because a selected chip's
+/// fill is the celadon-family accent and a celadon ring
+/// would vanish on it (the v2.0.9 collision, in the new
+/// palette); under every other theme the house JoeFocusRing,
+/// value-for-value.
+struct JoeChipRing<S: InsettableShape>: View {
+    let shape: S
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        if theme.id == .privateCinema {
+            JoeOutsetRing(shape: shape, color: JoeCinemaFocus.ivory,
+                          lineWidth: 2, offset: 4)
+        } else {
+            JoeFocusRing(shape: shape)
+        }
+    }
+}
+
+/// A source row's face: the resting fill everywhere; under
+/// Private Cinema the focused face becomes the spec sheet's
+/// #304039DF. A painted subview (not a modifier) so the
+/// inline Button-label chains that build the rows — which
+/// cannot read the button's own focus — inherit the value
+/// from the environment exactly as JoeFocusRing does.
+struct JoeSourceRowFace<S: InsettableShape>: View {
+    let shape: S
+    let restFill: Color
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        shape.fill(theme.id == .privateCinema && isFocused
+                   ? JoeCinemaFocus.sourceRowBg : restFill)
+    }
+}
+
+/// The poster tile's rest state under Private Cinema: the
+/// completion specification's rest opacity .83, returning
+/// to 1 on focus, on the specification's transform curve.
+/// Applied at PC card roots; non-PC surfaces never install
+/// it (their card roots are different constructions).
+struct JoeCinemaCardFocus: ViewModifier {
+    @Environment(\.isFocused) private var isFocused
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isFocused ? 1 : 0.83)
+            .animation(JoeCinemaFocus.tileCurve, value: isFocused)
+    }
+}
+
+extension View {
+    /// The Private Cinema tile rest/focus opacity — see
+    /// JoeCinemaCardFocus. PC card roots only.
+    func joeCinemaCardFocus() -> some View {
+        modifier(JoeCinemaCardFocus())
+    }
+}
+
+/// The field focus ring shared by JoeFieldChrome and
+/// JoeSettingsFieldChrome (Fault 12): under Private Cinema
+/// the design's field treatment — a celadon OUTSET outline
+/// (2 px, offset 4 px), paired with the celadon border the
+/// chromes paint on the field's own edge; under every other
+/// theme the legacy outset ring, value-for-value (the
+/// joeOutsetStrokeBorder band in theme.focus at ringWidth,
+/// offset 0).
+private struct JoeFieldFocusRing: View {
+    let radius: CGFloat
+    let focused: Bool
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        if theme.id == .privateCinema {
+            RoundedRectangle(cornerRadius: radius)
+                .inset(by: -6)
+                .strokeBorder(focused ? JoeCinemaFocus.celadon : .clear,
+                              lineWidth: focused ? 2 : 0)
+        } else {
+            RoundedRectangle(cornerRadius: radius)
+                .joeOutsetStrokeBorder(focused ? theme.focus : .clear,
+                                       lineWidth: focused ? theme.ringWidth : 0)
+        }
+    }
+}
+
 // MARK: - Shared control labels (single painted shape; focus = value-only)
 
 /// Primary action label (hero "Xem ngay", slate "Thử lại", detail play).
@@ -318,6 +599,40 @@ struct JoePrimaryLabel: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
+        if theme.id == .privateCinema {
+            cinemaBody
+        } else {
+            legacyBody
+        }
+    }
+
+    /// Private Cinema (Fault 11 fix round): the spec sheet's
+    /// primary action — Buttons type 22/500 with a 14 px icon
+    /// gap, the celadon fill (accent2, unchanged) and ink text
+    /// (onAccent, unchanged), dressed with the design's focus:
+    /// scale 1.025 + an ivory OUTSET outline (2 px, offset
+    /// 6 px). The wall specification's action padding
+    /// (13 × 22, min height 55) follows from the type size.
+    private var cinemaBody: some View {
+        HStack(spacing: 14) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 20, weight: .medium))
+            }
+            Text(title).font(JoePCType.outfit(22, weight: .medium))
+        }
+        .foregroundStyle(theme.onAccent)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 13)
+        .background(Capsule().fill(theme.accent2))
+        .overlay(JoeOutsetRing(shape: Capsule(),
+                               color: JoeCinemaFocus.ivory,
+                               lineWidth: 2, offset: 6))
+        .scaleEffect(isFocused ? 1.025 : 1)
+        .animation(JoeCinemaFocus.actionCurve, value: isFocused)
+    }
+
+    private var legacyBody: some View {
         // Design .btn.primary (themes2 shared stylesheet): 29px
         // semibold, padding 17px 36px, capsule, accent2 fill, NO
         // resting stroke; focused ring = inside strokeBorder
@@ -365,6 +680,40 @@ struct JoeSecondaryLabel: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
+        if theme.id == .privateCinema {
+            cinemaBody
+        } else {
+            legacyBody
+        }
+    }
+
+    /// Private Cinema (Fault 11 fix round): the spec sheet's
+    /// secondary action — the primary's focus treatment
+    /// (scale 1.025 + ivory OUTSET outline 2 px, offset 6 px;
+    /// Buttons type 22/500, icon gap 14, wall padding
+    /// 13 × 22) over the Panel fill (surface2, unchanged)
+    /// with its resting hairline stroke kept.
+    private var cinemaBody: some View {
+        HStack(spacing: 14) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 20, weight: .medium))
+            }
+            Text(title).font(JoePCType.outfit(22, weight: .medium))
+        }
+        .foregroundStyle(theme.text)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 13)
+        .background(Capsule().fill(theme.surface2))
+        .overlay(Capsule().strokeBorder(theme.stroke, lineWidth: 1.5))
+        .overlay(JoeOutsetRing(shape: Capsule(),
+                               color: JoeCinemaFocus.ivory,
+                               lineWidth: 2, offset: 6))
+        .scaleEffect(isFocused ? 1.025 : 1)
+        .animation(JoeCinemaFocus.actionCurve, value: isFocused)
+    }
+
+    private var legacyBody: some View {
         // Design .btn: 29px semibold, padding 17px 36px, capsule,
         // surface2 fill, resting inset stroke 1.5 theme.stroke;
         // focused ring = inside strokeBorder ringWidth theme.focus
@@ -395,6 +744,39 @@ struct JoeChipLabel: View {
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
+        if theme.id == .privateCinema {
+            cinemaBody
+        } else {
+            legacyBody
+        }
+    }
+
+    /// Private Cinema (Fault 11 fix round): the chip keeps
+    /// its anatomy (24 px, the same weight rule, 11 × 22
+    /// padding, the accent selected fill) and takes the
+    /// design's focus: an ivory OUTSET outline (2 px, offset
+    /// 4 px) over the resting hairline — ivory, not celadon,
+    /// because the selected fill is the celadon-family
+    /// accent and a celadon ring would vanish on it (the
+    /// v2.0.9 collision in the new palette; the design's own
+    /// selected states likewise keep the check celadon on
+    /// dark, never ring-on-fill in the same hue).
+    private var cinemaBody: some View {
+        Text(title)
+            .font(JoePCType.outfit(24, weight: (selected || isFocused) ? .semibold : .medium))
+            .foregroundStyle(selected ? theme.onAccent : theme.text)
+            .lineLimit(1)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 11)
+            .background(Capsule().fill(selected ? theme.accent : theme.surface2))
+            .overlay(Capsule().strokeBorder(
+                selected ? .clear : theme.stroke, lineWidth: 1.5))
+            .overlay(JoeOutsetRing(shape: Capsule(),
+                                   color: JoeCinemaFocus.ivory,
+                                   lineWidth: 2, offset: 4))
+    }
+
+    private var legacyBody: some View {
         // Design .chip: 24px, medium at rest / semibold when selected
         // or focused, padding 11px 22px, capsule; resting inset
         // stroke 1.5 theme.stroke (none when selected — the accent
@@ -458,17 +840,33 @@ struct JoeFieldChrome: ViewModifier {
         // treatment — before this, fields ran the system
         // treatment AND the outset ring at once (the double
         // box in the owner's photos; Round-1 report §4.5).
-        content
+        // Fault 12 fix round (2026-11-22): under Private
+        // Cinema the field is the design's DARK bar — Panel
+        // fill, ivory text, radius 7, the search geometry's
+        // 29 px horizontal padding (the ≈87 px bar at the
+        // 31 pt field size) — with the spec sheet's
+        // search-input focus: a celadon border on the
+        // field's own edge plus the celadon parent outline
+        // (JoeFieldFocusRing), and no light plate anywhere.
+        // Every other theme keeps the light-by-design plate
+        // value-for-value: the branches below are values in
+        // this same chain, plus one always-installed border
+        // overlay that paints clear/0 off the PC path.
+        let pc = theme.id == .privateCinema
+        let radius: CGFloat = pc ? 7 : theme.rField
+        return content
             .focusEffectDisabled()
-            .foregroundStyle(ThemeTokens.fieldText)
+            .foregroundStyle(pc ? theme.text : ThemeTokens.fieldText)
             .tint(theme.accent2)
-            .padding(.horizontal, 28)
-            .padding(.vertical, 20)
-            .background(RoundedRectangle(cornerRadius: theme.rField)
-                .fill(ThemeTokens.fieldBg))
-            .overlay(RoundedRectangle(cornerRadius: theme.rField)
-                .joeOutsetStrokeBorder(focused ? theme.focus : .clear,
-                                       lineWidth: focused ? theme.ringWidth : 0))
+            .padding(.horizontal, pc ? 29 : 28)
+            .padding(.vertical, pc ? 24 : 20)
+            .background(RoundedRectangle(cornerRadius: radius)
+                .fill(pc ? theme.surface2 : ThemeTokens.fieldBg))
+            .overlay(RoundedRectangle(cornerRadius: radius)
+                .strokeBorder(pc ? (focused ? theme.accent2 : theme.stroke)
+                                 : .clear,
+                              lineWidth: pc ? 1.5 : 0))
+            .overlay(JoeFieldFocusRing(radius: radius, focused: focused))
     }
 }
 
@@ -508,6 +906,40 @@ extension View {
 /// JoeFieldChrome above, byte-untouched — the owner's order
 /// named the Settings fields, and the themes' designs are
 /// otherwise frozen.
+/// The Settings field's in-bar filled mark (Fault 12 fix
+/// round): under Private Cinema the design's own selected
+/// language — a bare Celadon check, the glyph the Settings
+/// drawings put on the selected row/card — with no disc.
+/// Every other theme keeps the 2026-11-19 law's rendering
+/// (white check on the okGreen disc), value-for-value.
+/// DESIGN-TEAM DECISION (recorded in FIX-RECORD-20261122,
+/// Fault 12): the 2026-11-19 law's FUNCTION (a filled field
+/// reads at a glance) is preserved; its FORM (the green
+/// disc) conflicts with the approved drawing's language, and
+/// for Private Cinema the drawing is the sole standard, so
+/// the form follows the drawing.
+private struct JoeSettingsFilledMark: View {
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        if theme.id == .privateCinema {
+            Image(systemName: "checkmark")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(JoeCinemaFocus.celadon)
+                .padding(.trailing, 22)
+        } else {
+            ZStack {
+                Circle().fill(JoeTheme.okGreen)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 32, height: 32)
+            .padding(.trailing, 20)
+        }
+    }
+}
+
 struct JoeSettingsFieldChrome: ViewModifier {
     let focused: Bool
     /// A value is in force for this field: typed by the
@@ -518,9 +950,24 @@ struct JoeSettingsFieldChrome: ViewModifier {
     @Environment(\.joeTheme) private var theme
 
     func body(content: Content) -> some View {
-        content
+        // Fault 12 fix round (2026-11-22): under Private
+        // Cinema the bar takes the design's field treatment —
+        // Panel fill (#182024, the surface2 token), ivory
+        // text, radius 7, the celadon border + outset outline
+        // focus (JoeFieldFocusRing, shared with the search
+        // field), and the celadon filled check
+        // (JoeSettingsFilledMark). The 2026-11-19 law's shape
+        // survives intact: NO outer frame, the one inner long
+        // bar, the state mark inside the bar. Every other
+        // theme keeps its bar value-for-value — the branches
+        // are values in this same chain plus one
+        // always-installed border overlay that paints
+        // clear/0 off the PC path.
+        let pc = theme.id == .privateCinema
+        let radius: CGFloat = pc ? 7 : theme.rField
+        return content
             .focusEffectDisabled()
-            .foregroundStyle(.white)
+            .foregroundStyle(pc ? theme.text : .white)
             .tint(theme.accent2)
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
@@ -533,22 +980,17 @@ struct JoeSettingsFieldChrome: ViewModifier {
             // its bounds — the room comes out of the text
             // area, not the bar's frame).
             .padding(.trailing, filled ? 48 : 0)
-            .background(RoundedRectangle(cornerRadius: theme.rField)
-                .fill(theme.fieldBar))
-            .overlay(RoundedRectangle(cornerRadius: theme.rField)
-                .joeOutsetStrokeBorder(focused ? theme.focus : .clear,
-                                       lineWidth: focused ? theme.ringWidth : 0))
+            .background(RoundedRectangle(cornerRadius: radius)
+                .fill(pc ? theme.surface2 : theme.fieldBar))
+            .overlay(RoundedRectangle(cornerRadius: radius)
+                .strokeBorder(pc ? (focused ? theme.accent2 : theme.stroke)
+                                 : .clear,
+                              lineWidth: pc ? 1.5 : 0))
+            .overlay(JoeFieldFocusRing(radius: radius, focused: focused))
             .overlay(alignment: .trailing) {
                 if filled {
-                    ZStack {
-                        Circle().fill(JoeTheme.okGreen)
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                    .frame(width: 32, height: 32)
-                    .padding(.trailing, 20)
-                    .allowsHitTesting(false)
+                    JoeSettingsFilledMark()
+                        .allowsHitTesting(false)
                 }
             }
     }
@@ -912,8 +1354,12 @@ struct PosterCard: View {
                     // 5×7, set top 11 / left 10. PC only; the
                     // shared capsule below is every other
                     // theme's badge, byte-for-byte.
+                    // GATE-213 R6 C1: the badge text takes
+                    // the PC type family (RECALC-SPEC §2.2
+                    // blanket rule); the measured 11 pt
+                    // regular size/weight stay.
                     Text(quality)
-                        .font(.system(size: 11))
+                        .font(JoePCType.outfit(11))
                         .foregroundStyle(theme.badgeText)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 5)
@@ -1050,16 +1496,27 @@ struct PosterCard: View {
     /// background — no painted face — mirroring ultraBody's
     /// shape, but with NO Ultra badge logic (the shared `art`
     /// block already handles badges for non-ultra themes).
-    /// The focus ring rides the art alone: an inset band in
-    /// theme.focus at theme.ringWidth when focused, and NO
-    /// resting stroke (colour/width are values in the
-    /// always-installed overlay — value-only focus).
+    /// Focus is the design's tile treatment (Fault 11 fix
+    /// round): the ivory outset outline + 1.045 scale on the
+    /// art and the .83 rest opacity at the root — the inset
+    /// band this body originally inherited from ultraBody
+    /// was the legacy pattern the owner convicted.
     private var cinemaBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             art
-                .overlay(RoundedRectangle(cornerRadius: artRadius)
-                    .strokeBorder(isFocused ? theme.focus : .clear,
-                                  lineWidth: isFocused ? theme.ringWidth : 0))
+                // Fault 11 fix round: the design's tile focus —
+                // an ivory OUTSET outline (3 px, offset 5 px,
+                // on the drawing's 7 px button radius) and the
+                // 1.045 scale on the art, replacing the legacy
+                // inside ring this body inherited from
+                // ultraBody's pattern. The root's rest opacity
+                // (.83) is joeCinemaCardFocus below.
+                .overlay(JoeOutsetRing(
+                    shape: RoundedRectangle(cornerRadius: 7),
+                    color: JoeCinemaFocus.ivory,
+                    lineWidth: 3, offset: 5))
+                .scaleEffect(isFocused ? 1.045 : 1)
+                .animation(JoeCinemaFocus.tileCurve, value: isFocused)
             // v2.1.1 fix round (Lens C F1): the drawing's
             // card type is REGULAR weight — title 18/400 at
             // margin-top 13, meta 14/400 at margin-top 4
@@ -1067,26 +1524,27 @@ struct PosterCard: View {
             // ONLY under .privateCinema, so the weight and
             // margins here move no other theme.
             Text(title)
-                .font(.system(size: theme.cardTitleSize, weight: .regular))
+                .font(JoePCType.outfit(theme.cardTitleSize))
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 13)
             if !meta.isEmpty {
                 Text(meta)
-                    .font(.system(size: theme.cardMetaSize))
+                    .font(JoePCType.outfit(theme.cardMetaSize))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                     .padding(.top, 4)
             }
             if let subline {
                 Text(subline)
-                    .font(.system(size: 21))
+                    .font(JoePCType.outfit(21))
                     .foregroundStyle(JoeTheme.accentRed)
                     .lineLimit(1)
                     .padding(.top, 3)
             }
         }
         .frame(width: theme.cardWidth, alignment: .leading)
+        .joeCinemaCardFocus()
     }
 
     private var faceBody: some View {
@@ -1292,20 +1750,56 @@ struct Rail<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: theme.id == .posterWall ? 40 : 34,
-                              weight: theme.id == .posterWall ? .heavy : .bold))
-                .foregroundStyle(theme.text)
+            if theme.id == .privateCinema {
+                // GATE-213 R4 Lens 3 F1 (RECALC-SPEC §3.1,
+                // design-team adjudication): the app's own
+                // extra rails sit after the design stack
+                // "giữ dress của hệ" — keeping the dress of
+                // the DESIGN SYSTEM. On a Private Cinema
+                // surface this shared rail therefore wears
+                // the PC rail shell's own values, exactly
+                // as cinemaRailShell builds the design
+                // rails: Bricolage 27/500 heading at the
+                // 94 pt inset, a full-bleed track with
+                // 94/94 insets, gap 25 and track air
+                // 24/20. The cards inside already take
+                // the PC card dress (PosterCard cinemaBody).
+                // Every other theme keeps the construction
+                // below, byte-for-byte.
+                Text(title)
+                    .font(JoePCType.display(27, weight: .medium))
+                    .tracking(-0.3)
+                    .foregroundStyle(theme.text)
+                    .padding(.leading, 14)
+            } else {
+                Text(title)
+                    .font(.system(size: theme.id == .posterWall ? 40 : 34,
+                                  weight: theme.id == .posterWall ? .heavy : .bold))
+                    .foregroundStyle(theme.text)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: theme.railGap) { content() }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 14)
+                LazyHStack(spacing: theme.id == .privateCinema
+                           ? 25 : theme.railGap) { content() }
+                    .padding(.horizontal,
+                             theme.id == .privateCinema ? 94 : 4)
+                    .padding(.top,
+                             theme.id == .privateCinema ? 24 : 14)
+                    .padding(.bottom,
+                             theme.id == .privateCinema ? 20 : 14)
             }
             // v2.0.8 (Phase 4c): a focused card's outset
             // elements must never be clipped by the rail
             // container — Apple's own samples disable scroll
             // clipping on shelves for exactly this reason.
             .scrollClipDisabled()
+            // GATE-213 R4 Lens 3 F1: under Private Cinema
+            // the track bleeds across the shell's 80 pt
+            // ambient inset exactly as the PC rail
+            // shells' tracks do, so the 94/94 insets
+            // above are the design's own. A no-op on
+            // every other theme.
+            .padding(.horizontal,
+                     theme.id == .privateCinema ? -80 : 0)
         }
         // v2.0.5 (N1): every rail is a declared focus region.
         // Between-region movement (rail ↔ rail, header ↔ rail)

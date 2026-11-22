@@ -136,7 +136,8 @@ struct JoeSearchView: View {
             // rides above them until the visible settle.
             if roundActive && results.isEmpty && !searchFailed {
                 ProgressView("Đang tìm…")
-                    .font(.system(size: 29))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(29)
+                               : .system(size: 29))
                     .foregroundStyle(theme.text)
                     .tint(theme.text)
             } else if searchFailed && results.isEmpty {
@@ -145,10 +146,13 @@ struct JoeSearchView: View {
                         .font(.system(size: 44))
                         .foregroundStyle(.orange)
                     Text("Không tải được kết quả tìm kiếm.")
-                        .font(.system(size: 29, weight: .semibold))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(29, weight: .semibold)
+                              : .system(size: 29, weight: .semibold))
                         .foregroundStyle(theme.text)
                     Text("Các nguồn phim đều lỗi. Kiểm tra mạng rồi thử lại.")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25)
+                                   : .system(size: 25))
                         .foregroundStyle(theme.meta)
                     Button { runSearch() } label: {
                         JoePrimaryLabel(title: "Thử lại")
@@ -163,14 +167,16 @@ struct JoeSearchView: View {
                 }
             } else if searched && results.isEmpty {
                 Text("Không tìm thấy phim nào.")
-                    .font(.system(size: 29))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(29)
+                               : .system(size: 29))
                     .foregroundStyle(theme.meta)
             } else if searching {
                 // Results are already on screen; branches are
                 // still merging (the visible settle — soft
                 // deadline or last branch — ends this line).
                 ProgressView("Đang tìm…")
-                    .font(.system(size: 29))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(29)
+                               : .system(size: 29))
                     .foregroundStyle(theme.text)
                     .tint(theme.text)
             }
@@ -182,7 +188,9 @@ struct JoeSearchView: View {
             // its per-source grouped rails without it.
             if theme.id != .sourceBoard && searched && !results.isEmpty {
                 Text("Kết quả cho “\(searchedQuery)”")
-                    .font(.system(size: 34, weight: .bold))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(34, weight: .bold)
+                          : .system(size: 34, weight: .bold))
                     .foregroundStyle(theme.text)
             }
             // v2.0.5 (N1, pair k): the results area is a
@@ -265,7 +273,10 @@ struct JoeSearchView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 26, weight: .semibold))
                 Text(query.isEmpty ? "Tên phim…" : query)
-                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(29,
+                                             weight: .light)
+                          : .system(size: ThemeTokens.fieldTextSize))
                     .lineLimit(1)
             }
             // The inner frame makes the display greedy, so
@@ -313,13 +324,18 @@ struct JoeSearchView: View {
     private var pcHeadline: some View {
         HStack(alignment: .bottom, spacing: 24) {
             Text("Câu chuyện tiếp theo của bạn.")
-                // FIX-10b / F12: spec Search title = 63.
-                .font(.system(size: 63, weight: .regular, design: .serif))
+                // RECALC-213 correction: the delivered
+                // drawing's headline is an upright
+                // Times-class serif, not Instrument Serif
+                // (design-team overlay measurement,
+                // RECALC-SPEC §3.8); size 60 matches the
+                // measured ink box.
+                .font(JoePCType.timesSerif(60))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
             Spacer(minLength: 0)
             Text("Tìm một bộ phim. Bước vào một thế giới.")
-                .font(.system(size: 22))
+                .font(JoePCType.outfit(22))
                 .foregroundStyle(theme.meta)
                 .padding(.bottom, 10)
         }
@@ -339,11 +355,12 @@ struct JoeSearchView: View {
                     .font(.system(size: 26, weight: .semibold))
                 Text(query.isEmpty
                         ? "Tên phim, diễn viên, đạo diễn..." : query)
-                    .font(.system(size: ThemeTokens.fieldTextSize))
+                    .font(JoePCType.outfit(29,
+                                           weight: .light))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 Text("TÌM KIẾM")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(JoePCType.outfit(15, weight: .semibold))
                     .tracking(1.5)
                     .foregroundStyle(theme.meta)
                     .padding(.horizontal, 12)
@@ -374,12 +391,12 @@ struct JoeSearchView: View {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(alignment: .firstTextBaseline, spacing: 24) {
                     Text("Đáng để khám phá")
-                        .font(.system(size: 30, weight: .semibold))
+                        .font(JoePCType.outfit(30, weight: .semibold))
                         .foregroundStyle(theme.text)
                     Spacer(minLength: 0)
                     if !discoveryItems.isEmpty {
                         Text("\(discoveryItems.count) tựa phim")
-                            .font(.system(size: 22))
+                            .font(JoePCType.outfit(22))
                             .foregroundStyle(theme.meta)
                     }
                 }
@@ -1024,9 +1041,11 @@ enum JoeSearchKeyFocus: Hashable {
 /// page background — the Private Cinema card anatomy
 /// (PosterCard.cinemaBody's shape), drawn locally because
 /// the shared card's width is a theme token this surface
-/// does not own. Focus is the house PC treatment: the art
-/// alone carries the ivory ring, value-only (clear at
-/// rest), no competing hand-drawn scale layer.
+/// does not own. Focus is the design's tile treatment
+/// (Fault 11 fix round: the ivory outset outline + 1.045
+/// scale on the art, the .83 rest opacity at the root —
+/// the inside ring this card first shipped with was the
+/// legacy pattern the owner convicted).
 ///
 /// Data honesty: the trending file carries no quality and
 /// no genre for its items, so the badge states only what
@@ -1050,7 +1069,7 @@ private struct JoeSearchDiscoveryCard: View {
                         ZStack {
                             theme.surface2
                             Text(String(meta.name.prefix(1)))
-                                .font(.system(size: 34, weight: .bold))
+                                .font(JoePCType.outfit(34, weight: .bold))
                                 .foregroundStyle(theme.text.opacity(0.7))
                         }
                     }
@@ -1063,24 +1082,32 @@ private struct JoeSearchDiscoveryCard: View {
             }
             .aspectRatio(205.0 / 263.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(isFocused ? theme.focus : .clear,
-                              lineWidth: isFocused ? theme.ringWidth : 0))
+            // Fault 11 fix round: the design's tile focus —
+            // ivory OUTSET outline (3 px, offset 5 px, 7 px
+            // button radius) + 1.045 scale, replacing the
+            // legacy inside ring; rest opacity at the root.
+            .overlay(JoeOutsetRing(
+                shape: RoundedRectangle(cornerRadius: 7),
+                color: JoeCinemaFocus.ivory,
+                lineWidth: 3, offset: 5))
+            .scaleEffect(isFocused ? 1.045 : 1)
+            .animation(JoeCinemaFocus.tileCurve, value: isFocused)
             Text(meta.name)
                 // FIX-5 / Lens C Finding 3: the design's card title is 18/400.
-                .font(.system(size: 18))
+                .font(JoePCType.outfit(18))
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
                 .lineLimit(1)
                 .padding(.top, 10)
             if !meta.year.isEmpty {
                 Text(meta.year)
                     // FIX-10b / F12: spec metadata = 14.
-                    .font(.system(size: 14))
+                    .font(JoePCType.outfit(14))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
                     .padding(.top, 4)
             }
         }
+        .joeCinemaCardFocus()
     }
 
     /// The design's badge: a small dark chip at the
@@ -1089,7 +1116,7 @@ private struct JoeSearchDiscoveryCard: View {
         Text(text)
             // FIX-10b / F12: the rail-card badge dressing
             // — 11 regular.
-            .font(.system(size: 11, weight: .regular))
+            .font(JoePCType.outfit(11))
             .foregroundStyle(theme.text)
             .padding(.horizontal, 7)
             .padding(.vertical, 5)
@@ -1171,7 +1198,9 @@ private struct JoeKeyCap: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 28, weight: .medium))
+            .font(theme.id == .privateCinema
+                  ? JoePCType.outfit(28, weight: .medium)
+                  : .system(size: 28, weight: .medium))
             .foregroundStyle(focused ? .black : theme.text)
             .frame(width: width, height: 58)
             .background(RoundedRectangle(cornerRadius: 12)

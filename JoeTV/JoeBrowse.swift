@@ -408,7 +408,8 @@ struct JoeFilterBar: View {
                                          @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: 20) {
             Text(title)
-                .font(.system(size: 24, weight: .semibold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(24, weight: .semibold)
+                              : .system(size: 24, weight: .semibold))
                 .foregroundStyle(theme.meta)
                 .frame(width: 170, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
@@ -491,7 +492,9 @@ struct JoeBrowseView: View {
             // read-only for this worker).
             HStack(alignment: .center, spacing: 28) {
                 Text("Tất cả phim")
-                    .font(.system(size: 44, weight: .heavy))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(44, weight: .heavy)
+                          : .system(size: 44, weight: .heavy))
                     .foregroundStyle(theme.text)
                 Spacer()
                 Button {
@@ -526,16 +529,16 @@ struct JoeBrowseView: View {
                     if movies.isEmpty {
                         if phim.loading && !phim.loadTimedOut {
                             ProgressView("Đang tải…")
-                                .font(.system(size: 29))
+                                .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                                 .foregroundStyle(theme.text)
                                 .tint(theme.text)
                         } else if filter.filtersActive {
                             Text("Không có phim nào khớp bộ lọc.")
-                                .font(.system(size: 29))
+                                .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                                 .foregroundStyle(theme.meta)
                         } else {
                             Text("Chưa có phim trong mục này.")
-                                .font(.system(size: 29))
+                                .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                                 .foregroundStyle(theme.meta)
                         }
                     } else {
@@ -857,7 +860,7 @@ struct JoeWallHomeView: View {
                 // non-focusable warning line at the very bottom.
                 if phim.hasData && !phim.failedProviderNames.isEmpty {
                     Text("Chưa tải được: " + phim.failedProviderNames.joined(separator: ", "))
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(.orange)
                 }
             }
@@ -954,7 +957,7 @@ struct JoeWallHomeView: View {
     private var wallStateSurface: some View {
         if phim.loading && !phim.loadTimedOut {
             ProgressView("Đang tải thư viện phim…")
-                .font(.system(size: 29))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                 .foregroundStyle(theme.text)
                 .tint(theme.text)
         } else if showWallError {
@@ -963,19 +966,23 @@ struct JoeWallHomeView: View {
                     .font(.system(size: 44))
                     .foregroundStyle(.orange)
                 Text("Không tải được thư viện phim.")
-                    .font(.system(size: 29, weight: .semibold))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(29, weight: .semibold)
+                          : .system(size: 29, weight: .semibold))
                     .foregroundStyle(theme.text)
                 Text(phim.loadTimedOut
                      ? "Quá 20 giây chưa có dữ liệu. Kiểm tra mạng và profile Sing-box trên Apple TV."
                      : "Các nguồn phim đều lỗi hoặc trả về trống. Kiểm tra mạng rồi thử lại.")
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(theme.meta)
                 if !phim.providerErrors.isEmpty {
                     Text(phim.providerErrors
                             .sorted { $0.key < $1.key }
                             .map { "\(providerDisplayName($0.key)): \($0.value)" }
                             .joined(separator: " · "))
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
                 Button { phim.retry() } label: {
@@ -992,15 +999,15 @@ struct JoeWallHomeView: View {
             .defaultFocus($retryFocused, true)
         } else if showWallEmpty {
             Text("Thư viện chưa có dữ liệu.")
-                .font(.system(size: 29))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                 .foregroundStyle(theme.meta)
         } else if filter.filtersActive {
             Text("Không có phim nào khớp bộ lọc.")
-                .font(.system(size: 29))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                 .foregroundStyle(theme.meta)
         } else {
             Text("Chưa có phim trong mục này.")
-                .font(.system(size: 29))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                 .foregroundStyle(theme.meta)
         }
     }

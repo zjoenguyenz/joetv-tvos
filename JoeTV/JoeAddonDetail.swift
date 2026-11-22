@@ -90,7 +90,9 @@ struct JoeAddonDetail: View {
                 streamsBlock
                 if let notice {
                     Text(notice)
-                        .font(.system(size: 25, weight: .semibold))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(25, weight: .semibold)
+                              : .system(size: 25, weight: .semibold))
                         .foregroundStyle(.orange)
                 }
                 // FL-353 discipline (gate round 5, C5-2):
@@ -217,7 +219,7 @@ struct JoeAddonDetail: View {
             .clipShape(RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 14) {
                 Text(head.name.isEmpty ? route.name : head.name)
-                    .font(.system(size: 46, weight: .heavy))
+                    .font(theme.id == .privateCinema ? JoePCType.display(46, weight: .semibold) : .system(size: 46, weight: .heavy))
                     .foregroundStyle(theme.text)
                     .lineLimit(3)
                 HStack(spacing: 12) {
@@ -229,7 +231,7 @@ struct JoeAddonDetail: View {
                 }
                 if !head.desc.isEmpty {
                     Text(head.desc)
-                        .font(.system(size: 24))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(24) : .system(size: 24))
                         .foregroundStyle(theme.meta)
                         .lineLimit(6)
                         .frame(maxWidth: 1100, alignment: .leading)
@@ -244,7 +246,7 @@ struct JoeAddonDetail: View {
     private var episodesBlock: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Danh sách tập")
-                .font(.system(size: 29, weight: .bold))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(29, weight: .bold) : .system(size: 29, weight: .bold))
                 .foregroundStyle(theme.text)
             LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(videos) { video in
@@ -253,10 +255,10 @@ struct JoeAddonDetail: View {
                     } label: {
                         HStack(spacing: 16) {
                             Text(selectedVideoId == video.id ? "▶" : "·")
-                                .font(.system(size: 25, weight: .bold))
+                                .font(theme.id == .privateCinema ? JoePCType.outfit(25, weight: .bold) : .system(size: 25, weight: .bold))
                                 .foregroundStyle(theme.text)
                             Text(video.label)
-                                .font(.system(size: 26, weight: .semibold))
+                                .font(theme.id == .privateCinema ? JoePCType.outfit(26, weight: .semibold) : .system(size: 26, weight: .semibold))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
                             Spacer()
@@ -280,13 +282,13 @@ struct JoeAddonDetail: View {
     private var streamsBlock: some View {
         if loadingStreams {
             ProgressView("Đang tải nguồn…")
-                .font(.system(size: 25))
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.text)
                 .tint(theme.text)
         } else if !streams.isEmpty {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Nguồn phát — \(route.addonName)")
-                    .font(.system(size: 29, weight: .bold))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(29, weight: .bold) : .system(size: 29, weight: .bold))
                     .foregroundStyle(theme.text)
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(streams) { stream in
@@ -304,19 +306,20 @@ struct JoeAddonDetail: View {
         } label: {
             HStack(spacing: 16) {
                 Text(route.addonName)
-                    .font(.system(size: 23, weight: .heavy))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(23, weight: .bold)
+                              : .system(size: 23, weight: .heavy))
                     .foregroundStyle(theme.text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(Capsule().fill(JoeTheme.okGreen.opacity(0.35)))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(stream.name.isEmpty ? stream.title : stream.name)
-                        .font(.system(size: 29, weight: .semibold))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(29, weight: .semibold) : .system(size: 29, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     if !stream.title.isEmpty && stream.title != stream.name {
                         Text(stream.title)
-                            .font(.system(size: 25))
+                            .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                             .foregroundStyle(theme.meta)
                             .lineLimit(1)
                     }
@@ -326,9 +329,16 @@ struct JoeAddonDetail: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: theme.rField)
-                .fill(theme.surface2))
-            .overlay(JoeFocusRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
+            // Fault 11 fix round: the shared source-row
+            // construction — under Private Cinema the
+            // design's source-row state (celadon outset
+            // outline + #304039DF focused face); under every
+            // other theme the surface2 face and the house
+            // JoeFocusRing, value-for-value.
+            .background(JoeSourceRowFace(
+                shape: RoundedRectangle(cornerRadius: theme.rField),
+                restFill: theme.surface2))
+            .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
         }
         .joeCardButton()
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)

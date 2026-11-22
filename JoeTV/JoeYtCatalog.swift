@@ -684,6 +684,20 @@ final class JoeYtStore: ObservableObject {
                 return "notNewer"
             }
             do {
+                // FAULT 10 (2026-11-22): urls(for:) returns the
+                // Application Support URL but never creates the
+                // directory — on a fresh install it does not
+                // exist, so the atomic write failed with
+                // "The folder tvb_yt_cache.json doesn't exist"
+                // on EVERY refresh (DiagLog 15 line 215, DiagLog
+                // 16 line 479) and the catalogue could never
+                // update past the bundled copy. Ensure the
+                // parent directory at the point of first use;
+                // a failure here lands in the same catch and
+                // keeps the fail-closed log line below.
+                try FileManager.default.createDirectory(
+                    at: Self.cacheURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
                 try data.write(to: Self.cacheURL, options: .atomic)
                 return "cached \(file.generatedAt)"
             } catch {

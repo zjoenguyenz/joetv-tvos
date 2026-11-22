@@ -91,7 +91,7 @@ struct JoeTVSection: View {
             chipRow
             if let message = store.statusMessage {
                 Text(message)
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(.orange)
             }
             contentSection
@@ -119,7 +119,31 @@ struct JoeTVSection: View {
             // the content grid to the top and lands focus
             // on that chip, swallowing the exit.
             if focusedChip != nil {
-                nav.section = .phim
+                nav.section = .home  // FIX-213 (Fault 13): return to Trang chủ (.home), the home surface since the split
+            } else if store.visibleGroups.first == nil {
+                // GATE-213 R8 Lens 2 F1: with an empty
+                // group list the landing write below
+                // targets nothing — visibleGroups.first
+                // is nil, so the declared landing (the
+                // first group chip) does not exist. Two
+                // reachable surfaces hold focus on OTHER
+                // bindings in exactly that state: the
+                // Thể Thao Torrent events grid (its chip
+                // renders even with an empty group list,
+                // see chipRow; its tiles bind
+                // $focusedEvent) and the favourites grid
+                // (favourites persist on-device
+                // independently of the playlist; its
+                // tiles bind $focusedChannel). From
+                // either, every Menu press only bumped
+                // topScrollSignal and could never reach
+                // the return above — the R6 F3 / R7 F1
+                // shape. Mirror the sibling fixes
+                // (JoeTVB / JoeTorrent): go home on the
+                // first press. Non-empty states never
+                // reach this branch, so their two-press
+                // contract is unchanged.
+                nav.section = .home
             } else {
                 topScrollSignal += 1
                 focusedChip = store.visibleGroups.first
@@ -181,17 +205,17 @@ struct JoeTVSection: View {
                 heroArt(ch)
                 VStack(alignment: .leading, spacing: 14) {
                     Text(ch.group.uppercased())
-                        .font(.system(size: 25, weight: .semibold))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25, weight: .semibold) : .system(size: 25, weight: .semibold))
                         .tracking(4)
                         .foregroundStyle(theme.meta)
                         .lineLimit(1)
                     Text(ch.title)
-                        .font(.system(size: 56, weight: .heavy))
+                        .font(theme.id == .privateCinema ? JoePCType.display(56, weight: .bold) : .system(size: 56, weight: .heavy))
                         .foregroundStyle(theme.text)
                         .lineLimit(2)
                     if fallbackCount(for: ch) > 0 {
                         Text("Nguồn dự phòng: \(fallbackCount(for: ch))")
-                            .font(.system(size: 25, weight: .medium))
+                            .font(theme.id == .privateCinema ? JoePCType.outfit(25, weight: .medium) : .system(size: 25, weight: .medium))
                             .foregroundStyle(theme.text.opacity(0.8))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
@@ -205,12 +229,12 @@ struct JoeTVSection: View {
             HStack {
                 if store.isLoading {
                     ProgressView("Đang tải danh sách…")
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(theme.text)
                         .tint(.white)
                 } else {
                     Text("Chưa có kênh nào.")
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(theme.meta)
                 }
                 Spacer()
@@ -241,7 +265,7 @@ struct JoeTVSection: View {
 
     private func fallbackText(_ channel: Channel) -> some View {
         Text(channel.title)
-            .font(.system(size: 28, weight: .bold))
+            .font(theme.id == .privateCinema ? JoePCType.outfit(28, weight: .bold) : .system(size: 28, weight: .bold))
             .foregroundStyle(theme.text.opacity(0.85))
             .multilineTextAlignment(.center)
             .lineLimit(3)
@@ -250,7 +274,7 @@ struct JoeTVSection: View {
 
     private func fallbackText(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 28, weight: .bold))
+            .font(theme.id == .privateCinema ? JoePCType.outfit(28, weight: .bold) : .system(size: 28, weight: .bold))
             .foregroundStyle(theme.text.opacity(0.85))
             .multilineTextAlignment(.center)
             .lineLimit(3)
@@ -288,12 +312,12 @@ struct JoeTVSection: View {
                     .strokeBorder(Color.white.opacity(0.14), lineWidth: 2))
                 VStack(alignment: .leading, spacing: 14) {
                     Text("THỂ THAO TORRENT")
-                        .font(.system(size: 25, weight: .semibold))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25, weight: .semibold) : .system(size: 25, weight: .semibold))
                         .tracking(4)
                         .foregroundStyle(theme.meta)
                         .lineLimit(1)
                     Text(ev.name)
-                        .font(.system(size: 56, weight: .heavy))
+                        .font(theme.id == .privateCinema ? JoePCType.display(56, weight: .bold) : .system(size: 56, weight: .heavy))
                         .foregroundStyle(theme.text)
                         .lineLimit(2)
                 }
@@ -304,12 +328,12 @@ struct JoeTVSection: View {
             HStack {
                 if mfLoading {
                     ProgressView("Đang tải sự kiện…")
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(theme.text)
                         .tint(.white)
                 } else {
                     Text("Chưa có sự kiện nào.")
-                        .font(.system(size: 29))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                         .foregroundStyle(theme.meta)
                 }
                 Spacer()
@@ -505,7 +529,7 @@ struct JoeTVSection: View {
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Text("\(gridChannels.count) kênh")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
                 // v2.0.49 (item 7, fix round): the grid
@@ -576,7 +600,7 @@ struct JoeTVSection: View {
                     .foregroundStyle(theme.text)
                     .lineLimit(1)
                 Text("\(favouriteChannels.count) kênh")
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(theme.meta)
             }
             if favouriteChannels.isEmpty {
@@ -585,7 +609,7 @@ struct JoeTVSection: View {
                 Text(channelFavourites.keys.isEmpty
                      ? "Chưa có kênh yêu thích — bấm giữ một kênh để ghim"
                      : "Kênh yêu thích hiện không có trong danh sách kênh.")
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(theme.meta)
                     .frame(maxWidth: 1200, alignment: .leading)
                 Spacer()
@@ -653,24 +677,24 @@ struct JoeTVSection: View {
                     .foregroundStyle(theme.text)
                     .lineLimit(1)
                 Text("\(mfEvents.count) sự kiện")
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(theme.meta)
             }
             if mfLoading && mfEvents.isEmpty {
                 ProgressView("Đang lấy sự kiện trực tiếp…")
-                    .font(.system(size: 29))
+                    .font(theme.id == .privateCinema ? JoePCType.outfit(29) : .system(size: 29))
                     .foregroundStyle(theme.text)
                     .tint(.white)
                 Spacer()
             } else if mfEvents.isEmpty {
                 if mfNoLiveCatalogs {
                     Text("Các nguồn thể thao (Nuvio, MediaFusion, StremVerse) đều không có danh mục trực tiếp nào, nên mục này trống. Nếu anh dùng MediaFusion, kiểm tra trang cấu hình đã bật danh mục trực tiếp (Live Sport Events / kênh TV) chưa, rồi bấm Làm mới.")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                         .frame(maxWidth: 1200, alignment: .leading)
                 } else {
                     Text("Chưa có sự kiện trực tiếp nào. Nguồn trả trống từng đợt — bấm Làm mới hoặc chọn lại Thể Thao Torrent để lấy lại.")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                         .frame(maxWidth: 1200, alignment: .leading)
                 }
@@ -729,7 +753,9 @@ struct JoeTVSection: View {
                     }
                     .frame(maxWidth: 240, maxHeight: 90)
                     Text(event.name)
-                        .font(.system(size: 25, weight: focused ? .semibold : .medium))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(25, weight: focused ? .semibold : .medium)
+                              : .system(size: 25, weight: focused ? .semibold : .medium))
                         .foregroundStyle(focused ? theme.focusTitle : theme.text)
                         .lineLimit(1)
                 }
@@ -737,7 +763,8 @@ struct JoeTVSection: View {
                 HStack(spacing: 6) {
                     Circle().fill(JoeTheme.accentRed).frame(width: 12, height: 12)
                     Text("LIVE")
-                        .font(.system(size: 23, weight: .heavy))
+                        .font(theme.id == .privateCinema ? JoePCType.outfit(23, weight: .bold)
+                              : .system(size: 23, weight: .heavy))
                         .foregroundStyle(theme.text)
                 }
                 .padding(.horizontal, 10)
@@ -748,8 +775,29 @@ struct JoeTVSection: View {
             }
             .frame(width: 273, height: 150)
             .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-                .strokeBorder(focused ? theme.focus : theme.stroke,
-                              lineWidth: focused ? theme.ringWidth : 2))
+                .strokeBorder(focused && theme.id != .privateCinema
+                              ? theme.focus : theme.stroke,
+                              lineWidth: focused
+                                && theme.id != .privateCinema
+                                ? theme.ringWidth : 2))
+            // Fault 11 fix round: under Private Cinema the
+            // tile's focus is the design's tile treatment —
+            // the ivory outset outline + 1.045 scale; the
+            // inset stroke above rests there.
+            .overlay(JoeOutsetRing(
+                shape: RoundedRectangle(cornerRadius: theme.rCard),
+                color: JoeCinemaFocus.ivory, lineWidth: 3, offset: 5,
+                forced: theme.id == .privateCinema ? focused : false))
+            .scaleEffect(theme.id == .privateCinema && focused
+                         ? 1.045 : 1)
+            // GATE-213 R6 Lens 2 F1: this tile renders under
+            // EVERY theme, so the animation is theme-branched
+            // — the PC tile curve under Private Cinema, NO
+            // animation elsewhere (the pre-FIX11 behaviour:
+            // the legacy focus ring snaps).
+            .animation(theme.id == .privateCinema
+                       ? JoeCinemaFocus.tileCurve : nil,
+                       value: focused)
         }
         .joeCardButton()
         .focused($focusedEvent, equals: event.id)
@@ -841,7 +889,9 @@ struct JoeTVSection: View {
                     }
                     .frame(maxWidth: 180, maxHeight: 90)
                     Text(channel.title)
-                        .font(.system(size: 25, weight: focused ? .semibold : .medium))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(25, weight: focused ? .semibold : .medium)
+                              : .system(size: 25, weight: focused ? .semibold : .medium))
                         .foregroundStyle(focused ? theme.focusTitle : theme.text)
                         .lineLimit(1)
                 }
@@ -850,7 +900,8 @@ struct JoeTVSection: View {
                     HStack(spacing: 6) {
                         Circle().fill(JoeTheme.accentRed).frame(width: 12, height: 12)
                         Text("LIVE")
-                            .font(.system(size: 23, weight: .heavy))
+                            .font(theme.id == .privateCinema ? JoePCType.outfit(23, weight: .bold)
+                              : .system(size: 23, weight: .heavy))
                             .foregroundStyle(theme.text)
                     }
                     .padding(.horizontal, 10)
@@ -869,10 +920,30 @@ struct JoeTVSection: View {
             // system's two drawn ones, the field's and design
             // D's wall art). The resting 2 pt border is
             // unchanged; only the focused band's placement and
-            // width move.
+            // width move. (Fault 11 fix round: that ruling
+            // governs the LEGACY themes; under Private Cinema
+            // the DRAWING governs and the drawn focus is the
+            // outset outline — the inset stroke rests there
+            // and the outset ring below paints, exactly as
+            // the event tile above.)
             .overlay(RoundedRectangle(cornerRadius: theme.rCard)
-                .strokeBorder(focused ? theme.focus : theme.stroke,
-                              lineWidth: focused ? theme.ringWidth : 2))
+                .strokeBorder(focused && theme.id != .privateCinema
+                              ? theme.focus : theme.stroke,
+                              lineWidth: focused
+                                && theme.id != .privateCinema
+                                ? theme.ringWidth : 2))
+            .overlay(JoeOutsetRing(
+                shape: RoundedRectangle(cornerRadius: theme.rCard),
+                color: JoeCinemaFocus.ivory, lineWidth: 3, offset: 5,
+                forced: theme.id == .privateCinema ? focused : false))
+            .scaleEffect(theme.id == .privateCinema && focused
+                         ? 1.045 : 1)
+            // GATE-213 R6 Lens 2 F1: same theme branch as
+            // the event tile above — PC tile curve under
+            // Private Cinema only, no animation elsewhere.
+            .animation(theme.id == .privateCinema
+                       ? JoeCinemaFocus.tileCurve : nil,
+                       value: focused)
         }
         .joeCardButton()
         .focused($focusedChannel, equals: channel.id)

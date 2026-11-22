@@ -326,10 +326,13 @@ struct JoeYtPlayRouter: View {
                 ProgressView()
                     .tint(.white)
                 Text("Đang mở phim…")
-                    .font(.system(size: 29, weight: .semibold))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(29, weight: .semibold)
+                          : .system(size: 29, weight: .semibold))
                     .foregroundStyle(.white)
                 Text("\(request.seriesTitle) · Tập \(request.startIndex + 1) / \(request.videoIds.count)")
-                    .font(.system(size: 24))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(24) : .system(size: 24))
                     .foregroundStyle(.white.opacity(0.7))
                 // FL-353 sweep (2.0.45, leg 6): the same
                 // latent trap as the SVIP slate — a
@@ -365,15 +368,19 @@ struct JoeYtPlayRouter: View {
             theme.bg.ignoresSafeArea()
             VStack(spacing: 16) {
                 Text("Tập này thuộc gói thành viên cao hơn gói của tài khoản đang đăng nhập, nên chưa xem được.")
-                    .font(.system(size: 29, weight: .semibold))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(29, weight: .semibold)
+                          : .system(size: 29, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 1200)
                 Text("\(request.seriesTitle) · Tập \(request.startIndex + 1)")
-                    .font(.system(size: 24))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(24) : .system(size: 24))
                     .foregroundStyle(theme.meta)
                 Text("Bấm Menu để quay lại danh sách tập.")
-                    .font(.system(size: 24))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(24) : .system(size: 24))
                     .foregroundStyle(theme.meta)
                 // FL-353 (2.0.45, leg 6): the fix itself.
                 // This slate was Text-only — no focusable
@@ -408,7 +415,8 @@ struct JoeYtPlayRouter: View {
             Color.black.ignoresSafeArea()
             VStack(spacing: 22) {
                 Text(text)
-                    .font(.system(size: 27))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(27) : .system(size: 27))
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 1100)
@@ -447,23 +455,31 @@ struct JoeYtDeviceCodeView: View {
             theme.bg.ignoresSafeArea()
             VStack(spacing: 22) {
                 Text("Đăng nhập TVB bằng mã kích hoạt")
-                    .font(.system(size: 40, weight: .heavy))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(30, weight: .bold)
+                          : .system(size: 40, weight: .heavy))
                     .foregroundStyle(theme.text)
                 Text("Đường phát mới cần anh duyệt một lần trên điện thoại — không gõ mật khẩu trên TV, không qua trang Google trên TV.")
-                    .font(.system(size: 25))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(25) : .system(size: 25))
                     .foregroundStyle(theme.meta)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 1250)
                 if let code = identity.userCode {
                     VStack(spacing: 10) {
                         Text("MÃ KÍCH HOẠT")
-                            .font(.system(size: 24, weight: .semibold))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(22, weight: .semibold)
+                                  : .system(size: 24, weight: .semibold))
                             .foregroundStyle(theme.meta)
                         Text(code)
-                            .font(.system(size: 76, weight: .heavy, design: .monospaced))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(54, weight: .bold)
+                                  : .system(size: 76, weight: .heavy, design: .monospaced))
                             .foregroundStyle(theme.text)
                         Text("Mở \(identity.verificationURL) trên iPhone → nhập mã này → duyệt bằng tài khoản TVB của anh. Duyệt xong phim tự phát, không cần bấm gì thêm trên TV.")
-                            .font(.system(size: 25))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(25) : .system(size: 25))
                             .foregroundStyle(theme.meta)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: 1250)
@@ -471,7 +487,8 @@ struct JoeYtDeviceCodeView: View {
                 } else if let error = identity.flowError {
                     VStack(spacing: 18) {
                         Text(error)
-                            .font(.system(size: 26))
+                            .font(theme.id == .privateCinema
+                                  ? JoePCType.outfit(26) : .system(size: 26))
                             .foregroundStyle(theme.text)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: 1100)
@@ -487,7 +504,8 @@ struct JoeYtDeviceCodeView: View {
                     ProgressView()
                         .tint(theme.text)
                     Text("Đang lấy mã kích hoạt…")
-                        .font(.system(size: 25))
+                        .font(theme.id == .privateCinema
+                              ? JoePCType.outfit(25) : .system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
                 // FL-353 sweep (2.0.45, leg 6): both
@@ -514,7 +532,8 @@ struct JoeYtDeviceCodeView: View {
                     .focused($retryFocused)
                 }
                 Text("\(request.seriesTitle) · Tập \(request.startIndex + 1)")
-                    .font(.system(size: 23))
+                    .font(theme.id == .privateCinema
+                          ? JoePCType.outfit(23) : .system(size: 23))
                     .foregroundStyle(theme.meta)
             }
             .padding(.horizontal, 80)
