@@ -2515,11 +2515,31 @@ private final class JoePlayerInfoViewController: UIViewController {
     private let titleLabel = UILabel()
     private let episodeLabel = UILabel()
     private let sourceLabel = UILabel()
+    /// FIX-214: true when the Private Cinema title dress
+    /// applies (see viewDidLoad) — update() then kerns
+    /// the title's attributed string.
+    private var pcTitleDress = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(white: 0.08, alpha: 1)
-        titleLabel.font = .systemFont(ofSize: 38, weight: .bold)
+        // FIX-214 (FULL-THEME-AUDIT-214 B13): under
+        // Private Cinema the drawn player title is
+        // Outfit 45/400 with tracking −1 — the bundled
+        // Outfit face at 45 (the kern rides the
+        // attributed string in update()). The theme
+        // identity is read from the same defaults key
+        // the shell's @AppStorage writes. Every other
+        // theme keeps the system 38 bold, exactly as
+        // shipped.
+        if UserDefaults.standard.string(forKey: "joeThemeID")
+            == JoeThemeID.privateCinema.rawValue,
+           let outfit = UIFont(name: "Outfit-Regular", size: 45) {
+            titleLabel.font = outfit
+            pcTitleDress = true
+        } else {
+            titleLabel.font = .systemFont(ofSize: 38, weight: .bold)
+        }
         titleLabel.textColor = .white
         titleLabel.numberOfLines = 2
         episodeLabel.font = .systemFont(ofSize: 29)
@@ -2551,7 +2571,23 @@ private final class JoePlayerInfoViewController: UIViewController {
     /// panel is ever opened.
     func update(title: String, episode: String, source: String) {
         loadViewIfNeeded()
-        titleLabel.text = title
+        if pcTitleDress {
+            // The drawn −1 tracking: a kerned attributed
+            // string (a plain .text assignment would
+            // drop it). Font and colour ride the string
+            // so the label's own settings stay the
+            // fallback for any future plain assignment.
+            titleLabel.attributedText = NSAttributedString(
+                string: title,
+                attributes: [
+                    .font: UIFont(name: "Outfit-Regular", size: 45)
+                        ?? titleLabel.font!,
+                    .foregroundColor: UIColor.white,
+                    .kern: -1.0
+                ])
+        } else {
+            titleLabel.text = title
+        }
         episodeLabel.text = episode
         episodeLabel.isHidden = episode.isEmpty
         sourceLabel.text = source

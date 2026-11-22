@@ -343,6 +343,13 @@ struct JoeMovieDetail: View {
             .id("joeDetailTop")
             // No manual padding: the layer sits inside the root
             // safe area, which IS the §4 inset (80/60).
+            // FIX-214 (FULL-THEME-AUDIT-214 B10): under
+            // Private Cinema the drawn text frame is x94,
+            // not the ambient x80 — the PC leg adds the
+            // +14 here (the one shared stack, so the
+            // increment is a value branch, not a second
+            // composition). Legacy themes keep x80.
+            .padding(.horizontal, theme.id == .privateCinema ? 14 : 0)
             }
             // v2.0.49 (item 7): the Menu-to-top jump's scroll
             // hook, inside the reader.
@@ -1648,7 +1655,12 @@ struct JoeMovieDetail: View {
                     Text(d.movie.originName.uppercased())
                         .font(JoePCType.outfit(20, weight: .medium))
                         .tracking(6)
-                        .foregroundStyle(theme.meta)
+                        // FIX-214 (FULL-THEME-AUDIT-214
+                        // B10): the drawn origin line is
+                        // IVORY (the heroes' heroMeta use
+                        // is correct; this detail leg alone
+                        // drifted to the meta colour).
+                        .foregroundStyle(theme.text)
                         .lineLimit(1)
                         .padding(.top, 10)
                 }
@@ -1698,8 +1710,17 @@ struct JoeMovieDetail: View {
                     .padding(.top, 22)
                 if let tmdb, !tmdb.cast.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
+                        // FIX-214 (FULL-THEME-AUDIT-214
+                        // B10): the drawing carries NO
+                        // cast heading — only the small
+                        // column label at 15. The shipped
+                        // 23 pt semibold "DIỄN VIÊN" block
+                        // heading is removed; the drawn
+                        // small-caps label stands in its
+                        // place (design-team call per the
+                        // audit's fix text).
                         Text("DIỄN VIÊN")
-                            .font(JoePCType.outfit(23, weight: .semibold))
+                            .font(JoePCType.outfit(15, weight: .medium))
                             .tracking(3)
                             .foregroundStyle(theme.heroMeta)
                         HStack(spacing: 18) {
@@ -1719,11 +1740,23 @@ struct JoeMovieDetail: View {
             }
             .focusSection()
             pcTrailerSignInPrompt
+            // FIX-214 (FULL-THEME-AUDIT-214 B10): the
+            // source block ANCHORS to the stage's bottom
+            // zone — when the header content is short,
+            // this spacer stretches so the block's bottom
+            // lands at the drawn bottom 101 of the 1080
+            // stage (the composition's frame below is
+            // 1080 − 101 − 60 safe-area top = 919 tall at
+            // minimum); when the content is long, the
+            // spacer collapses and the block flows
+            // naturally under the header, as before.
+            Spacer(minLength: 0)
             Divider()
                 .padding(.top, 38)
             pcSourceBlock(d)
                 .padding(.top, 20)
-        })
+        }
+        .frame(minHeight: 919, alignment: .top))
     }
 
     // MARK: - Private Cinema detail pieces (v2.1.1, WS-C)
@@ -1791,7 +1824,9 @@ struct JoeMovieDetail: View {
             playButton(d)
             if !infoText.isEmpty {
                 Text(infoText)
-                    .font(JoePCType.outfit(25))
+                    // FIX-214 (FULL-THEME-AUDIT-214 B10):
+                    // the drawn info line is ≈20, not 25.
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
@@ -1883,7 +1918,17 @@ struct JoeMovieDetail: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 14) {
                 Text("Chọn nguồn phát")
-                    .font(JoePCType.display(34))
+                    // FIX-214 (FULL-THEME-AUDIT-214 B10 —
+                    // the ONE unified source-heading
+                    // decision for all three details): the
+                    // chain drawing's heading is a modest
+                    // ≈27–30 Outfit; the 34 Bricolage
+                    // pane-title reading the TVB/Torrent
+                    // details were matched against is
+                    // inference, not a drawing — the
+                    // drawing wins, so all three details
+                    // take outfit(28, .semibold).
+                    .font(JoePCType.outfit(28, weight: .semibold))
                     .foregroundStyle(theme.text)
                 if switching {
                     ProgressView().tint(theme.text)
@@ -2080,11 +2125,14 @@ struct JoeMovieDetail: View {
             // Fault 11 fix round: the face is JoeSourceRowFace —
             // Panel at rest, the spec sheet's #304039DF when
             // focused (the design's source-row state).
+            // FIX-214 (FULL-THEME-AUDIT-214 A3): the
+            // source-card radius is the Geometry 7, not
+            // the Settings-field rField 12.
             .background(JoeSourceRowFace(
-                shape: RoundedRectangle(cornerRadius: theme.rField),
+                shape: RoundedRectangle(cornerRadius: 7),
                 restFill: panel))
         let card = cardFilled
-            .overlay(RoundedRectangle(cornerRadius: theme.rField)
+            .overlay(RoundedRectangle(cornerRadius: 7)
                 .strokeBorder(theme.stroke, lineWidth: 1.5))
         if case .torrent = entry,
            case .notConfigured = torrentEntryState {
@@ -2092,7 +2140,7 @@ struct JoeMovieDetail: View {
         } else {
             Button(action: pcCardAction(entry)) {
                 card.overlay(JoeDesignRing(
-                    shape: RoundedRectangle(cornerRadius: theme.rField)))
+                    shape: RoundedRectangle(cornerRadius: 7)))
             }
             .joeCardButton()
             .focused($focusedAlt, equals: entry.id)

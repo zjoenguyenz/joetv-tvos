@@ -509,6 +509,14 @@ struct JoeRootView: View {
             }
         }
         .onChange(of: nav.section) { _, _ in
+            // FIX-214 (DESIGN-PASS-214 §3.3): the stall
+            // breadcrumb RESETS at the section boundary —
+            // through 2.1.3 the context was sticky for the
+            // whole session (set by the TVB hook, never
+            // cleared), so log 17's stalls carried a
+            // "tvb-home" label long after the owner had
+            // left the TVB home.
+            DiagLog.noteSection(nav.section.rawValue)
             // S1.1: see the note above `body` — search must
             // not outlive the Phim section. The v2.0.0 browse
             // layer follows the same rule.
@@ -663,11 +671,26 @@ struct JoeRootView: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .focusSection()
+                // FIX-214 (Finding 12): while search is
+                // open the BAR cannot take focus (the
+                // 2.1.3 nesting: the shell stayed focusable
+                // because the root .disabled list omits
+                // searchOpen). The disable sits on the
+                // BAR, not on the whole shell: the search
+                // view itself mounts INSIDE the content
+                // (JoePhimHomeCore's swap), so a shell-wide
+                // disable would disable the search field
+                // with the bar. Content stays live; only
+                // the bar's pills go inert.
                 topBar
+                    .disabled(nav.searchOpen)
             }
         } else {
             VStack(spacing: 32) {
+                // FIX-214 (Finding 12): same bar-only
+                // search disable as the PC arm above.
                 topBar
+                    .disabled(nav.searchOpen)
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // v2.0.5 (N1): the content is ONE declared
@@ -708,7 +731,21 @@ struct JoeRootView: View {
                         nav.section = s
                     }
                 }
-                topLink("Tìm phim", id: "search", selected: false) { openSearch() }
+                topLink("Tìm phim", id: "search", selected: false) {
+                    // FIX-214 (Finding 12): the TVB branch
+                    // the PC arm carries (FIX-213 Fault 5) —
+                    // the legacy arms called openSearch()
+                    // unconditionally, so on the TVB section
+                    // this pill opened the global search
+                    // over the TVB page while the TVB
+                    // in-tab request raced it (the nesting
+                    // the owner photographed).
+                    if nav.section == .tvb {
+                        nav.tvbSearchRequested = true
+                    } else {
+                        openSearch()
+                    }
+                }
             }
             .frame(height: 76)
             // v2.0.5 (N1): the bar is a declared focus region,
@@ -729,7 +766,9 @@ struct JoeRootView: View {
             // the old bar also sat as a filled furniture
             // row over the hero: "Làm che luôn backdrop").
             // Measured from delivery-joetv-HomeManyRails.png
-            // + the many-rail spec: fixed height 132, side
+            // + the many-rail spec: fixed height 148
+            // (FIX-214 raised it from 132 — DESIGN-PASS-214
+            // §1a), side
             // inset 88 (the shell's 80 pt ambient + 8 here),
             // TRANSPARENT over the backdrop (no band fill —
             // the hero's backdrop shows through the whole
@@ -754,24 +793,14 @@ struct JoeRootView: View {
             // pinned to the top-left corner as its OWN
             // element — not a member of the nav row: the
             // nav group is centred on the screen
-            // independently, the clock is pinned to the
-            // right corner, and the lockup rides 5 pt
-            // below the bar's centre line, exactly where
-            // the drawing puts its ink (measured: lockup
-            // ink y52–90, centre 71, against the nav
-            // capsule's centre 65.5 in the 132 header).
+            // independently, and the clock is pinned to
+            // the right corner. (Its exact ink position is
+            // the owner's FIX-214 corner ruling — see the
+            // wordmark layer below.)
             // The .focusSection() and .defaultFocus
             // entry-landing invariants are the other
             // arms' own, unchanged.
             ZStack {
-                HStack(alignment: .center, spacing: 20) {
-                    PCWordmark()
-                        .padding(.leading, 8)
-                        .padding(.top, 10)
-                    Spacer()
-                    PCClockLabel()
-                        .padding(.trailing, 8)
-                }
                 HStack(spacing: 16) {
                     ForEach(JoeNavigator.Section.allCases.filter { $0 != .settings }, id: \.self) { s in
                         pcNavPill(s)
@@ -798,7 +827,31 @@ struct JoeRootView: View {
                     // Cài đặt LAST on the bar.
                     pcNavPill(.settings)
                 }
-                .frame(maxWidth: .infinity, alignment: .center)
+                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                       alignment: .center)
+                // The clock keeps its drawn place: right
+                // edge (canvas inset 88), vertically
+                // centred on the band.
+                PCClockLabel()
+                    .padding(.trailing, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity,
+                           alignment: .trailing)
+                // FIX-214 (owner ruling 2026-11-22 14:38
+                // CST — "wordmark để ngay góc trên bên
+                // trái", superseding the drawing's inset-88
+                // lockup AND the FIX-213 ride): the
+                // wordmark's ink locks FLUSH to the screen
+                // corner at canvas (40, 32). The bar sits
+                // inside the shell's 80/60 safe area, so
+                // from the bar's own top-leading corner the
+                // ink offsets (−40, −28). Not focusable;
+                // hit-testing off so the offset art can
+                // never intercept the nav row's focus.
+                PCWordmark()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity,
+                           alignment: .topLeading)
+                    .offset(x: -40, y: -28)
+                    .allowsHitTesting(false)
             }
             .frame(height: joePCBarHeight)
             .focusSection()
@@ -810,7 +863,16 @@ struct JoeRootView: View {
                     sectionPill(s)
                 }
                 Spacer()
-                Button { openSearch() } label: {
+                Button {
+                    // FIX-214 (Finding 12): the TVB branch,
+                    // aligned with the PC arm (see the
+                    // posterWall arm's note above).
+                    if nav.section == .tvb {
+                        nav.tvbSearchRequested = true
+                    } else {
+                        openSearch()
+                    }
+                } label: {
                     PillLabel(title: "Tìm phim", icon: "magnifyingglass", selected: false)
                 }
                 .joeCardButton()

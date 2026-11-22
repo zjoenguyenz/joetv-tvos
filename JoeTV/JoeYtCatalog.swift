@@ -401,7 +401,7 @@ enum JoeYtPosterResolver {
         // the first publisher wins (TVBSnapshotLookup.maps
         // idiom).
         var index: [String: TVBTitle] = [:]
-        if let catalog = TVBCatalog.loadBundled() {
+        if let catalog = TVBCatalogStore.load() {
             let ordered = catalog.titles.filter { $0.isDisplayed }
                 + catalog.titles.filter { !$0.isDisplayed }
             // v2.0.49: two claim passes (gate R1, lens B).
@@ -592,13 +592,17 @@ final class JoeYtStore: ObservableObject {
     // the marker the detached call is a compile error (review
     // round 1, BLOCKER). Everything they touch is Foundation
     // value work plus the nonisolated JoeYtSnapshot.build /
-    // TVBCatalog.loadBundled — no actor state.
+    // TVBCatalogStore.load — no actor state.
 
+    /// FIX-214 (Fault 10 / FL-421): the cache lives in
+    /// the shared Caches home (JoeStorage) — the tvOS
+    /// sandbox refuses to create Application Support,
+    /// which is why every refresh write failed through
+    /// 2.1.3 and the catalogue could never update past
+    /// the bundled copy (see JoeStorage.swift for the
+    /// conviction).
     private nonisolated static var cacheURL: URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("tvb_yt_cache.json")
+        JoeStorage.fileURL("tvb_yt_cache.json")
     }
 
     private nonisolated static func decodeFile(_ data: Data) -> JoeYtFile? {
@@ -645,7 +649,7 @@ final class JoeYtStore: ObservableObject {
             return nil
         }
         guard let file = chosen else { return nil }
-        let displayed = TVBCatalog.loadBundled()?
+        let displayed = TVBCatalogStore.load()?
             .titles.filter { $0.isDisplayed } ?? []
         let snapshot = JoeYtSnapshot.build(file: file,
                                            displayedTitles: displayed)
@@ -683,28 +687,30 @@ final class JoeYtStore: ObservableObject {
             guard newStamp > oldStamp else {
                 return "notNewer"
             }
+            // FIX-214 (Fault 10 / FL-421): directory
+            // creation and the write are attributed
+            // SEPARATELY — through 2.1.3 they shared one
+            // do/catch logged as "(cache write)", but
+            // DiagLog 17 line 185's error text names the
+            // DIRECTORY ("Application Support"), not the
+            // file: the sandbox refused the create, and
+            // the 2.1.3 fix (create the directory first)
+            // aimed at exactly the denied operation. The
+            // directory is JoeStorage's Caches home,
+            // created + write-tested by its launch probe;
+            // this create is a cheap re-ensure whose
+            // failure now logs as what it is.
             do {
-                // FAULT 10 (2026-11-22): urls(for:) returns the
-                // Application Support URL but never creates the
-                // directory — on a fresh install it does not
-                // exist, so the atomic write failed with
-                // "The folder tvb_yt_cache.json doesn't exist"
-                // on EVERY refresh (DiagLog 15 line 215, DiagLog
-                // 16 line 479) and the catalogue could never
-                // update past the bundled copy. Ensure the
-                // parent directory at the point of first use;
-                // a failure here lands in the same catch and
-                // keeps the fail-closed log line below.
                 try FileManager.default.createDirectory(
                     at: Self.cacheURL.deletingLastPathComponent(),
                     withIntermediateDirectories: true)
-                try data.write(to: Self.cacheURL, options: .atomic)
-                return "cached \(file.generatedAt)"
             } catch {
-                // v2.1.1 (WS-E, DIAG-2050 §1b): the error is
-                // carried into the log line below instead of
-                // being discarded — the pre-fix catch left the
-                // write failure permanently unexplained.
+                return "dirFailed \(error.localizedDescription)"
+            }
+            do {
+                try data.write(to: Self.cacheURL, options: .atomic)
+                return "cached|\(file.generatedAt)|\(data.count)|\(Self.cacheURL.path)"
+            } catch {
                 return "writeFailed \(error.localizedDescription)"
             }
         }.value
@@ -713,12 +719,29 @@ final class JoeYtStore: ObservableObject {
             DiagLog.write("YT", "refresh rejected (decode failed)")
         case "notNewer":
             DiagLog.write("YT", "refresh skipped (hosted not newer)")
+        case _ where outcome.hasPrefix("dirFailed"):
+            // FIX-214 (Fault 10): a directory failure is
+            // a DIFFERENT fault from a write failure and
+            // logs as one — the shared "(cache write)"
+            // label is what let the 2.1.3 fix aim at the
+            // wrong operation.
+            DiagLog.write("YT", "refresh failed (cache dir) — \(outcome.dropFirst(10)) — keeping loaded copy")
         case _ where outcome.hasPrefix("writeFailed"):
             // v2.1.1 (WS-E): the line now carries the write
             // error itself (see the catch in the task above).
             DiagLog.write("YT", "refresh failed (cache write) — \(outcome.dropFirst(12)) — keeping loaded copy")
         default:
-            DiagLog.write("YT", "refresh cached generatedAt=\(outcome.dropFirst(7)) (applies next launch)")
+            // FIX-214 (Fault 10): the proof line — bytes
+            // + the Caches path + the new stamp, so the
+            // next log convicts the fix: the following
+            // launch must load source=cache with this
+            // generatedAt (newer than the bundle's).
+            let parts = outcome.split(separator: "|", maxSplits: 3)
+            if parts.count == 4 {
+                DiagLog.write("YT", "refresh cached bytes=\(parts[2]) path=\(parts[3]) generatedAt=\(parts[1]) (applies next launch)")
+            } else {
+                DiagLog.write("YT", "refresh cached generatedAt=\(outcome.dropFirst(7)) (applies next launch)")
+            }
         }
     }
 }

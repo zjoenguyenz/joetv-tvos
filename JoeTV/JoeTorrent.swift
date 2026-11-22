@@ -403,8 +403,18 @@ struct JoeTorrentHome: View {
         // feeds the backdrop controller; the debounce
         // task inside the controller is the only
         // scheduled work (FL-017).
-        .onChange(of: focusedMeta) { _, _ in torHeroFocusMoved() }
-        .onChange(of: focusedEntry) { _, _ in torHeroFocusMoved() }
+        .onChange(of: focusedMeta) { _, new in
+            // FIX-214 (DESIGN-PASS-214 §3.3): the focus
+            // breadcrumb for this surface (see the
+            // JoePhimHome note — the TVB hook was the
+            // only noteFocus caller through 2.1.3).
+            DiagLog.noteFocus(surface: "torrent-home", key: new)
+            torHeroFocusMoved()
+        }
+        .onChange(of: focusedEntry) { _, new in
+            DiagLog.noteFocus(surface: "torrent-home", key: new)
+            torHeroFocusMoved()
+        }
         // v2.1.1 (FIX-6): the rails landing (or the CW
         // entries changing) re-seeds the hero's default
         // title — onAppear fires before the store's
@@ -648,19 +658,16 @@ struct JoeTorrentHome: View {
             ZStack(alignment: .bottomLeading) {
                 JoeCinemaBackdropLayer(controller: torBackdrop)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 485)
+                    // FIX-214 (DESIGN-PASS-214 §1a):
+                    // stage 485 → 560, as on the Phim hero.
+                    .frame(height: 560)
                     .clipped()
-                LinearGradient(stops: [
-                    .init(color: .black.opacity(0.92), location: 0),
-                    .init(color: .black.opacity(0.80), location: 0.45),
-                    .init(color: .black.opacity(theme.scrimFloor), location: 0.65),
-                    .init(color: .black.opacity(0.15), location: 0.82),
-                    .init(color: .black.opacity(0.05), location: 1)
-                ], startPoint: .leading, endPoint: .trailing)
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0.55),
-                    .init(color: theme.bg, location: 1)
-                ], startPoint: .top, endPoint: .bottom)
+                // FIX-214 (FULL-THEME-AUDIT-214 Phần C họ
+                // 1): the design's Ink scrims
+                // (JoeCinemaScrims), shared by all three
+                // heroes.
+                Rectangle().fill(JoeCinemaScrims.left)
+                Rectangle().fill(JoeCinemaScrims.bottom)
                 // FIX-213 (Fault 8): NO top scrim — the
                 // design draws exactly two scrims on this
                 // stage (left + bottom); the third one
@@ -671,7 +678,7 @@ struct JoeTorrentHome: View {
                 // cinemaHeroBlock in JoePhimHome.swift.
                 torHeroText(resolved)
             }
-            .frame(height: 485)
+            .frame(height: 560)
             // FIX-213 (Fault 7): full-bleed stage, as
             // on the Phim hero — the block bleeds
             // across the shell's 80 pt ambient inset;
@@ -699,8 +706,44 @@ struct JoeTorrentHome: View {
     /// exactly.
     private func torHeroText(_ resolved: TorHeroResolved) -> some View {
         let item = resolved.item
+        // FIX-214 (DESIGN-PASS-214 §1a): the measured
+        // 394 text-zone budget, as on the Phim hero —
+        // the synopsis is the only compressible row.
+        let titleLines = min(2, JoeHeroMeasure.lines(
+            of: item.title,
+            postScriptName: "BricolageGrotesque-Medium",
+            size: 72, width: 850))
+        var synopsisLimit = item.synopsis.isEmpty ? 0
+            : min(2, JoeHeroMeasure.lines(
+                of: item.synopsis, postScriptName: "Outfit-Regular",
+                size: 20, width: 665))
+        func torBlockHeight() -> CGFloat {
+            var h: CGFloat = 72
+            h += JoeHeroMeasure.lineHeight(
+                postScriptName: "Outfit-Medium", size: 15)
+            h += 12 + JoeHeroMeasure.lineHeight(
+                postScriptName: "BricolageGrotesque-Medium",
+                size: 72) * CGFloat(titleLines)
+            if !item.meta.isEmpty {
+                h += 12 + JoeHeroMeasure.lineHeight(
+                    postScriptName: "Outfit-Regular", size: 20)
+            }
+            if synopsisLimit > 0 {
+                h += 10 + JoeHeroMeasure.lineHeight(
+                    postScriptName: "Outfit-Regular", size: 20)
+                    * CGFloat(synopsisLimit)
+                    + 10 * CGFloat(synopsisLimit - 1)
+            }
+            h += 16 + 55
+            return h
+        }
+        while torBlockHeight() > 394 && synopsisLimit > 0 {
+            synopsisLimit -= 1
+        }
         return VStack(alignment: .leading, spacing: 0) {
-            Text("THƯ VIỆN TORRENT CỦA BẠN / TORRENT")
+            // FIX-214 (FULL-THEME-AUDIT-214 B5): the
+            // drawn eyebrow ends "· ĐANG CHỌN".
+            Text("THƯ VIỆN TORRENT CỦA BẠN / TORRENT · ĐANG CHỌN")
                 .font(JoePCType.outfit(15, weight: .medium))
                 .tracking(3.6)
                 .foregroundStyle(theme.heroMeta)
@@ -712,21 +755,20 @@ struct JoeTorrentHome: View {
                 .lineLimit(2)
                 .padding(.top, 12)
             if !item.meta.isEmpty {
-                Text(item.meta)
-                    .font(JoePCType.outfit(20))
-                    .foregroundStyle(theme.heroMeta)
-                    .lineLimit(1)
+                // FIX-214: ivory meta line, only the ★
+                // celadon (JoeCinemaMetaText).
+                JoeCinemaMetaText(meta: item.meta)
                     .padding(.top, 12)
             }
-            if !item.synopsis.isEmpty {
+            if synopsisLimit > 0 {
                 Text(item.synopsis)
-                    .font(JoePCType.outfit(18))
+                    // FIX-214: 20/400, spacing 10, clamp =
+                    // the measured budget limit, max 665.
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.text.opacity(0.92))
-                    // FIX-12 / R7 C-F1: spec synopsis is
-                    // 18/400 at line 1.5 → 9 pt extra.
-                    .lineSpacing(9)
-                    .lineLimit(2)
-                    .frame(maxWidth: 850, alignment: .leading)
+                    .lineSpacing(10)
+                    .lineLimit(synopsisLimit)
+                    .frame(maxWidth: 665, alignment: .leading)
                     .padding(.top, 10)
             }
             HStack(spacing: 16) {
@@ -755,7 +797,9 @@ struct JoeTorrentHome: View {
         // (many-rail spec: hero x94, w850).
         .padding(.leading, 94)
         .padding(.vertical, 36)
-        .frame(maxWidth: 900, alignment: .leading)
+        // FIX-214: 94 + 850 = 944, the drawn content
+        // width (the B2 family fix).
+        .frame(maxWidth: 944, alignment: .leading)
     }
 
     /// The hero's right-side tagline block (v2.1.1,
@@ -764,20 +808,22 @@ struct JoeTorrentHome: View {
     /// line with THIS home's real visible rail count
     /// (pcTorVisibleRailTitles — the strip's own list).
     private var torHeroTagline: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            Text("Một buổi tối. Một thế giới khác.")
+        // FIX-214 (FULL-THEME-AUDIT-214 B5): the drawn
+        // copy — "Phim đang được chọn" over
+        // "<TITLE> · <N> DÃY PHIM"; the invented lines
+        // are removed, as on the other two heroes.
+        let heroTitle = (torHeroDisplayResolved()?.item.title
+                         ?? "").uppercased()
+        return VStack(alignment: .trailing, spacing: 8) {
+            Text("Phim đang được chọn")
                 .font(JoePCType.editorial(28, italic: true))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
-            HStack(spacing: 10) {
-                Text("\(pcTorVisibleRailTitles.count) DÃY PHIM")
-                Text("↓")
-                Text("TIẾP TỤC KHÁM PHÁ")
-            }
-            .font(JoePCType.outfit(14, weight: .medium))
-            .tracking(3)
-            .foregroundStyle(theme.heroMeta)
-            .lineLimit(1)
+            Text("\(heroTitle) · \(pcTorVisibleRailTitles.count) DÃY PHIM")
+                .font(JoePCType.outfit(14, weight: .medium))
+                .tracking(3)
+                .foregroundStyle(theme.heroMeta)
+                .lineLimit(1)
         }
     }
 
@@ -1831,6 +1877,11 @@ struct JoeTorrentDetail: View {
                             .focusSection()
                     }
                     .id("joeTorDetailTopPC")
+                    // FIX-214 (FULL-THEME-AUDIT-214 B12):
+                    // the detail text frame is x94 — this
+                    // body carried no horizontal padding of
+                    // its own and stood at the ambient 80.
+                    .padding(.horizontal, 94)
                     .padding(.vertical, 10)
                 }
                 .onChange(of: topScrollSignal) { _, _ in
@@ -1860,6 +1911,14 @@ struct JoeTorrentDetail: View {
                 .tracking(-3)
                 .foregroundStyle(theme.text)
                 .lineLimit(3)
+                // FIX-214 (Finding 16 guard, noted in
+                // FULL-THEME-AUDIT-214 B12): the title
+                // may use the whole x94 text frame
+                // (1920 − 94 − 94 = 1732) but never
+                // beyond it, and a long title shrinks
+                // instead of clipping mid-glyph.
+                .frame(maxWidth: 1732, alignment: .leading)
+                .minimumScaleFactor(0.5)
                 .padding(.top, 16)
             if !meta.year.isEmpty {
                 Text(meta.year)
@@ -1915,7 +1974,11 @@ struct JoeTorrentDetail: View {
         VStack(alignment: .leading, spacing: 14) {
             Divider()
             Text("Chọn nguồn phát")
-                .font(JoePCType.display(34))
+                // FIX-214: the unified source-heading
+                // decision (see pcSourceBlock in
+                // JoeMovieDetail.swift) — outfit(28,
+                // .semibold) on all three details.
+                .font(JoePCType.outfit(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .padding(.top, 8)
             if loadingStreams {
@@ -1998,10 +2061,14 @@ struct JoeTorrentDetail: View {
             // JoeDesignRing) — this row renders only under
             // Private Cinema, so the celadon outset outline
             // and the #304039DF focused face are its dress.
+            // FIX-214 (FULL-THEME-AUDIT-214 A3): the
+            // Geometry radius for source rows is 7, not
+            // the Settings-field rField 12 this row
+            // borrowed.
             .background(JoeSourceRowFace(
-                shape: RoundedRectangle(cornerRadius: theme.rField),
+                shape: RoundedRectangle(cornerRadius: 7),
                 restFill: theme.surface2))
-            .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
+            .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: 7)))
         }
         .joeCardButton()
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
@@ -2338,16 +2405,20 @@ struct JoeTorrentDetail: View {
     /// khung chứ không phải khung dài khung ngắn"): the
     /// stream rows form a VERTICALLY STACKED list, so
     /// every bar in the list takes ONE uniform width —
-    /// estimated to fit the longest realistic compact
-    /// line (number + dot + provider · quality · size:
-    /// "Real-Debrid · 1080p · 18,4 GB" class ≈ 29
-    /// characters at Outfit 25 semibold, plus number,
-    /// dot, gaps and the row's horizontal padding, with
-    /// headroom) — never a per-bar hugged width (the
-    /// ragged column was the named fault) and never the
-    /// old full-width stretch. Both row constructions
-    /// (streamRow + cinemaStreamRow) share this width.
-    static let streamBarWidth: CGFloat = 560
+    /// never a per-bar hugged width (the ragged column
+    /// was the named fault) and never the old full-width
+    /// stretch. Both row constructions (streamRow +
+    /// cinemaStreamRow) share this width.
+    /// FIX-214 (DESIGN-PASS-214 §1f): 560 → 440. The 560
+    /// estimate priced a label alphabet the app never
+    /// renders ("Real-Debrid · …" ≈29 chars); the real
+    /// grammar's longest line is "RD+ · 1080p · 102.4
+    /// GB" = 22 chars ≈ 397 pt with the row furniture —
+    /// 440 is that line + ≈43 headroom, PROVIDED the
+    /// provider token stays inside the short-form
+    /// alphabet (the streamProviderShort fallback cap
+    /// below is the companion rule that keeps it true).
+    static let streamBarWidth: CGFloat = 440
 
     private func streamRow(_ stream: TorStream,
                            number: Int) -> some View {
@@ -2409,11 +2480,17 @@ struct JoeTorrentDetail: View {
             // every other theme the values above, unchanged
             // (JoeSourceRowFace restFill / JoeDesignRing's
             // JoeFocusRing leg).
+            // FIX-214 (FULL-THEME-AUDIT-214 A3): under
+            // Private Cinema the source-row radius is
+            // the Geometry 7 (see cinemaStreamRow);
+            // every other theme keeps theme.rField.
             .background(JoeSourceRowFace(
-                shape: RoundedRectangle(cornerRadius: theme.rField),
+                shape: RoundedRectangle(cornerRadius: theme.id == .privateCinema
+                                        ? 7 : theme.rField),
                 restFill: theme.id == .ultra
                     ? Color.white.opacity(0.16) : theme.surface2))
-            .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: theme.rField)))
+            .overlay(JoeDesignRing(shape: RoundedRectangle(cornerRadius: theme.id == .privateCinema
+                                                           ? 7 : theme.rField)))
         }
         .joeCardButton()
         .focused($focusedRow, equals: "st|" + stream.id.uuidString)
@@ -2448,7 +2525,15 @@ struct JoeTorrentDetail: View {
             return String(label[label.index(after: label.startIndex)..<close])
         }
         if s.gateway == "MF" { return "MF" }
-        return label.split(separator: " ").first.map(String.init) ?? label
+        // FIX-214 (DESIGN-PASS-214 §1f, companion rule):
+        // the unbracketed fallback is capped to the
+        // short-form alphabet (≤3 chars, like TB+/RD+/
+        // PM+/MF) — an arbitrary addon label's first
+        // word was the one path that could blow the
+        // 440 bar's arithmetic (an uncapped
+        // "Real-Debrid · …" line measures ≈501).
+        let word = label.split(separator: " ").first.map(String.init) ?? label
+        return word.count <= 3 ? word : String(word.prefix(3))
     }
 
     /// FIX-213: the ONE quality token the compact row

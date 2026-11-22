@@ -288,7 +288,11 @@ struct JoeYtDetail: View {
                         episodes(series)
                     }
                     .id("joeYtDetailTop")
-                    .padding(.horizontal, 80)
+                    // FIX-214 (FULL-THEME-AUDIT-214 B11):
+                    // under Private Cinema the detail text
+                    // frame is x94 (the B10 family fix);
+                    // every other theme keeps its 80.
+                    .padding(.horizontal, theme.id == .privateCinema ? 94 : 80)
                     .padding(.vertical, 60)
                 }
                 .onChange(of: topScrollSignal) {
@@ -615,20 +619,23 @@ struct JoeYtDetail: View {
                 JoeChipLabel(title: "YouTube", selected: false)
             }
             .padding(.top, 16)
+            // FIX-214 (FULL-THEME-AUDIT-214 B11): the
+            // meta family is the chain detail's 20/400 —
+            // the three stacked 25 pt lines become 20,
+            // and the views + measured-quality lines
+            // merge into ONE row (both are real data;
+            // the quality line is this screen's own
+            // furniture, kept per the audit).
             Text("\(series.channelDisplay) · \(series.eps.count) tập")
-                .font(JoePCType.outfit(25))
+                .font(JoePCType.outfit(20))
                 .foregroundStyle(theme.heroMeta)
                 .padding(.top, 12)
-            if let views = series.views {
-                Text("\(views.formatted()) lượt xem trên YouTube")
-                    .font(JoePCType.outfit(25))
+            if series.views != nil
+                || JoeYtQualityMap.badgeText(pid: series.pid) != nil {
+                Text(ytMetaSecondLine(series))
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.heroMeta)
-                    .padding(.top, 6)
-            }
-            if let badge = JoeYtQualityMap.badgeText(pid: series.pid) {
-                Text("Chất lượng cao nhất đã đo trên máy này: \(badge)")
-                    .font(JoePCType.outfit(25))
-                    .foregroundStyle(theme.heroMeta)
+                    .lineLimit(1)
                     .padding(.top, 6)
             }
         }
@@ -643,11 +650,29 @@ struct JoeYtDetail: View {
     /// not server entries, so the chips ARE the honest
     /// aggregation unit (the chain detail's numbered cards
     /// dress ITS server list, a different data shape).
+    /// FIX-214: the merged second meta line — views and
+    /// the measured-quality badge, each present only
+    /// when its data exists (see cinemaHeader).
+    private func ytMetaSecondLine(_ series: JoeYtSeries) -> String {
+        var parts: [String] = []
+        if let views = series.views {
+            parts.append("\(views.formatted()) lượt xem trên YouTube")
+        }
+        if let badge = JoeYtQualityMap.badgeText(pid: series.pid) {
+            parts.append("Chất lượng cao nhất đã đo trên máy này: \(badge)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private func cinemaSourceRow(_ series: JoeYtSeries) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Divider()
             Text("Chọn nguồn phát")
-                .font(JoePCType.display(34))
+                // FIX-214: the unified source-heading
+                // decision (see pcSourceBlock in
+                // JoeMovieDetail.swift) — outfit(28,
+                // .semibold) on all three details.
+                .font(JoePCType.outfit(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .padding(.top, 8)
             sourceChips(series)

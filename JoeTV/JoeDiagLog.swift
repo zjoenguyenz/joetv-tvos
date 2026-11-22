@@ -172,16 +172,53 @@ enum DiagLog {
     private static let stallThresholdSeconds = 0.25
     private static let stallProbeIntervalSeconds = 0.5
 
+    /// FIX-214 (DESIGN-PASS-214 §3.3): [focus] writes
+    /// hop to this serial queue — the breadcrumb must
+    /// never put a synchronous file write on the focus
+    /// path itself (2.1.3's instrumentation did, on the
+    /// TVB home: a minor but real contributor sitting on
+    /// the exact path it was measuring). The context
+    /// SET stays synchronous under the lock (cheap, and
+    /// the next [stall] line must see the latest step);
+    /// only the file append is deferred.
+    private static let focusWriteQueue =
+        DispatchQueue(label: "joetv.diaglog.focuswrite")
+
     /// The focus-step breadcrumb: records the context
     /// for the next [stall] line and writes one [focus]
-    /// line. Called from the TVB home's card-focus hook
-    /// in this pass (JoeTVB.swift, pcHome).
+    /// line. Callers (FIX-214): the TVB home's card-focus
+    /// hook (JoeTVB.swift), the Phim/Home core's focus
+    /// hooks and the Torrent home's focus hooks
+    /// (JoePhimHome.swift / JoeTorrent.swift) — through
+    /// 2.1.3 the TVB hook was the ONLY caller, so whole
+    /// surfaces produced stalls labelled focus=none.
     static func noteFocus(surface: String, key: String?) {
         let context = "\(surface)|\(key ?? "nil")"
         lock.lock()
         lastFocusContext = context
         lock.unlock()
-        write("focus", "step \(context)")
+        focusWriteQueue.async {
+            write("focus", "step \(context)")
+        }
+    }
+
+    /// FIX-214 (DESIGN-PASS-214 §3.3): the section
+    /// breadcrumb — the stall context RESETS at every
+    /// section boundary and a [section] line marks the
+    /// crossing. Through 2.1.3 the context was sticky
+    /// for the whole session (set by the TVB hook, never
+    /// cleared), so log 17's stalls carried a "tvb-home"
+    /// label long after the owner had left that home,
+    /// and 16 of its 42 stalls read focus=none. Called
+    /// from the shell's section-change consumer
+    /// (JoeTVApp.swift).
+    static func noteSection(_ section: String) {
+        lock.lock()
+        lastFocusContext = "section:\(section)"
+        lock.unlock()
+        focusWriteQueue.async {
+            write("section", section)
+        }
     }
 
     /// Arm the stall heartbeat (once per process).

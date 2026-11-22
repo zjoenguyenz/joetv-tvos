@@ -640,7 +640,8 @@ enum JoeYtJS {
 /// mirror that makes the one-time sign-in persist on a
 /// platform whose web store may drop it between launches
 /// (design §3.1/§3.3). Persistence is engineered here, not
-/// assumed: persistent store + mirror in app storage +
+/// assumed: persistent store + mirror in UserDefaults
+/// (FIX-214 — see mirrorDefaultsKey) +
 /// restore-before-load.
 @MainActor
 final class JoeYtSession: ObservableObject {
@@ -660,12 +661,19 @@ final class JoeYtSession: ObservableObject {
         var expires: Date?
     }
 
-    private static var mirrorURL: URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("joetv-yt-mirror.json")
-    }
+    /// FIX-214 (Fault 10 / FL-421, leader decision
+    /// 2026-11-22): the mirror lives in UserDefaults,
+    /// NOT in a file. The old Application Support file
+    /// could never be created by the tvOS sandbox, so
+    /// the mirror had NEVER persisted; and the Caches
+    /// home the other two writers moved to is
+    /// system-purgeable — a cache purge must never sign
+    /// the owner out. UserDefaults is the app's own
+    /// non-purgeable store, and the payload is the same
+    /// JSON cookie-record array the file carried. Only
+    /// the cookie COUNT reaches the diagnostic log —
+    /// never a value (§3.4).
+    private static let mirrorDefaultsKey = "joetv.yt.sessionMirror.v1"
 
     /// Presence-only re-read of the live store. A fresh
     /// getAllCookies round-trip IS the re-check — the Sony
@@ -689,7 +697,9 @@ final class JoeYtSession: ObservableObject {
     }
 
     /// Copies the live YouTube/Google cookies into the app's
-    /// own mirror file (design §3.3 item 2). Called when the
+    /// own UserDefaults mirror (design §3.3 item 2; FIX-214:
+    /// was a file in Application Support — see
+    /// mirrorDefaultsKey). Called when the
     /// door closes signed-in and when a members-tier play
     /// first reaches picture. Only the cookie COUNT reaches
     /// the diagnostic log — never a value (§3.4).
@@ -703,22 +713,20 @@ final class JoeYtSession: ObservableObject {
             }
         guard records.contains(where: { $0.name == "SAPISID" }) else { return }
         if let data = try? JSONEncoder().encode(records) {
-            // FAULT 10 (2026-11-22): same missing-directory
-            // trap as the TVB cache — urls(for:) never creates
-            // Application Support, so ensure it before writing
-            // or the session mirror silently never persists on
-            // a fresh install and restoreFromMirror has nothing
-            // to restore.
-            try? FileManager.default.createDirectory(
-                at: Self.mirrorURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
-            try? data.write(to: Self.mirrorURL, options: .atomic)
-            DiagLog.write("YT", "session mirror saved cookies=\(records.count)")
+            // FIX-214 (Fault 10): the mirror is a
+            // UserDefaults value now (see
+            // mirrorDefaultsKey) — the file write it
+            // replaces targeted a directory the tvOS
+            // sandbox refuses to create, so it silently
+            // never landed and restoreFromMirror never
+            // had anything to restore.
+            UserDefaults.standard.set(data, forKey: Self.mirrorDefaultsKey)
+            DiagLog.write("YT", "session mirror saved cookies=\(records.count) store=userdefaults")
         }
     }
 
     private func restoreFromMirror() async {
-        guard let data = try? Data(contentsOf: Self.mirrorURL),
+        guard let data = UserDefaults.standard.data(forKey: Self.mirrorDefaultsKey),
               let records = try? JSONDecoder().decode([CookieRecord].self,
                                                       from: data),
               !records.isEmpty else { return }
@@ -726,7 +734,7 @@ final class JoeYtSession: ObservableObject {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             JoeWebBridge.restoreCookies(dicts) { cont.resume() }
         }
-        DiagLog.write("YT", "session mirror restored cookies=\(records.count)")
+        DiagLog.write("YT", "session mirror restored cookies=\(records.count) store=userdefaults")
     }
 
     // MARK: Bridge wrappers

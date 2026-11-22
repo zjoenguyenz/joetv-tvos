@@ -15,7 +15,7 @@ import SwiftUI
 /// the mark button uses the same WatchStore / FollowStore
 /// mechanisms, via the same stores the core used.
 struct JoeHomeTVBFocusHero: View {
-    let resolved: JoePhimHomeCore.CinemaHeroResolved
+    let resolved: CinemaHeroResolved
     /// The per-title TVB eyebrow line (RECALC-SPEC §3.2:
     /// "TVB · <the title's own genre line>"), computed by
     /// the core — which owns the catalogue map — from the
@@ -25,7 +25,7 @@ struct JoeHomeTVBFocusHero: View {
     let eyebrowLine: String
     var heroPlayFocused: FocusState<Bool>.Binding
     var heroInfoFocused: FocusState<Bool>.Binding
-    let openTarget: (JoePhimHomeCore.CinemaHeroTarget) -> Void
+    let openTarget: (CinemaHeroTarget) -> Void
     @EnvironmentObject private var watch: WatchStore
     @ObservedObject private var followStore = FollowStore.shared
     @ObservedObject private var ytStore = JoeYtStore.shared
@@ -33,6 +33,19 @@ struct JoeHomeTVBFocusHero: View {
 
     var body: some View {
         let item = resolved.item
+        // FIX-214 (DESIGN-PASS-214 §1a, the HomeTVBFocus
+        // form's own budget): the title renders at 78
+        // for a one-line title; a title that MEASURES
+        // two lines (the bundled Bricolage at 78 in the
+        // drawn 850 content width) renders at 68
+        // instead, and the episode row's note line
+        // hides — the meter and the "Tập n / N" line
+        // always stay. Worst legal block 428 of the
+        // form's own 600 stage (cinemaHeroBlock).
+        let titleTwoLines = JoeHeroMeasure.lines(
+            of: item.title,
+            postScriptName: "BricolageGrotesque-Medium",
+            size: 78, width: 850) >= 2
         return VStack(alignment: .leading, spacing: 0) {
             Text(eyebrowLine)
                 .font(JoePCType.outfit(15, weight: .medium))
@@ -40,28 +53,70 @@ struct JoeHomeTVBFocusHero: View {
                 .foregroundStyle(theme.heroMeta)
                 .lineLimit(1)
             Text(item.title)
-                .font(JoePCType.display(78))
+                .font(JoePCType.display(titleTwoLines ? 68 : 78))
                 .tracking(-4)
                 .foregroundStyle(theme.text)
                 .lineLimit(2)
                 .padding(.top, 12)
             cinemaHeroMetaRow(resolved)
             if case .tvbEntry(let entry) = resolved.target {
-                cinemaHeroEpisodeRow(entry)
+                cinemaHeroEpisodeRow(entry, showNote: !titleTwoLines)
             }
             cinemaHeroActions(resolved)
             .padding(.top, 16)
+            cinemaHeroStateStrip(resolved.target)
         }
         .padding(.leading, 94)
         .padding(.vertical, 36)
-        .frame(maxWidth: 900, alignment: .leading)
+        // FIX-214: 94 + 850 = 944, the drawn content
+        // width (the movie form's B2 fix, same family).
+        .frame(maxWidth: 944, alignment: .leading)
+    }
+
+    /// FIX-214 (FULL-THEME-AUDIT-214 B2): the form's
+    /// state strip — MISSING from the shipped form.
+    /// Under the actions: "TVB HOME" at the left of the
+    /// text zone, the target's REAL mark state at the
+    /// right, read from the same stores the mark button
+    /// toggles (WatchStore favourite for an entry,
+    /// FollowStore for a catalogue title). The drawing's
+    /// "2 TỰA" is the designer's two-title fixture
+    /// count, not app content — it is not rendered.
+    /// (Strip typography was not separately measured in
+    /// the audit; it is set in the form's eyebrow family,
+    /// Outfit 15 — recorded in SWEEP-VERIFY-214.)
+    @ViewBuilder
+    private func cinemaHeroStateStrip(_ target: CinemaHeroTarget) -> some View {
+        let marked: Bool = {
+            switch target {
+            case .tvbEntry(let entry):
+                return watch.isFavorite(key: entry.key)
+            case .tvb(let title):
+                if let route = title.routeTarget {
+                    return followStore.isFollowing(provider: route.provider,
+                                                   slug: route.slug)
+                }
+                return false
+            default:
+                return false
+            }
+        }()
+        HStack {
+            Text("TVB HOME")
+            Spacer()
+            Text(marked ? "Đã đánh dấu tựa" : "Chưa đánh dấu tựa")
+        }
+        .font(JoePCType.outfit(15))
+        .foregroundStyle(theme.meta)
+        .lineLimit(1)
+        .padding(.top, 20)
     }
 
     /// The hero's action set (HomeTVBFocus form): the
     /// drawing's EPISODE-FIRST set, moved verbatim from
     /// the TVB branch of the core's cinemaHeroActions.
     @ViewBuilder
-    private func cinemaHeroActions(_ resolved: JoePhimHomeCore.CinemaHeroResolved) -> some View {
+    private func cinemaHeroActions(_ resolved: CinemaHeroResolved) -> some View {
         HStack(spacing: 16) {
             Button {
                 openTarget(resolved.target)
@@ -94,7 +149,8 @@ struct JoeHomeTVBFocusHero: View {
     /// (the filmography precedent): no duration → no
     /// meter or time; no catalogue match → no total.
     @ViewBuilder
-    private func cinemaHeroEpisodeRow(_ entry: WatchStore.Entry) -> some View {
+    private func cinemaHeroEpisodeRow(_ entry: WatchStore.Entry,
+                                      showNote: Bool) -> some View {
         let epNum = WatchStore.episodeNumber(of: entry)
         let total = ytStore.snapshot?.byPid[entry.slug]?.eps.count ?? 0
         if epNum > 0 || !entry.epLabel.isEmpty || entry.dur > 0 {
@@ -121,11 +177,18 @@ struct JoeHomeTVBFocusHero: View {
                 .font(JoePCType.outfit(17))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
-                Text("Chọn tập trước khi chọn nguồn")
-                    .font(JoePCType.outfit(15))
-                    .foregroundStyle(theme.meta)
-                    .lineLimit(1)
-                    .padding(.top, 10)
+                // FIX-214: the note line is the budget's
+                // compressible row in this form — it
+                // hides when the title takes two lines
+                // (see body); the meter + "Tập n / N"
+                // line above never hide.
+                if showNote {
+                    Text("Chọn tập trước khi chọn nguồn")
+                        .font(JoePCType.outfit(15))
+                        .foregroundStyle(theme.meta)
+                        .lineLimit(1)
+                        .padding(.top, 10)
+                }
             }
             .padding(.top, 15)
         }
@@ -155,15 +218,20 @@ struct JoeHomeTVBFocusHero: View {
     /// baseline). A title with neither renders no
     /// third action — never a dead button.
     @ViewBuilder
-    private func cinemaHeroMarkButton(_ target: JoePhimHomeCore.CinemaHeroTarget) -> some View {
+    private func cinemaHeroMarkButton(_ target: CinemaHeroTarget) -> some View {
         switch target {
         case .tvbEntry(let entry):
             Button {
                 _ = watch.toggleFavorite(entry)
             } label: {
+                // FIX-214 (FULL-THEME-AUDIT-214 B2): the
+                // icon follows the state — bookmark
+                // unmarked, check marked (the shipped
+                // button showed ✓ in both states).
                 JoeSecondaryLabel(
                     title: watch.isFavorite(key: entry.key) ? "Đã đánh dấu" : "Đánh dấu tựa",
-                    systemImage: "checkmark")
+                    systemImage: watch.isFavorite(key: entry.key)
+                        ? "checkmark" : "bookmark")
             }
             .joeCardButton()
         case .tvb(let title):
@@ -174,11 +242,15 @@ struct JoeHomeTVBFocusHero: View {
                         title: title.titleVi, poster: title.posterURLString,
                         currentEpisodes: title.episodeTotalTmdb)
                 } label: {
+                    // FIX-214: icon follows the state, as
+                    // in the entry arm above.
                     JoeSecondaryLabel(
                         title: followStore.isFollowing(provider: route.provider,
                                                        slug: route.slug)
                             ? "Đã đánh dấu" : "Đánh dấu tựa",
-                        systemImage: "checkmark")
+                        systemImage: followStore.isFollowing(provider: route.provider,
+                                                             slug: route.slug)
+                            ? "checkmark" : "bookmark")
                 }
                 .joeCardButton()
             }
@@ -188,7 +260,7 @@ struct JoeHomeTVBFocusHero: View {
     }
 
     @ViewBuilder
-    private func cinemaHeroMetaRow(_ resolved: JoePhimHomeCore.CinemaHeroResolved) -> some View {
+    private func cinemaHeroMetaRow(_ resolved: CinemaHeroResolved) -> some View {
         // v2.1.1 (WS-I): the meta line is the resolved
         // item's own (year · ★ · runtime for a chain
         // title via cinemaHeroMetaLine, the strip's meta
@@ -205,11 +277,11 @@ struct JoeHomeTVBFocusHero: View {
         if !resolved.item.meta.isEmpty || !quality.isEmpty {
             HStack(alignment: .center, spacing: 14) {
                 if !resolved.item.meta.isEmpty {
-                    Text(resolved.item.meta)
-                        // FIX-4 / C6: design meta 20/400.
-                        .font(JoePCType.outfit(20))
-                        .foregroundStyle(theme.heroMeta)
-                        .lineLimit(1)
+                    // FIX-214 (FULL-THEME-AUDIT-214 B2):
+                    // ivory line, only the ★ celadon —
+                    // the shared JoeCinemaMetaText, as in
+                    // the movie form.
+                    JoeCinemaMetaText(meta: resolved.item.meta)
                 }
                 if !quality.isEmpty {
                     Text(quality)

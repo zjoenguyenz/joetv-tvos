@@ -9,11 +9,12 @@ import Foundation
 // hosted on the owner's public data repo, beside the TVB
 // catalogue — the same self-pull pattern as tvb-yt.json:
 // fetch at use, keep the last-good copy cached on device
-// (the JoeYtStore cache discipline: Application Support,
-// atomic write, a failed fetch falls back to the cache),
-// and fail OPEN — no cache, a failed fetch or a malformed
-// file yields no rails at all and the home renders
-// exactly as it did before this file existed.
+// (the JoeYtStore cache discipline: the shared Caches
+// home, JoeStorage — FIX-214; atomic write, a failed
+// fetch falls back to the cache), and fail OPEN — no
+// cache, a failed fetch or a malformed file yields no
+// rails at all and the home renders exactly as it did
+// before this file existed.
 //
 // File schema (built against exactly; every field is
 // read tolerantly — a missing optional field becomes
@@ -56,20 +57,122 @@ enum JoeTrendingFile {
 
     // MARK: Cache (the JoeYtStore idiom)
 
+    /// FIX-214 (Fault 10 / FL-421): the cache lives in
+    /// the shared Caches home (JoeStorage) — the old
+    /// Application Support path could never be created
+    /// by the tvOS sandbox, so the last-good copy
+    /// silently never landed on a fresh install.
     private static var cacheURL: URL {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("trending_cache.json")
+        JoeStorage.fileURL("trending_cache.json")
     }
+
+    // MARK: Single-flight + last-good (FIX-214, lag package)
+    //
+    // DESIGN-PASS-214 §3.2: through 2.1.3 this loader
+    // was network-first with NO coalescing and a dead
+    // disk fallback, called by THREE consumers
+    // (TorrentStore, PhimStore, the Top Shelf writer) —
+    // concurrent section enters ran concurrent full
+    // fetches, and one load's failure path could
+    // publish EMPTY rails over rails an earlier load
+    // had landed (DiagLog 17: launch read 96 items,
+    // the 14:51:59 re-read returned rails=0 inside the
+    // worst stall cluster). Now: concurrent callers
+    // join ONE in-flight fetch; a fetch that comes
+    // back empty-handed NEVER replaces the in-process
+    // last-good rails; and every resolution logs its
+    // source + generation so the next log shows which
+    // path fed the homes.
+
+    /// One load's resolution: the rails the caller
+    /// publishes, where they came from ("fetched" /
+    /// "stillCurrent" / "none") and the loader's
+    /// generation after the resolution.
+    fileprivate struct Outcome: Sendable {
+        var rails: [JoeTrendingRail]
+        var source: String
+        var generation: Int
+    }
+
+    private actor Flight {
+        private(set) var lastGood: [JoeTrendingRail] = []
+        private(set) var generation = 0
+        private var inFlight: Task<Outcome, Never>?
+
+        /// Vend the shared fetch task: the first caller
+        /// creates it, concurrent callers join the SAME
+        /// task (and therefore the same Outcome).
+        func begin(_ make: @Sendable () -> Task<Outcome, Never>)
+            -> Task<Outcome, Never> {
+            if let inFlight { return inFlight }
+            let task = make()
+            inFlight = task
+            return task
+        }
+
+        /// Close out the in-flight fetch — called ONLY
+        /// from inside that task's own body, exactly
+        /// once per fetch. A fresh non-empty result
+        /// becomes the last-good copy and bumps the
+        /// generation; a disk-cache result is adopted
+        /// as the in-process last-good when none exists;
+        /// an empty-handed fetch changes nothing, so a
+        /// superseded or failed generation can never
+        /// replace good rails with empty ones. The one
+        /// [TOR] resolution line per fetch is written
+        /// here so joined callers do not duplicate it.
+        func finish(_ fetched: [JoeTrendingRail], fresh: Bool) -> Outcome {
+            inFlight = nil
+            let outcome: Outcome
+            if fresh, !fetched.isEmpty {
+                lastGood = fetched
+                generation += 1
+                outcome = Outcome(rails: fetched, source: "fetched",
+                                  generation: generation)
+            } else if !fetched.isEmpty {
+                if lastGood.isEmpty { lastGood = fetched }
+                outcome = Outcome(rails: lastGood, source: "stillCurrent",
+                                  generation: generation)
+            } else if !lastGood.isEmpty {
+                outcome = Outcome(rails: lastGood, source: "stillCurrent",
+                                  generation: generation)
+            } else {
+                outcome = Outcome(rails: [], source: "none",
+                                  generation: generation)
+            }
+            DiagLog.write("TOR", "trending file source=\(outcome.source) rails=\(outcome.rails.count) items=\(outcome.rails.reduce(0) { $0 + $1.metas.count }) gen=\(outcome.generation)")
+            return outcome
+        }
+    }
+
+    private static let flight = Flight()
 
     // MARK: Load
 
-    /// Fetch the hosted file; on success the raw bytes
-    /// become the new last-good cache. On any failure the
-    /// cached copy is tried instead. Returns an empty
-    /// array when neither source parses (fail-open).
+    /// Fetch the hosted file (single-flight — see the
+    /// Flight note above); on success the raw bytes
+    /// become the new last-good cache. On any failure
+    /// the cached copy is tried instead, and behind
+    /// that the in-process last-good rails. Returns an
+    /// empty array only when no source has ever
+    /// produced rails (fail-open).
     static func loadRails() async -> [JoeTrendingRail] {
+        let task = await flight.begin {
+            Task {
+                let (rails, fresh) = await Self.fetchRails()
+                return await Self.flight.finish(rails, fresh: fresh)
+            }
+        }
+        return await task.value.rails
+    }
+
+    /// The raw fetch: network first (a parsed result is
+    /// "fresh" and its bytes become the new disk
+    /// cache), then the disk cache. An empty array with
+    /// fresh == false means neither source produced
+    /// rails.
+    private static func fetchRails() async
+        -> (rails: [JoeTrendingRail], fresh: Bool) {
         var request = URLRequest(url: hostedURL)
         request.timeoutInterval = 8
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -78,23 +181,17 @@ enum JoeTrendingFile {
             // Cache the last-good copy for the next launch
             // (atomic, like JoeYtStore's refresh write). A
             // failed write is not a load failure — the
-            // freshly parsed rails still publish.
-            // FAULT 10 (2026-11-22): same missing-directory
-            // trap as the TVB cache — urls(for:) never creates
-            // Application Support, so ensure it before writing
-            // or this write silently never lands on a fresh
-            // install.
-            try? FileManager.default.createDirectory(
-                at: cacheURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
+            // freshly parsed rails still publish. The
+            // directory is JoeStorage's, created by its
+            // resolver before this URL could exist.
             try? data.write(to: cacheURL, options: .atomic)
-            return rails
+            return (rails, true)
         }
         if let cached = try? Data(contentsOf: cacheURL),
            let rails = parse(cached) {
-            return rails
+            return (rails, false)
         }
-        return []
+        return ([], false)
     }
 
     // MARK: Parse

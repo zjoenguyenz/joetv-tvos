@@ -51,6 +51,34 @@ struct TVBCatalog: Codable, Sendable {
     }
 }
 
+/// FIX-214 (DESIGN-PASS-214 §3.2): the decoded bundled
+/// catalogue, latched ONCE per process. Through 2.1.3
+/// loadBundled() decoded the ~2 MB snapshot at EVERY
+/// call — the TVB tab's init, the Phim/Home core's
+/// catalogue task, the actor page, the YT snapshot
+/// build — so every section enter paid the full decode
+/// again, inside the stall clusters log 17 measured.
+/// The store latches the first result (a failed decode
+/// latches too: the bundled file cannot change under a
+/// running process, so a retry could only fail again).
+/// NSLock + nonisolated(unsafe) follow this tree's
+/// standing idiom for process-latched state
+/// (DiagLog / SourceHealth): every access is under the
+/// lock, and TVBCatalog is a Sendable value.
+enum TVBCatalogStore {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var cached: TVBCatalog??
+
+    static func load() -> TVBCatalog? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached { return cached }
+        let loaded = TVBCatalog.loadBundled()
+        cached = loaded
+        return loaded
+    }
+}
+
 struct TVBRails: Codable, Sendable {
     let dangHot: [Int]
     let deCu: [Int]
@@ -331,7 +359,7 @@ enum TVBSnapshotLookup {
         // and the first publisher wins.
         var tmdb: [Int: TVBTitle] = [:]
         var imdb: [String: TVBTitle] = [:]
-        if let catalog = TVBCatalog.loadBundled() {
+        if let catalog = TVBCatalogStore.load() {
             for title in catalog.titles where title.isDisplayed {
                 tmdb[title.tmdbId] = title
                 if let imdbId = title.imdbId, !imdbId.isEmpty {
@@ -569,7 +597,7 @@ struct JoeTVBView: View {
     private func loadCatalog() async {
         guard catalog == nil, !loadFailed else { return }
         let loaded = await Task.detached(priority: .userInitiated) {
-            TVBCatalog.loadBundled()
+            TVBCatalogStore.load()
         }.value
         guard let loaded else {
             loadFailed = true
@@ -994,19 +1022,17 @@ struct JoeTVBView: View {
         ZStack(alignment: .bottomLeading) {
             JoeCinemaBackdropLayer(controller: tvbBackdrop)
                 .frame(maxWidth: .infinity)
-                .frame(height: 485)
+                // FIX-214 (DESIGN-PASS-214 §1a): stage
+                // 485 → 560, as on the Phim hero.
+                .frame(height: 560)
                 .clipped()
-            LinearGradient(stops: [
-                .init(color: .black.opacity(0.92), location: 0),
-                .init(color: .black.opacity(0.80), location: 0.45),
-                .init(color: .black.opacity(theme.scrimFloor), location: 0.65),
-                .init(color: .black.opacity(0.15), location: 0.82),
-                .init(color: .black.opacity(0.05), location: 1)
-            ], startPoint: .leading, endPoint: .trailing)
-            LinearGradient(stops: [
-                .init(color: .clear, location: 0.55),
-                .init(color: theme.bg, location: 1)
-            ], startPoint: .top, endPoint: .bottom)
+            // FIX-214 (FULL-THEME-AUDIT-214 Phần C họ 1):
+            // the design's Ink scrims (JoeCinemaScrims),
+            // shared by all three heroes — the shipped
+            // pair was the same BLACK-gradient family as
+            // the Phim hero's.
+            Rectangle().fill(JoeCinemaScrims.left)
+            Rectangle().fill(JoeCinemaScrims.bottom)
             // FIX-213 (Fault 8): NO top scrim — the
             // design draws exactly two scrims on this
             // stage (left + bottom); the third one that
@@ -1019,7 +1045,7 @@ struct JoeTVBView: View {
                 tvbHeroText(resolved)
             }
         }
-        .frame(height: 485)
+        .frame(height: 560)
         // FIX-213 (Fault 7): full-bleed stage, as on
         // the Phim hero — the block bleeds across the
         // shell's 80 pt ambient inset; the hero text
@@ -1052,12 +1078,49 @@ struct JoeTVBView: View {
     /// JoePhimHome.cinemaHeroText exactly.
     private func tvbHeroText(_ resolved: TVBHeroResolved) -> some View {
         let item = resolved.item
+        // FIX-214 (DESIGN-PASS-214 §1a): the same
+        // measured 394 text-zone budget as the Phim hero
+        // — this form has no origin row, so the synopsis
+        // is the only compressible row (2→1→0).
+        let titleLines = min(2, JoeHeroMeasure.lines(
+            of: item.title,
+            postScriptName: "BricolageGrotesque-Medium",
+            size: 72, width: 850))
+        var synopsisLimit = item.synopsis.isEmpty ? 0
+            : min(2, JoeHeroMeasure.lines(
+                of: item.synopsis, postScriptName: "Outfit-Regular",
+                size: 20, width: 665))
+        func tvbBlockHeight() -> CGFloat {
+            var h: CGFloat = 72
+            h += JoeHeroMeasure.lineHeight(
+                postScriptName: "Outfit-Medium", size: 15)
+            h += 12 + JoeHeroMeasure.lineHeight(
+                postScriptName: "BricolageGrotesque-Medium",
+                size: 72) * CGFloat(titleLines)
+            if !item.meta.isEmpty {
+                h += 12 + JoeHeroMeasure.lineHeight(
+                    postScriptName: "Outfit-Regular", size: 20)
+            }
+            if synopsisLimit > 0 {
+                h += 10 + JoeHeroMeasure.lineHeight(
+                    postScriptName: "Outfit-Regular", size: 20)
+                    * CGFloat(synopsisLimit)
+                    + 10 * CGFloat(synopsisLimit - 1)
+            }
+            h += 16 + 55
+            return h
+        }
+        while tvbBlockHeight() > 394 && synopsisLimit > 0 {
+            synopsisLimit -= 1
+        }
         return VStack(alignment: .leading, spacing: 0) {
             // FIX-8 / C-R4-1: the drawing's STATIC section
             // eyebrow (delivery-joetv-TVBManyRails.png),
             // painted literally — the same pattern as the
             // Torrent hero's static line in torHeroText.
-            Text("MỘT THỜI HỒNG KÔNG / TVB")
+            // FIX-214 (FULL-THEME-AUDIT-214 B4): the drawn
+            // line ends "· ĐANG CHỌN".
+            Text("MỘT THỜI HỒNG KÔNG / TVB · ĐANG CHỌN")
                 .font(JoePCType.outfit(15, weight: .medium))
                 .tracking(3.6)
                 .foregroundStyle(theme.heroMeta)
@@ -1069,21 +1132,21 @@ struct JoeTVBView: View {
                 .lineLimit(2)
                 .padding(.top, 12)
             if !item.meta.isEmpty {
-                Text(item.meta)
-                    .font(JoePCType.outfit(20))
-                    .foregroundStyle(theme.heroMeta)
-                    .lineLimit(1)
+                // FIX-214: ivory meta line, only the ★
+                // celadon (JoeCinemaMetaText).
+                JoeCinemaMetaText(meta: item.meta)
                     .padding(.top, 12)
             }
-            if !item.synopsis.isEmpty {
+            if synopsisLimit > 0 {
                 Text(item.synopsis)
-                    .font(JoePCType.outfit(18))
+                    // FIX-214: 20/400, spacing 10, clamp =
+                    // the measured budget limit, max 665
+                    // (the B2 family values).
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.text.opacity(0.92))
-                    // FIX-12 / R7 C-F1: spec synopsis is
-                    // 18/400 at line 1.5 → 9 pt extra.
-                    .lineSpacing(9)
-                    .lineLimit(2)
-                    .frame(maxWidth: 850, alignment: .leading)
+                    .lineSpacing(10)
+                    .lineLimit(synopsisLimit)
+                    .frame(maxWidth: 665, alignment: .leading)
                     .padding(.top, 10)
             }
             HStack(spacing: 16) {
@@ -1098,7 +1161,10 @@ struct JoeTVBView: View {
                 Button {
                     tvbOpenHeroTarget(resolved.target)
                 } label: {
-                    JoeSecondaryLabel(title: "Thông tin phim",
+                    // FIX-214 (FULL-THEME-AUDIT-214 B4):
+                    // the drawn second action is
+                    // "Thông tin phim bộ".
+                    JoeSecondaryLabel(title: "Thông tin phim bộ",
                                       systemImage: "info.circle")
                 }
                 .joeCardButton()
@@ -1110,9 +1176,12 @@ struct JoeTVBView: View {
         // to the frame's edges (see tvbHeroBlock), so
         // this inset is the TVB design's own hero x93
         // (TVB Home completion spec: hero x93, w850).
+        // FIX-214: the frame is 93 + 850 = 943 (the
+        // shipped 900 starved the content the same way
+        // the Phim hero's did).
         .padding(.leading, 93)
         .padding(.vertical, 36)
-        .frame(maxWidth: 900, alignment: .leading)
+        .frame(maxWidth: 943, alignment: .leading)
     }
 
     /// The hero's right-side tagline block (v2.1.1,
@@ -1121,20 +1190,24 @@ struct JoeTVBView: View {
     /// with THIS home's real visible rail count
     /// (pcVisibleRailTitles — the strip's own list).
     private func tvbHeroTagline(_ catalog: TVBCatalog) -> some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            Text("Một buổi tối. Một thế giới khác.")
+        // FIX-214 (FULL-THEME-AUDIT-214 B4): the drawn
+        // copy — "Phim đang được chọn" over
+        // "<TITLE> · <N> DÃY PHIM" (the displayed hero's
+        // title + this home's real rail count); the
+        // invented lines are removed, as on the Phim
+        // hero.
+        let heroTitle = (tvbHeroDisplayResolved(catalog)?.item.title
+                         ?? "").uppercased()
+        return VStack(alignment: .trailing, spacing: 8) {
+            Text("Phim đang được chọn")
                 .font(JoePCType.editorial(28, italic: true))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
-            HStack(spacing: 10) {
-                Text("\(pcVisibleRailTitles(catalog).count) DÃY PHIM")
-                Text("↓")
-                Text("TIẾP TỤC KHÁM PHÁ")
-            }
-            .font(JoePCType.outfit(14, weight: .medium))
-            .tracking(3)
-            .foregroundStyle(theme.heroMeta)
-            .lineLimit(1)
+            Text("\(heroTitle) · \(pcVisibleRailTitles(catalog).count) DÃY PHIM")
+                .font(JoePCType.outfit(14, weight: .medium))
+                .tracking(3)
+                .foregroundStyle(theme.heroMeta)
+                .lineLimit(1)
         }
     }
 

@@ -102,6 +102,12 @@ final class PhimStore: ObservableObject {
 
     func loadIfNeeded() {
         loadTrendingFileIfNeeded()
+        // FIX-214 (lag package): the TMDB trending
+        // resolution rides the same entry point — it is
+        // store state now, throttled inside
+        // loadTrendingIfNeeded (see the TMDB trending
+        // MARK below).
+        loadTrendingIfNeeded()
         if loading { return }
         if let loadedAt, hasData,
            Date().timeIntervalSince(loadedAt) < 900 { return }
@@ -403,6 +409,186 @@ final class PhimStore: ObservableObject {
             trendingFileInFlight = false
             DiagLog.write("PHIM", "trending file rails=\(trendingFileSpecs.count) items=\(trendingFileSpecs.reduce(0) { $0 + $1.movies.count })")
         }
+    }
+
+    // MARK: - TMDB trending (FIX-214, lag package)
+    //
+    // DESIGN-PASS-214 §3.2: the TMDB trending/week
+    // resolution lived in JoePhimHomeCore as VIEW state
+    // through 2.1.3 — its "already loaded" guard was a
+    // view @State, destroyed with the view at every
+    // section switch, so the pipeline (the TMDB call, a
+    // bounded wait for the catalogue, then up to 8
+    // sequential provider searches) re-ran UNTHROTTLED
+    // on every Phim/Home enter, inside the stall
+    // clusters log 17 measured. It lives on the store
+    // now: attempt-throttled to the same 900 s window
+    // loadTrendingFileIfNeeded uses, and the resolved
+    // rail survives section switches. The resolution
+    // itself is the view's old code verbatim — rungs,
+    // caps and acceptance rules unchanged.
+
+    @Published private(set) var trendingMovies: [Movie] = []
+    private var trendingAttemptedAt: Date?
+    private var trendingInFlight = false
+
+    func loadTrendingIfNeeded() {
+        if trendingInFlight { return }
+        if !trendingMovies.isEmpty { return }
+        if let trendingAttemptedAt,
+           Date().timeIntervalSince(trendingAttemptedAt) < 900 { return }
+        trendingInFlight = true
+        trendingAttemptedAt = Date()
+        Task {
+            await self.loadTrending()
+            self.trendingInFlight = false
+        }
+    }
+
+    /// Resolve TMDB's trending/week chart into PLAYABLE
+    /// catalogue titles only, in TMDB's own order, capped at
+    /// 20. Two rungs:
+    ///   1. a tmdbId map built from EVERY movie list the
+    ///      store already holds (all published rails,
+    ///      genre/country lists included);
+    ///   2. for titles still unmatched, a bounded provider
+    ///      search — at most 8 unmatched titles, providers in
+    ///      Providers.priority order, accepting ONLY a
+    ///      tmdbId match (v2.0.29, item 7: the former
+    ///      normalized-name acceptance bound cards to
+    ///      lookalike films).
+    /// Everything still unmatched is dropped silently.
+    /// Fail-soft end to end: no TMDB key / no network simply
+    /// leaves the rail absent.
+    private func loadTrending() async {
+        let trending = await TMDBClient.trendingWeek()
+        guard !trending.isEmpty else { return }
+        // Cold entry: the catalogue load kicked off by
+        // loadIfNeeded may still be in flight — give it a
+        // bounded chance to land so rung 1 sees the real
+        // catalogue instead of an empty store (15 s worst
+        // case; the store's own deadline is 25 s, and rung 2
+        // covers whatever is still missing afterwards).
+        for step in 0..<75 {
+            if !catalogueIsEmpty { break }
+            // Past a 2 s grace (for the load's `loading`
+            // flag to flip), a non-loading store means the
+            // load ended — stop waiting.
+            if step >= 10 && !loading { break }
+            if Task.isCancelled { return }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let byTmdbId = catalogueByTmdbId()
+        var resolved: [Int: Movie] = [:]
+        var unmatched: [(index: Int, title: JoeTopShelfWriter.TrendingTitle)] = []
+        for (i, t) in trending.enumerated() {
+            // v2.0.29 (item 7): typed key first, bare key
+            // behind it (see catalogueByTmdbId).
+            let hit = t.tmdbId.isEmpty ? nil
+                : (byTmdbId[t.type + "|" + t.tmdbId] ?? byTmdbId[t.tmdbId])
+            if let m = hit,
+               m.tmdbType.isEmpty || m.tmdbType == t.type {
+                resolved[i] = m
+            } else {
+                unmatched.append((index: i, title: t))
+            }
+        }
+        // Rung 2: bounded fallback search (≤ 8 titles).
+        var searches = 0
+        for entry in unmatched {
+            if searches >= 8 { break }
+            searches += 1
+            if let m = await trendingSearchMatch(for: entry.title) {
+                resolved[entry.index] = m
+            }
+        }
+        // TMDB order preserved; dedupe by catalogue identity;
+        // cap 20.
+        var out: [Movie] = []
+        var seen = Set<String>()
+        for i in trending.indices {
+            guard let m = resolved[i], !m.slug.isEmpty,
+                  seen.insert(m.id).inserted else { continue }
+            out.append(m)
+            if out.count >= 20 { break }
+        }
+        trendingMovies = out
+    }
+
+    /// tmdbId → Movie over every list the store holds.
+    /// First carrier wins (lists are visited in rail/priority
+    /// order, merged first); vietnamAll covers the store's
+    /// derived vietnamSeries / vietnamSingle views.
+    /// v2.0.29 (item 7): TMDB's numeric ids are per-type
+    /// namespaces — a movie and a series can share the
+    /// number — so a record that states its type is keyed
+    /// "type|tmdbId" and only a typeless record rides the
+    /// bare key (the JoeActorPage discipline). The lookup
+    /// tries the trending title's typed key first, then the
+    /// bare key.
+    private func catalogueByTmdbId() -> [String: Movie] {
+        var map: [String: Movie] = [:]
+        func add(_ movies: [Movie]) {
+            for m in movies where !m.tmdbId.isEmpty {
+                if !m.tmdbType.isEmpty {
+                    let key = m.tmdbType + "|" + m.tmdbId
+                    if map[key] == nil { map[key] = m }
+                } else if map[m.tmdbId] == nil {
+                    map[m.tmdbId] = m
+                }
+            }
+        }
+        add(merged)
+        add(kkNew)
+        add(f4kNew)
+        add(vsNew)
+        add(tpNew)
+        add(chieuRap)
+        add(vietnamAll)
+        add(kkSeries)
+        add(kkMovies)
+        add(kkAnime)
+        add(f4kMovies)
+        add(vsSeries)
+        add(tpMovies)
+        add(tpSeries)
+        for spec in Self.genreSpec {
+            add(genreLists[spec.slug] ?? [])
+        }
+        for spec in Self.countrySpec {
+            add(countryLists[spec.slug] ?? [])
+        }
+        return map
+    }
+
+    /// One trending title's fallback search across the
+    /// providers (priority order): ONLY a result carrying
+    /// the trending title's own tmdbId (its type agreeing
+    /// when the result states one) is accepted.
+    /// v2.0.29 (item 7): the search used to also accept the
+    /// first result whose normalized name (or origin name)
+    /// equalled the trending title's — but a translated
+    /// title is not an identity: different films share one,
+    /// so the card bound a lookalike and tapping "Có máy
+    /// thời gian" opened "Step Into The Past". The house
+    /// discipline (the franchise strip, the actor page) is
+    /// ID-or-nothing: a title with no ID match drops off
+    /// the rail rather than opening the wrong film.
+    private func trendingSearchMatch(
+        for t: JoeTopShelfWriter.TrendingTitle
+    ) async -> Movie? {
+        guard !t.tmdbId.isEmpty else { return nil }
+        for code in Providers.priority {
+            guard let results = try? await Providers.search(code, keyword: t.title)
+            else { continue }
+            if let byId = results.first(where: {
+                $0.tmdbId == t.tmdbId
+                    && ($0.tmdbType.isEmpty || $0.tmdbType == t.type)
+            }) {
+                return byId
+            }
+        }
+        return nil
     }
 
     /// v2.1.1 (DIAG-2050 §4, step 2): convert one file rail
@@ -983,7 +1169,12 @@ final class TorHomeStore: ObservableObject {
             // One line per load, counts only (never the file
             // URL — DiagLog discipline); a failed load logs
             // rails=0 items=0 and publishes nothing extra.
-            DiagLog.write("TOR", "trending file rails=\(landedRails) items=\(landedItems)")
+            // FIX-214 (DESIGN-PASS-214 §3.2): the line
+            // gains the generation verdict — a superseded
+            // load publishes nothing and logs 0/0 with
+            // stillCurrent=false; the loader's own line
+            // (JoeTrendingFile) carries source + gen.
+            DiagLog.write("TOR", "trending file rails=\(landedRails) items=\(landedItems) stillCurrent=\(stillCurrent)")
         }
         // Genre rails (C-5): fetched CONCURRENTLY and published
         // PER RAIL as each lands, merged over the previously

@@ -139,25 +139,58 @@ struct MovieRoute: Hashable, Sendable {
 /// mutation (1.9.2), so the destructive action's flush is
 /// already done by construction; it dismisses the alert and
 /// exits on the next main-actor turn.
+// MARK: - Hero resolved types (file scope, FIX-214 §1g)
+//
+// The hero's target/resolved atoms, shared by the Phim
+// screen, the Trang chủ screen (JoeHomeScreen.swift) and
+// the HomeTVBFocus hero form (JoeHomeTVBFocus.swift) —
+// data atoms, not a page core: each screen keeps its own
+// composition, state and focus memory.
+
+/// What the PC hero's two actions open for the
+/// currently focused title: EXACTLY the focused
+/// card's own tap mint, per surface (the catalogue
+/// MovieRoute, the TVB routeTarget mint, the torrent
+/// TorRoute, the addon route, the CW/favourite
+/// reopen, the TVB-CW YouTube route, the file-
+/// trending tap resolution). Before any focus, the
+/// featured title's own mint.
+enum CinemaHeroTarget {
+    case movie(Movie, scope: String)
+    case fileTrending(Movie)
+    case tvb(TVBTitle)
+    case tor(TorMeta, base: String)
+    case addon(TorMeta)
+    case movieEntry(WatchStore.Entry, preselect: Bool)
+    case tvbEntry(WatchStore.Entry)
+}
+
+/// A resolved hero: the controller's item (text +
+/// art ladder) and the actions' target.
+struct CinemaHeroResolved {
+    var item: JoeCinemaHeroItem
+    var target: CinemaHeroTarget
+}
+
 /// The Phim screen (RECALC-SPEC §3.3 / R7): a thin screen
-/// struct with its identity fixed to Phim — the shared
-/// core's composition is decided by this fixed identity,
-/// never by reading the live navigation section.
+/// struct over JoePhimHomeCore, which since FIX-214
+/// (DESIGN-PASS-214 §1g) IS the Phim composition itself —
+/// its own struct, its branches resolved to the Phim
+/// arms, exactly as Trang chủ (JoeHomeScreen) is its own
+/// composition in its own file. Neither screen wraps or
+/// shares the other's page core.
 struct JoePhimHome: View {
     var body: some View {
-        JoePhimHomeCore(screen: .phim)
+        JoePhimHomeCore()
     }
 }
 
 struct JoePhimHomeCore: View {
-    /// R7 (RECALC-SPEC §3.1–3.3): this screen's FIXED
-    /// identity, set at init — composition branches read
-    /// `screen`, never the live `nav.section`.
-    let screen: JoeCinemaScreen
-
-    init(screen: JoeCinemaScreen) {
-        self.screen = screen
-    }
+    // FIX-214 (DESIGN-PASS-214 §1g): this struct IS the
+    // Phim screen — no screen identity, no branches (the
+    // pre-fix core served two screens off one `screen`
+    // value; Trang chủ now has its own composition in
+    // JoeHomeScreen.swift).
 
     @EnvironmentObject private var watch: WatchStore
     @EnvironmentObject private var nav: JoeNavigator
@@ -253,12 +286,15 @@ struct JoePhimHomeCore: View {
     /// art and vote average, resolved by the same task.
     @State private var heroLogoURL: URL?
     @State private var heroRating: Double = 0
-    /// IDEA 5: the in-app Trending rail's resolved, PLAYABLE
-    /// movies (TMDB trending/week order, catalogue-matched —
-    /// see loadTrending). Empty until the load lands, and the
-    /// rail renders only when non-empty, so an unmatched
-    /// trending title can never surface as a dead card.
-    @State private var trendingMovies: [Movie] = []
+    /// IDEA 5 → FIX-214 (lag package): the in-app Trending
+    /// rail's resolved, PLAYABLE movies (TMDB trending/week
+    /// order, catalogue-matched) are PhimStore state now
+    /// (JoeStores.swift, `trendingMovies`) — the view @State
+    /// copy died with the view at every section switch and
+    /// re-ran the pipeline unthrottled on every enter. The
+    /// rail renders only when the store's copy is non-empty,
+    /// so an unmatched trending title can never surface as
+    /// a dead card.
     /// v2.1.1 (WS-H): the torrent home's store — a root
     /// environment object (JoeTVApp) — observed ONLY for
     /// the Private Cinema home's torrent-provider rails
@@ -336,12 +372,11 @@ struct JoePhimHomeCore: View {
             attempted = true
             phim.loadIfNeeded()
         }
-        // IDEA 5: load the Trending rail ONCE per home
-        // appearance (.task semantics); loadTrending itself
-        // also guards on trendingMovies still being empty.
-        .task {
-            await loadTrending()
-        }
+        // IDEA 5 → FIX-214: the Trending rail load is
+        // PhimStore.loadTrendingIfNeeded, ridden by the
+        // loadIfNeeded call in the .task above (store
+        // state, 900 s attempt throttle — no per-appearance
+        // re-run).
         // v2.1.1 (WS-H): PC-only data offers — the TVB
         // bundled catalogue for the PC home's TVB rails and
         // the torrent store's load for its provider rails.
@@ -352,7 +387,7 @@ struct JoePhimHomeCore: View {
             torStore.loadIfNeeded()
             if pcTVBCatalog == nil {
                 let loaded = await Task.detached(priority: .userInitiated) {
-                    TVBCatalog.loadBundled()
+                    TVBCatalogStore.load()
                 }.value
                 if let loaded {
                     pcTVBCatalog = loaded
@@ -805,8 +840,20 @@ struct JoePhimHomeCore: View {
         // (FL-017: the debounce task inside the
         // controller is the only scheduled work).
         .onAppear { cinemaHeroFocusMoved() }
-        .onChange(of: focusedMovie) { _, _ in cinemaHeroFocusMoved() }
-        .onChange(of: focusedEntry) { _, _ in cinemaHeroFocusMoved() }
+        .onChange(of: focusedMovie) { _, new in
+            // FIX-214 (DESIGN-PASS-214 §3.3): the focus
+            // breadcrumb for this surface — through
+            // 2.1.3 the TVB hook was DiagLog.noteFocus's
+            // ONLY caller, so Phim/Home steps produced
+            // stalls labelled focus=none (16 of log
+            // 17's 42).
+            DiagLog.noteFocus(surface: "phim-home", key: new)
+            cinemaHeroFocusMoved()
+        }
+        .onChange(of: focusedEntry) { _, new in
+            DiagLog.noteFocus(surface: "phim-home", key: new)
+            cinemaHeroFocusMoved()
+        }
         .onChange(of: heroMovie?.id) { _, _ in cinemaHeroFocusMoved() }
         .onChange(of: heroBackdropURL) { _, _ in cinemaHeroFocusMoved() }
     }
@@ -848,11 +895,17 @@ struct JoePhimHomeCore: View {
     /// rails in their existing relative order — never
     /// interleaved, never dropped (WS-H mapping §3).
     private var cinemaRailStack: [CinemaRailStackItem] {
-        [.continueWatching, .trending,
+        // FIX-214 (DESIGN-PASS-214 §1d): Favourites moves
+        // from position 11 to position 2 — the owner's
+        // shelf rides directly under Continue Watching,
+        // where a returning viewer looks for it (it was
+        // buried below nine catalogue rails). Every other
+        // rail keeps its relative order.
+        [.continueWatching, .favourites, .trending,
          .providerNewest("kkNew"), .providerNewest("vsNew"),
          .providerNewest("f4kNew"), .providerNewest("tpNew"),
          .tvbHot, .tvbNew, .torrentProviders,
-         .tvbContinueWatching, .favourites, .following,
+         .tvbContinueWatching, .following,
          .addon, .catalogue]
     }
 
@@ -862,7 +915,11 @@ struct JoePhimHomeCore: View {
     /// (KKPhim / VSMOV / Film4K / Tủ Phim · Mới cập
     /// nhật) → Phim lẻ.
     private var cinemaPhimRailStack: [CinemaRailStackItem] {
-        [.continueWatching, .trending,
+        // FIX-214 (DESIGN-PASS-214 §1d): the Phim screen
+        // gains the Favourites slot it never had, at the
+        // same position 2 (the rail itself is the shared
+        // favRail; its data widens to kindTor below).
+        [.continueWatching, .favourites, .trending,
          .providerNewest("kkNew"), .providerNewest("vsNew"),
          .providerNewest("f4kNew"), .providerNewest("tpNew"),
          .phimLe]
@@ -873,7 +930,7 @@ struct JoePhimHomeCore: View {
     /// Trang chủ (and anywhere else this surface is
     /// hosted).
     private var cinemaActiveRailStack: [CinemaRailStackItem] {
-        screen == .phim ? cinemaPhimRailStack : cinemaRailStack
+        cinemaPhimRailStack
     }
 
     /// FIX-213 (Fault 13): the Phim screen's seventh
@@ -1213,7 +1270,11 @@ struct JoePhimHomeCore: View {
             // caps ABOVE the title, the meta riding the
             // title's baseline beside it.
             VStack(alignment: .leading, spacing: 4) {
-                Text("TRANG CHỦ / ĐANG KHÁM PHÁ")
+                // FIX-214 (FULL-THEME-AUDIT-214 B3): the
+                // eyebrow names the SCREEN — the Phim
+                // screen's strip hard-coded the Trang chủ
+                // line (the shared-core fault family).
+                Text("PHIM / ĐANG KHÁM PHÁ")
                     .font(JoePCType.outfit(15, weight: .medium))
                     .tracking(3.6)
                     .foregroundStyle(theme.heroMeta)
@@ -1243,12 +1304,15 @@ struct JoePhimHomeCore: View {
             VStack(alignment: .trailing, spacing: 4) {
                 if !info.railName.isEmpty {
                     Text(info.railName)
-                        .font(JoePCType.outfit(22))
+                        // FIX-214 (FULL-THEME-AUDIT-214
+                        // B3): the drawn right block is
+                        // Outfit 17, not 22.
+                        .font(JoePCType.outfit(17))
                         .foregroundStyle(theme.heroMeta)
                         .lineLimit(1)
                 }
                 Text(info.railLine)
-                    .font(JoePCType.outfit(22))
+                    .font(JoePCType.outfit(17))
                     .foregroundStyle(theme.meta)
                     .lineLimit(1)
             }
@@ -1373,31 +1437,6 @@ struct JoePhimHomeCore: View {
     }
 
     // MARK: - Focus-follows hero (v2.1.1, WS-I)
-
-    /// What the PC hero's two actions open for the
-    /// currently focused title: EXACTLY the focused
-    /// card's own tap mint, per surface (the catalogue
-    /// MovieRoute, the TVB routeTarget mint, the torrent
-    /// TorRoute, the addon route, the CW/favourite
-    /// reopen, the TVB-CW YouTube route, the file-
-    /// trending tap resolution). Before any focus, the
-    /// featured title's own mint.
-    enum CinemaHeroTarget {
-        case movie(Movie, scope: String)
-        case fileTrending(Movie)
-        case tvb(TVBTitle)
-        case tor(TorMeta, base: String)
-        case addon(TorMeta)
-        case movieEntry(WatchStore.Entry, preselect: Bool)
-        case tvbEntry(WatchStore.Entry)
-    }
-
-    /// A resolved hero: the controller's item (text +
-    /// art ladder) and the actions' target.
-    struct CinemaHeroResolved {
-        var item: JoeCinemaHeroItem
-        var target: CinemaHeroTarget
-    }
 
     /// Feed the backdrop controller from the current
     /// focus memory (WS-I): called by cinemaHome's
@@ -1670,12 +1709,32 @@ struct JoePhimHomeCore: View {
                     addonName: addonStore.addonName)
             }
         case .movieEntry(let entry, let preselect):
-            nav.movie = MovieRoute(
-                provider: entry.source, slug: entry.slug,
-                name: entry.title, poster: entry.poster,
-                year: entry.year,
-                preselectEp: preselect ? entry.ep : "",
-                tvb: entry.tvbRouteContext)
+            if entry.kind == WatchStore.kindTor {
+                // FIX-214 (gate R1 Lens 2): a TORRENT
+                // favourite reaches the hero through the
+                // widened favourites filter (§1d) — its
+                // reopen is the TorRoute (TorMeta +
+                // reopenBase), exactly as the rail card's
+                // own tap mints it; a torrent entry's
+                // source/slug are empty by construction,
+                // so the MovieRoute below would open a
+                // chain detail with no title to load.
+                nav.tor = TorRoute(
+                    meta: TorMeta(
+                        id: entry.metaId, type: entry.metaType,
+                        name: entry.title, poster: entry.poster,
+                        background: entry.background,
+                        year: entry.year, desc: entry.desc,
+                        isLive: entry.isLive),
+                    base: entry.reopenBase)
+            } else {
+                nav.movie = MovieRoute(
+                    provider: entry.source, slug: entry.slug,
+                    name: entry.title, poster: entry.poster,
+                    year: entry.year,
+                    preselectEp: preselect ? entry.ep : "",
+                    tvb: entry.tvbRouteContext)
+            }
         case .tvbEntry(let entry):
             nav.ytDetail = JoeYtRoute(pid: entry.slug)
         }
@@ -1743,7 +1802,7 @@ struct JoePhimHomeCore: View {
     /// screen — the strip and the tagline read this, so
     /// their counts always name the rails on the page.
     private var cinemaActiveRailTitles: [String] {
-        screen == .phim ? cinemaPhimVisibleRailTitles : cinemaVisibleRailTitles
+        cinemaPhimVisibleRailTitles
     }
 
     /// A scope's (position, name) inside the visible PC
@@ -1863,6 +1922,18 @@ struct JoePhimHomeCore: View {
     @ViewBuilder
     private var cinemaHeroBlock: some View {
         if let featured = heroMovie {
+            // FIX-214 (DESIGN-PASS-214 §1a): the stage is
+            // 560 (485 in 2.1.3 — the 394 text zone inside
+            // a 485 stage put the text top at y91, INSIDE
+            // the old 132 band: the collision family of
+            // the whole 2.1.3 round). The HomeTVBFocus
+            // form's own stage is 600 — its text budget
+            // (428) needs the extra 40. One stage value
+            // drives both the backdrop frame and the
+            // block frame.
+            let displayed = cinemaHeroDisplayResolved()
+            let stage: CGFloat = (displayed.map(cinemaIsTVBTarget)
+                                  ?? false) ? 600 : 560
             ZStack(alignment: .bottomLeading) {
                 // v2.1.1 (WS-I): the hero's backdrop is the
                 // focus-follows layer now — the shared
@@ -1884,19 +1955,17 @@ struct JoePhimHomeCore: View {
                 // resolver reads them for the featured item.
                 JoeCinemaBackdropLayer(controller: cinemaBackdrop)
                 .frame(maxWidth: .infinity)
-                .frame(height: 485)
+                .frame(height: stage)
                 .clipped()
-                LinearGradient(stops: [
-                    .init(color: .black.opacity(0.92), location: 0),
-                    .init(color: .black.opacity(0.80), location: 0.45),
-                    .init(color: .black.opacity(theme.scrimFloor), location: 0.65),
-                    .init(color: .black.opacity(0.15), location: 0.82),
-                    .init(color: .black.opacity(0.05), location: 1)
-                ], startPoint: .leading, endPoint: .trailing)
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0.55),
-                    .init(color: theme.bg, location: 1)
-                ], startPoint: .top, endPoint: .bottom)
+                // FIX-214 (FULL-THEME-AUDIT-214 Phần C họ
+                // 1): the design's TWO scrims — the Ink
+                // stop ramps (JoeCinemaScrims), shared by
+                // all three heroes. The shipped pair (a
+                // five-stop BLACK left gradient + a
+                // clear→bg bottom ramp) was a different
+                // colour family from the drawing.
+                Rectangle().fill(JoeCinemaScrims.left)
+                Rectangle().fill(JoeCinemaScrims.bottom)
                 // FIX-213 (Fault 8): NO top scrim — the
                 // design draws exactly two scrims on this
                 // stage (left + bottom); the third one that
@@ -1914,11 +1983,11 @@ struct JoePhimHomeCore: View {
                 // changes in the same transaction as the
                 // focus move, ahead of the debounced
                 // backdrop swap.
-                if let resolved = cinemaHeroDisplayResolved() {
-                    cinemaHeroText(resolved)
+                if let displayed {
+                    cinemaHeroText(displayed)
                 }
             }
-            .frame(height: 485)
+            .frame(height: stage)
             // FIX-213 (Fault 7): the design's hero stage
             // is FULL-BLEED (backdrop x0, w1920) — the
             // block bleeds across the shell's 80 pt
@@ -2056,6 +2125,72 @@ struct JoePhimHomeCore: View {
                 openTarget: { cinemaOpenHeroTarget($0) }))
         }
         let item = resolved.item
+        // FIX-214 (DESIGN-PASS-214 §1a): the text zone is
+        // the stage's bottom 394 — text top at y166 of
+        // the 560 stage, ≥ +18 clear of the 148 band in
+        // the worst legal case (2.1.3's geometry put it
+        // inside the band). The variable rows are
+        // MEASURED with the bundled fonts themselves
+        // (JoeHeroMeasure) and compressed in the pass's
+        // order: the synopsis collapses 2→1→0 lines,
+        // then the origin-name row hides. Eyebrow ·
+        // title (≤2 lines) · meta · actions always stay.
+        // The drawing's own case (1-line title, 2-line
+        // synopsis, every row) measures exactly the
+        // budget — nothing compresses.
+        let titleLines = min(2, JoeHeroMeasure.lines(
+            of: item.title,
+            postScriptName: "BricolageGrotesque-Medium",
+            size: 72, width: 850))
+        let hasOrigin: Bool = {
+            if case .movie(let movie, _) = resolved.target {
+                return !movie.originName.isEmpty
+                    && movie.originName != movie.name
+            }
+            return false
+        }()
+        let hasMeta: Bool = {
+            if !item.meta.isEmpty { return true }
+            switch resolved.target {
+            case .movie(let movie, _), .fileTrending(let movie):
+                return !movie.quality.isEmpty
+            default:
+                return false
+            }
+        }()
+        var synopsisLimit = item.synopsis.isEmpty ? 0
+            : min(2, JoeHeroMeasure.lines(
+                of: item.synopsis, postScriptName: "Outfit-Regular",
+                size: 20, width: 665))
+        var showOrigin = hasOrigin
+        func heroBlockHeight() -> CGFloat {
+            var h: CGFloat = 72 // .vertical 36 × 2
+            h += JoeHeroMeasure.lineHeight(
+                postScriptName: "Outfit-Medium", size: 15)
+            h += 12 + JoeHeroMeasure.lineHeight(
+                postScriptName: "BricolageGrotesque-Medium",
+                size: 72) * CGFloat(titleLines)
+            if showOrigin {
+                h += 10 + JoeHeroMeasure.lineHeight(
+                    postScriptName: "Outfit-Medium", size: 20)
+            }
+            if hasMeta {
+                h += 12 + JoeHeroMeasure.lineHeight(
+                    postScriptName: "Outfit-Regular", size: 20)
+            }
+            if synopsisLimit > 0 {
+                h += 10 + JoeHeroMeasure.lineHeight(
+                    postScriptName: "Outfit-Regular", size: 20)
+                    * CGFloat(synopsisLimit)
+                    + 10 * CGFloat(synopsisLimit - 1)
+            }
+            h += 16 + 55 // actions gap + button height
+            return h
+        }
+        while heroBlockHeight() > 394 && synopsisLimit > 0 {
+            synopsisLimit -= 1
+        }
+        if heroBlockHeight() > 394 { showOrigin = false }
         return AnyView(VStack(alignment: .leading, spacing: 0) {
             // FIX-10a / ADJUDICATION F1: the many-rail
             // drawing's hero eyebrow is the STATIC line
@@ -2079,9 +2214,7 @@ struct JoePhimHomeCore: View {
                 .foregroundStyle(theme.text)
                 .lineLimit(2)
                 .padding(.top, 12)
-            if case .movie(let movie, _) = resolved.target,
-               !movie.originName.isEmpty,
-               movie.originName != movie.name {
+            if showOrigin, case .movie(let movie, _) = resolved.target {
                 Text(movie.originName.uppercased())
                     .font(JoePCType.outfit(20, weight: .medium))
                     .tracking(6)
@@ -2090,15 +2223,21 @@ struct JoePhimHomeCore: View {
                     .padding(.top, 10)
             }
             cinemaHeroMetaRow(resolved)
-            if !item.synopsis.isEmpty {
+            if synopsisLimit > 0 {
                 Text(item.synopsis)
-                    .font(JoePCType.outfit(18))
+                    // FIX-214 (FULL-THEME-AUDIT-214 B2):
+                    // the audit re-measured the drawing
+                    // first-hand — synopsis 20/400, line
+                    // 1.5 (spacing 10), clamp 2, max width
+                    // 665 — superseding the RECALC-SPEC
+                    // adjudication of 18 that FIX-12
+                    // followed. The clamp is the budget's
+                    // measured limit (heroBlockHeight).
+                    .font(JoePCType.outfit(20))
                     .foregroundStyle(theme.text.opacity(0.92))
-                    // FIX-12 / R7 C-F1: spec synopsis is
-                    // 18/400 at line 1.5 → 9 pt extra.
-                    .lineSpacing(9)
-                    .lineLimit(2)
-                    .frame(maxWidth: 850, alignment: .leading)
+                    .lineSpacing(10)
+                    .lineLimit(synopsisLimit)
+                    .frame(maxWidth: 665, alignment: .leading)
                     // FIX-4 / C6: spec synopsis margin-top 10.
                     .padding(.top, 10)
             }
@@ -2119,9 +2258,12 @@ struct JoePhimHomeCore: View {
         // to the frame's edges (see cinemaHeroBlock), so
         // this inset is the design's own hero x94
         // (many-rail spec: hero x94, w850).
+        // FIX-214 (FULL-THEME-AUDIT-214 B2): the frame is
+        // 94 + 850 = 944 wide — the shipped 900 left the
+        // content at ≈806, short of the drawn 850.
         .padding(.leading, 94)
         .padding(.vertical, 36)
-        .frame(maxWidth: 900, alignment: .leading))
+        .frame(maxWidth: 944, alignment: .leading))
     }
 
     /// FIX-213 (Fault 13): is the resolved hero target
@@ -2141,9 +2283,7 @@ struct JoePhimHomeCore: View {
     /// for a TVB hero target moved with the HomeTVBFocus
     /// form to JoeHomeTVBFocusHero.
     private func cinemaHeroEyebrow(_ resolved: CinemaHeroResolved) -> String {
-        return screen == .phim
-            ? "TỐI NAY, XEM GÌ? / PHIM · ĐANG CHỌN"
-            : "TỐI NAY, XEM GÌ? / TRANG CHỦ · ĐANG CHỌN"
+        return "TỐI NAY, XEM GÌ? / PHIM · ĐANG CHỌN"
     }
 
     /// The hero's action set (movie form): the built
@@ -2180,20 +2320,26 @@ struct JoePhimHomeCore: View {
     /// list, so the number is the rails actually on the
     /// page, never the drawing's sample count).
     private var cinemaHeroTagline: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            Text("Một buổi tối. Một thế giới khác.")
+        // FIX-214 (FULL-THEME-AUDIT-214 B2): the drawn
+        // copy — italic "Phim đang được chọn" over the
+        // caps line "<TITLE> · <N> DÃY PHIM": the
+        // currently displayed hero's own title + THIS
+        // home's real visible rail count. The shipped
+        // "Một buổi tối. Một thế giới khác." and
+        // "↓ TIẾP TỤC KHÁM PHÁ" were invented copy —
+        // the drawing carries neither.
+        let heroTitle = (cinemaHeroDisplayResolved()?.item.title
+                         ?? heroMovie?.name ?? "").uppercased()
+        return VStack(alignment: .trailing, spacing: 8) {
+            Text("Phim đang được chọn")
                 .font(JoePCType.editorial(28, italic: true))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
-            HStack(spacing: 10) {
-                Text("\(cinemaActiveRailTitles.count) DÃY PHIM")
-                Text("↓")
-                Text("TIẾP TỤC KHÁM PHÁ")
-            }
-            .font(JoePCType.outfit(14, weight: .medium))
-            .tracking(3)
-            .foregroundStyle(theme.heroMeta)
-            .lineLimit(1)
+            Text("\(heroTitle) · \(cinemaActiveRailTitles.count) DÃY PHIM")
+                .font(JoePCType.outfit(14, weight: .medium))
+                .tracking(3)
+                .foregroundStyle(theme.heroMeta)
+                .lineLimit(1)
         }
     }
 
@@ -2227,11 +2373,13 @@ struct JoePhimHomeCore: View {
         if !resolved.item.meta.isEmpty || !quality.isEmpty {
             HStack(alignment: .center, spacing: 14) {
                 if !resolved.item.meta.isEmpty {
-                    Text(resolved.item.meta)
-                        // FIX-4 / C6: design meta 20/400.
-                        .font(JoePCType.outfit(20))
-                        .foregroundStyle(theme.heroMeta)
-                        .lineLimit(1)
+                    // FIX-214 (FULL-THEME-AUDIT-214 B2):
+                    // the drawn meta line is IVORY with
+                    // only the ★ celadon — the shipped
+                    // row painted the whole line celadon
+                    // (theme.heroMeta). Shared renderer:
+                    // JoeCinemaMetaText.
+                    JoeCinemaMetaText(meta: resolved.item.meta)
                 }
                 if !quality.isEmpty {
                     Text(quality)
@@ -2286,6 +2434,20 @@ struct JoePhimHomeCore: View {
     /// vẽ". The tap is movieRail's own action and the focus
     /// binding copies movieRail's .focused($focusedMovie,
     /// equals:) pattern, so focus memory works identically.
+    /// FIX-214: the trending counter's numerator — the
+    /// focused card's 1-based position in THIS rail
+    /// (cards bind "scope|id" into focusedMovie); 1 at
+    /// rest or when focus is in another rail (the
+    /// drawing's rest state pairs the hero with the
+    /// first card).
+    private func cinemaTrendingFocusIndex(_ railSpec: JoeRailSpec) -> Int {
+        guard let focusedMovie,
+              focusedMovie.hasPrefix(railSpec.scope + "|") else { return 1 }
+        let id = String(focusedMovie.dropFirst(railSpec.scope.count + 1))
+        return railSpec.movies.firstIndex(where: { $0.id == id })
+            .map { $0 + 1 } ?? 1
+    }
+
     private func cinemaTrendingRail(_ railSpec: JoeRailSpec) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 16) {
@@ -2293,12 +2455,18 @@ struct JoePhimHomeCore: View {
                     .font(JoePCType.display(27, weight: .medium))
                     .tracking(-0.3)
                     .foregroundStyle(theme.text)
-                Text("Được yêu thích hôm nay")
+                // FIX-214 (FULL-THEME-AUDIT-214 B3): the
+                // drawn subtitle + a counter that FOLLOWS
+                // focus (it was hard-coded "01 / NN" and
+                // never moved).
+                Text("Được quan tâm · thứ tự minh họa")
                     .font(JoePCType.outfit(14))
                     .foregroundStyle(theme.meta)
                 Spacer()
-                Text(String(format: "%02d / %02d", 1, railSpec.movies.count))
-                    .font(JoePCType.outfit(22))
+                Text(String(format: "%02d / %02d",
+                            cinemaTrendingFocusIndex(railSpec),
+                            railSpec.movies.count))
+                    .font(JoePCType.outfit(17))
                     .foregroundStyle(theme.meta)
             }
             // FIX-213 (Fault 7): the heading row spans the
@@ -2678,7 +2846,7 @@ struct JoePhimHomeCore: View {
         // Ultra), or after the four banded newest rails in
         // design F (whose specs lead the list, in that order).
         // Only when the trending load resolved something.
-        if !trendingMovies.isEmpty {
+        if !phim.trendingMovies.isEmpty {
             let newestScopes: Set<String> = ["merged", "kkNew", "f4kNew", "vsNew", "tpNew"]
             var insertAt = 0
             while insertAt < specs.count,
@@ -2687,7 +2855,7 @@ struct JoePhimHomeCore: View {
             }
             specs.insert(JoeRailSpec(scope: "trending",
                                      title: "🔥 Đang thịnh hành",
-                                     movies: trendingMovies, badges: true),
+                                     movies: phim.trendingMovies, badges: true),
                          at: insertAt)
         }
         // v2.1.1 (DIAG-2050 §4, steps 3–4): the trending
@@ -2788,152 +2956,10 @@ struct JoePhimHomeCore: View {
 
     // MARK: - Trending rail (IDEA 5)
 
-    /// Resolve TMDB's trending/week chart into PLAYABLE
-    /// catalogue titles only, in TMDB's own order, capped at
-    /// 20. Two rungs:
-    ///   1. a tmdbId map built from EVERY movie list the
-    ///      PhimStore already holds (all published rails,
-    ///      genre/country lists included);
-    ///   2. for titles still unmatched, a bounded provider
-    ///      search — at most 8 unmatched titles, providers in
-    ///      Providers.priority order, accepting ONLY a
-    ///      tmdbId match (v2.0.29, item 7: the former
-    ///      normalized-name acceptance bound cards to
-    ///      lookalike films).
-    /// Everything still unmatched is dropped silently.
-    /// Fail-soft end to end: no TMDB key / no network simply
-    /// leaves the rail absent.
-    private func loadTrending() async {
-        guard trendingMovies.isEmpty else { return }
-        let trending = await TMDBClient.trendingWeek()
-        guard !trending.isEmpty else { return }
-        // Cold entry: the catalogue load kicked off by the
-        // sibling .task may still be in flight — give it a
-        // bounded chance to land so rung 1 sees the real
-        // catalogue instead of an empty store (15 s worst
-        // case; the store's own deadline is 25 s, and rung 2
-        // covers whatever is still missing afterwards).
-        for step in 0..<75 {
-            if !phim.catalogueIsEmpty { break }
-            // Past a 2 s grace (for the sibling load's
-            // `loading` flag to flip), a non-loading store
-            // means the load ended — stop waiting.
-            if step >= 10 && !phim.loading { break }
-            if Task.isCancelled { return }
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        let byTmdbId = catalogueByTmdbId()
-        var resolved: [Int: Movie] = [:]
-        var unmatched: [(index: Int, title: JoeTopShelfWriter.TrendingTitle)] = []
-        for (i, t) in trending.enumerated() {
-            // v2.0.29 (item 7): typed key first, bare key
-            // behind it (see catalogueByTmdbId).
-            let hit = t.tmdbId.isEmpty ? nil
-                : (byTmdbId[t.type + "|" + t.tmdbId] ?? byTmdbId[t.tmdbId])
-            if let m = hit,
-               m.tmdbType.isEmpty || m.tmdbType == t.type {
-                resolved[i] = m
-            } else {
-                unmatched.append((index: i, title: t))
-            }
-        }
-        // Rung 2: bounded fallback search (≤ 8 titles).
-        var searches = 0
-        for entry in unmatched {
-            if searches >= 8 { break }
-            searches += 1
-            if let m = await trendingSearchMatch(for: entry.title) {
-                resolved[entry.index] = m
-            }
-        }
-        // TMDB order preserved; dedupe by catalogue identity;
-        // cap 20.
-        var out: [Movie] = []
-        var seen = Set<String>()
-        for i in trending.indices {
-            guard let m = resolved[i], !m.slug.isEmpty,
-                  seen.insert(m.id).inserted else { continue }
-            out.append(m)
-            if out.count >= 20 { break }
-        }
-        trendingMovies = out
-    }
-
-    /// tmdbId → Movie over every list the PhimStore holds.
-    /// First carrier wins (lists are visited in rail/priority
-    /// order, merged first); vietnamAll covers the store's
-    /// derived vietnamSeries / vietnamSingle views.
-    /// v2.0.29 (item 7): TMDB's numeric ids are per-type
-    /// namespaces — a movie and a series can share the
-    /// number — so a record that states its type is keyed
-    /// "type|tmdbId" and only a typeless record rides the
-    /// bare key (the JoeActorPage discipline). The lookup
-    /// tries the trending title's typed key first, then the
-    /// bare key.
-    private func catalogueByTmdbId() -> [String: Movie] {
-        var map: [String: Movie] = [:]
-        func add(_ movies: [Movie]) {
-            for m in movies where !m.tmdbId.isEmpty {
-                if !m.tmdbType.isEmpty {
-                    let key = m.tmdbType + "|" + m.tmdbId
-                    if map[key] == nil { map[key] = m }
-                } else if map[m.tmdbId] == nil {
-                    map[m.tmdbId] = m
-                }
-            }
-        }
-        add(phim.merged)
-        add(phim.kkNew)
-        add(phim.f4kNew)
-        add(phim.vsNew)
-        add(phim.tpNew)
-        add(phim.chieuRap)
-        add(phim.vietnamAll)
-        add(phim.kkSeries)
-        add(phim.kkMovies)
-        add(phim.kkAnime)
-        add(phim.f4kMovies)
-        add(phim.vsSeries)
-        add(phim.tpMovies)
-        add(phim.tpSeries)
-        for spec in PhimStore.genreSpec {
-            add(phim.genreLists[spec.slug] ?? [])
-        }
-        for spec in PhimStore.countrySpec {
-            add(phim.countryLists[spec.slug] ?? [])
-        }
-        return map
-    }
-
-    /// One trending title's fallback search across the
-    /// providers (priority order): ONLY a result carrying
-    /// the trending title's own tmdbId (its type agreeing
-    /// when the result states one) is accepted.
-    /// v2.0.29 (item 7): the search used to also accept the
-    /// first result whose normalized name (or origin name)
-    /// equalled the trending title's — but a translated
-    /// title is not an identity: different films share one,
-    /// so the card bound a lookalike and tapping "Có máy
-    /// thời gian" opened "Step Into The Past". The house
-    /// discipline (the franchise strip, the actor page) is
-    /// ID-or-nothing: a title with no ID match drops off
-    /// the rail rather than opening the wrong film.
-    private func trendingSearchMatch(
-        for t: JoeTopShelfWriter.TrendingTitle
-    ) async -> Movie? {
-        guard !t.tmdbId.isEmpty else { return nil }
-        for code in Providers.priority {
-            guard let results = try? await Providers.search(code, keyword: t.title)
-            else { continue }
-            if let byId = results.first(where: {
-                $0.tmdbId == t.tmdbId
-                    && ($0.tmdbType.isEmpty || $0.tmdbType == t.type)
-            }) {
-                return byId
-            }
-        }
-        return nil
-    }
+    // FIX-214 (lag package): loadTrending /
+    // catalogueByTmdbId / trendingSearchMatch moved
+    // to PhimStore (JoeStores.swift, TMDB trending
+    // MARK) — store state, 900 s attempt throttle.
 
     // MARK: - Design A hero
 
@@ -3483,8 +3509,16 @@ struct JoePhimHomeCore: View {
     }
 
     private var movieFavorites: [WatchStore.Entry] {
+        // FIX-214 (DESIGN-PASS-214 §1d): kindTor JOINS the
+        // filter — a torrent favourite belongs on the
+        // shelf like any other (the Torrent home keeps
+        // its own tor-only rail; this shelf is the
+        // cross-source one). TVB (kindYT) stays OUT: a YT
+        // row's reopen identity is its pid and its poster
+        // resolves from the TVB catalogue — a different
+        // card family with its own rails.
         Array(WatchStore.filterKinds(watch.favorites(),
-                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS, WatchStore.kindTP])
+                                     [WatchStore.kindKK, WatchStore.kindF4K, WatchStore.kindVS, WatchStore.kindTP, WatchStore.kindTor])
             .prefix(WatchStore.railCap))
     }
 
@@ -3599,11 +3633,30 @@ struct JoePhimHomeCore: View {
         if !movieFavorites.isEmpty {
             Rail(title: "♥ Yêu thích") {
                 ForEach(movieFavorites) { entry in
-                    Button { nav.movie = MovieRoute(
-                        provider: entry.source, slug: entry.slug,
-                        name: entry.title, poster: entry.poster,
-                        year: entry.year,
-                        tvb: entry.tvbRouteContext) } label: {
+                    // FIX-214 (DESIGN-PASS-214 §1d): the tap
+                    // is KIND-AWARE — a kindTor favourite
+                    // reopens through the torrent route
+                    // (the TorMeta + reopenBase mint, the
+                    // Torrent home's own pattern); chain
+                    // entries keep the MovieRoute.
+                    Button {
+                        if entry.kind == WatchStore.kindTor {
+                            nav.tor = TorRoute(
+                                meta: TorMeta(
+                                    id: entry.metaId, type: entry.metaType,
+                                    name: entry.title, poster: entry.poster,
+                                    background: entry.background,
+                                    year: entry.year, desc: entry.desc,
+                                    isLive: entry.isLive),
+                                base: entry.reopenBase)
+                        } else {
+                            nav.movie = MovieRoute(
+                                provider: entry.source, slug: entry.slug,
+                                name: entry.title, poster: entry.poster,
+                                year: entry.year,
+                                tvb: entry.tvbRouteContext)
+                        }
+                    } label: {
                         PosterCard(
                             title: entry.title,
                             posterURL: entry.posterURL,

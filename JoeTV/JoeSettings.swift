@@ -680,6 +680,16 @@ struct JoeSettingsView: View {
             // the rail at the design's 94 and the pane's
             // right edge at 1826.
             .padding(.horizontal, 14)
+            // FIX-214 (DESIGN-PASS-214 §3.3): the root
+            // also gains the bar clearance — its content
+            // starts at y148 under the raised bar (the
+            // joePCBarInset arithmetic: bar height − the
+            // 60 the safe area already grants). Settings
+            // was one of the three surfaces the 2.1.3
+            // clearance sweep missed (NO-REPEAT sweep:
+            // root + TV section + Search all covered in
+            // this round).
+            .padding(.top, joePCBarHeight - 60)
             .onChange(of: pcTopScrollSignal) { _, _ in
                 proxy.scrollTo("joePCSettingsTop", anchor: .top)
             }
@@ -717,10 +727,18 @@ struct JoeSettingsView: View {
                 .joeCardButton()
                 .focused($pcBackFocused)
                 Spacer()
-                PCClockLabel()
+                // FIX-214 (DESIGN-PASS-214 §3.3): NO
+                // second clock — this row carried its own
+                // PCClockLabel while the shell bar's
+                // clock rides above it (JoeTVApp): two
+                // clocks on one screen. The bar's is the
+                // only one now.
             }
             Text("JOETV / KHÔNG GIAN CỦA BẠN")
-                .font(JoePCType.outfit(22, weight: .semibold))
+                // FIX-214 (FULL-THEME-AUDIT-214 B9): the
+                // eyebrow standard — 15 medium (was 22
+                // semibold).
+                .font(JoePCType.outfit(15, weight: .medium))
                 .tracking(3)
                 .foregroundStyle(theme.accent2)
                 .lineLimit(1)
@@ -731,7 +749,10 @@ struct JoeSettingsView: View {
     private var pcLeftRail: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("PRIVATE CINEMA")
-                .font(JoePCType.outfit(20, weight: .semibold))
+                // FIX-214 (FULL-THEME-AUDIT-214 B9): the
+                // eyebrow standard — 15 medium (was 20
+                // semibold).
+                .font(JoePCType.outfit(15, weight: .medium))
                 .tracking(4)
                 .foregroundStyle(theme.accent2)
             Text("Cài đặt")
@@ -742,7 +763,9 @@ struct JoeSettingsView: View {
                 .foregroundStyle(theme.text)
                 .padding(.top, 16)
             Text("Một vài lựa chọn nhỏ.\nMột buổi xem đúng ý bạn.")
-                .font(JoePCType.outfit(24))
+                // FIX-214 (FULL-THEME-AUDIT-214 B9): the
+                // intro line is ≈20 (was 24).
+                .font(JoePCType.outfit(20))
                 .foregroundStyle(theme.meta)
                 .padding(.top, 18)
             VStack(alignment: .leading, spacing: 8) {
@@ -760,7 +783,10 @@ struct JoeSettingsView: View {
             }
             .padding(.top, 44)
         }
-        .frame(width: 440, alignment: .leading)
+        // FIX-214 (FULL-THEME-AUDIT-214 B9): the rail is
+        // ≈390 wide (was 440) — with the root's x94 and
+        // the 64 gap the pane starts at ≈548, as drawn.
+        .frame(width: 390, alignment: .leading)
     }
 
     @ViewBuilder
@@ -1159,7 +1185,10 @@ struct JoeSettingsView: View {
                     .frame(maxWidth: 1250, alignment: .leading)
             }
             Button {
-                Task { await runKKProbe() }
+                // The owner's explicit re-check: never
+                // throttled (FIX-214 — the throttle below
+                // gates only the automatic open-time run).
+                Task { await runKKProbe(force: true) }
             } label: {
                 JoePrimaryLabel(title: "Kiểm tra lại")
             }
@@ -1193,8 +1222,23 @@ struct JoeSettingsView: View {
         }
     }
 
-    private func runKKProbe() async {
+    /// FIX-214 (DESIGN-PASS-214 §3.2): the automatic
+    /// open-time probe is throttled to once per 900 s
+    /// per process — through 2.1.3 EVERY Settings enter
+    /// fired this network probe (a KKPhim search
+    /// round-trip) as part of the per-enter re-work the
+    /// lag conviction names. The owner's "Kiểm tra lại"
+    /// button passes force: true and always runs.
+    /// (nonisolated(unsafe) per the tree's latched-state
+    /// idiom — the stamp is touched only from this
+    /// view's MainActor tasks and button actions.)
+    private nonisolated(unsafe) static var lastKKProbeAt: Date?
+
+    private func runKKProbe(force: Bool = false) async {
         if kkProbing { return }
+        if !force, let last = Self.lastKKProbeAt,
+           Date().timeIntervalSince(last) < 900 { return }
+        Self.lastKKProbeAt = Date()
         kkStatus = .probing
         let r = await SourceProbe.probeKK()
         kkStatus = r.ok ? .ok(ms: r.millis) : .down
@@ -1473,16 +1517,28 @@ struct JoeSettingsView: View {
 
 /// The TVB Gold row's label (design §3.1): the presence dot
 /// + state word + hint, painted with the app's ONE button
-/// construction — the JoeSecondaryLabel recipe (capsule,
-/// surface2 fill, resting stroke, theme focus ring inside
-/// when focused) — so the door's entry point carries the
-/// same focus treatment as every other Settings button.
+/// construction — the JoeSecondaryLabel recipe (the house
+/// button shape, surface2 fill, resting stroke, theme
+/// focus ring inside when focused) — so the door's entry
+/// point carries the same focus treatment as every other
+/// Settings button. FIX-214 (gate R2 Lens 3 F2): the shape
+/// follows the A3 unification like every action button —
+/// rounded-rect r7 under Private Cinema, capsule on the
+/// legacy legs (whose button family is capsule).
 private struct JoeTVBGoldRowLabel: View {
     let signedIn: Bool
     @Environment(\.isFocused) private var isFocused
     @Environment(\.joeTheme) private var theme
 
     var body: some View {
+        if theme.id == .privateCinema {
+            chip(RoundedRectangle(cornerRadius: 7))
+        } else {
+            chip(Capsule())
+        }
+    }
+
+    private func chip<S: InsettableShape>(_ shape: S) -> some View {
         HStack(spacing: 14) {
             Text(signedIn ? "●" : "○")
                 .font(.system(size: 28, weight: .bold))
@@ -1498,7 +1554,7 @@ private struct JoeTVBGoldRowLabel: View {
         }
         .padding(.horizontal, 36)
         .padding(.vertical, 17)
-        .background(Capsule().fill(theme.surface2))
+        .background(shape.fill(theme.surface2))
         // Fault 11 fix round: the resting hairline is its
         // own overlay and the focus ring is the chip
         // family's (JoeChipRing) — under Private Cinema the
@@ -1506,8 +1562,8 @@ private struct JoeTVBGoldRowLabel: View {
         // house JoeFocusRing over the hairline, which the
         // inside band covers exactly as the single-overlay
         // expression did.
-        .overlay(Capsule().strokeBorder(theme.stroke, lineWidth: 1.5))
-        .overlay(JoeChipRing(shape: Capsule()))
+        .overlay(shape.strokeBorder(theme.stroke, lineWidth: 1.5))
+        .overlay(JoeChipRing(shape: shape))
     }
 }
 
@@ -1547,7 +1603,11 @@ private struct PCCategoryRowLabel: View {
         .foregroundStyle(selected || isFocused ? theme.text : theme.meta)
         .padding(.horizontal, 26)
         .padding(.vertical, 18)
-        .frame(width: 440, alignment: .leading)
+        // FIX-214 (gate R2 Lens 3 F1): the row's own face
+        // takes the rail's drawn width 390 (the container
+        // already did) — the approved demo draws the row
+        // [SIDE, SIDE+390], not 440.
+        .frame(width: 390, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14)
             .fill(selected ? theme.surface2 : Color.clear))
         // Fault 11 fix round: the drawn Settings rail focus
@@ -1604,7 +1664,11 @@ private struct PCThemeCardLabel: View {
                     .padding(24)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 190)
+            // FIX-214 (FULL-THEME-AUDIT-214 B9): the
+            // drawn header is ≈245 tall (was 190); with
+            // the name/subtitle row below, the card
+            // totals ≈390 as drawn.
+            .frame(height: 245)
             HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(tokens.id.pickerLabel)
@@ -1626,10 +1690,22 @@ private struct PCThemeCardLabel: View {
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
-                        .background(Capsule().strokeBorder(theme.stroke, lineWidth: 1.5))
+                        // FIX-214 (FULL-THEME-AUDIT-214
+                        // B9/A3): the drawn chip is a
+                        // small rounded rect — r7, not a
+                        // capsule.
+                        .background(RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(theme.stroke, lineWidth: 1.5))
                 }
             }
-            .padding(24)
+            // FIX-214 (gate R1 Lens 3): the drawn card
+            // total is ≈390 — header 245 (above) + this
+            // footer row. The footer's vertical padding
+            // rises 24 → 44 so the total lands at ≈390
+            // (245 + ≈145), not the ≈351 the header fix
+            // alone produced. Horizontal stays 24.
+            .padding(.horizontal, 24)
+            .padding(.vertical, 44)
             .background(theme.surface2)
         }
         .background(RoundedRectangle(cornerRadius: 16).fill(theme.surface2))

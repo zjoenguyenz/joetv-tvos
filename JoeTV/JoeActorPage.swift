@@ -1446,7 +1446,7 @@ struct JoeActorPage: View {
             // is the DISPLAYED titles whose cast carries the
             // name exactly, popularity desc.
             let titles = await Task.detached(priority: .userInitiated) {
-                (TVBCatalog.loadBundled()?.titles ?? [])
+                (TVBCatalogStore.load()?.titles ?? [])
                     .filter { $0.isDisplayed && $0.cast.contains(name) }
                     .sorted { $0.popularity > $1.popularity }
             }.value
@@ -1465,7 +1465,7 @@ struct JoeActorPage: View {
             async let personFetch =
                 TMDBClient.fetchPerson(personId: personId)
             let snapshot = await Task.detached(priority: .userInitiated) {
-                TVBCatalog.loadBundled()
+                TVBCatalogStore.load()
             }.value
             let fetched = await creditsFetch
             creditsLoadFailed = fetched == nil

@@ -88,6 +88,17 @@ struct JoeTVSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             heroBlock
+                // FIX-214 (DESIGN-PASS-214 §3.3): under
+                // Private Cinema the hero block gains the
+                // bar clearance — its tile stood at the
+                // ambient (80, 60), inside the raised
+                // 148 bar's zone; it now starts at y148
+                // (the joePCBarInset arithmetic). The TV
+                // section was one of the three surfaces
+                // the 2.1.3 clearance sweep missed.
+                // Legacy themes keep their geometry.
+                .padding(.top, theme.id == .privateCinema
+                         ? joePCBarHeight - 60 : 0)
             chipRow
             if let message = store.statusMessage {
                 Text(message)
@@ -425,7 +436,9 @@ struct JoeTVSection: View {
             sportsOn = false
             store.noteSelectedGroup(nil)
         } label: {
-            JoeChipLabel(title: "⭐ Yêu thích", selected: favouritesOn)
+            // FIX-214 (DESIGN-PASS-214 §1d): the chip's
+            // drawn name is "⭐ Kênh yêu thích".
+            JoeChipLabel(title: "⭐ Kênh yêu thích", selected: favouritesOn)
         }
         .joeCardButton()
         .focused($focusedChip, equals: Self.favouritesChipID)

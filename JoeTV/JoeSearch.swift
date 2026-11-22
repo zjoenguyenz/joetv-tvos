@@ -209,6 +209,19 @@ struct JoeSearchView: View {
                     .focusSection()
             }
         }
+        // FIX-214 (FULL-THEME-AUDIT-214 B8): under
+        // Private Cinema the drawn Search frame is x94
+        // (right edge 94 too) with the bar clearance on
+        // top — the swap surface carried neither (the
+        // Finding 12 family). The values are branches on
+        // the one shared stack: +14 horizontal over the
+        // ambient 80, and the joePCBarInset arithmetic
+        // (bar height − the 60 the safe area already
+        // grants) as a top padding. Legacy themes keep
+        // the ambient frame exactly.
+        .padding(.horizontal, theme.id == .privateCinema ? 14 : 0)
+        .padding(.top, theme.id == .privateCinema
+                 ? joePCBarHeight - 60 : 0)
         // v2.1.1 (WS-E): the discovery grid's data — one
         // trending-file load per search-layer appearance,
         // PC only (loadDiscovery guards the theme itself).
@@ -347,7 +360,8 @@ struct JoeSearchView: View {
     /// chip inside the bar's right end. Typing still
     /// happens on the letter strip below — the chip is
     /// the design's furniture, not a second search path.
-    /// Quay lại keeps its place and its focus identity.
+    /// (FIX-214: the Quay lại pill that rode beside this
+    /// field is removed — see the row itself.)
     private var pcFieldRow: some View {
         HStack(spacing: 18) {
             HStack(spacing: 14) {
@@ -370,13 +384,15 @@ struct JoeSearchView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .joeFieldChrome(focused: false)
-            Button {
-                nav.searchOpen = false
-            } label: {
-                JoeSecondaryLabel(title: "⟵ Quay lại")
-            }
-            .joeCardButton()
-            .focused($keyFocus, equals: .back)
+            // FIX-214 (FULL-THEME-AUDIT-214 B8): NO
+            // "⟵ Quay lại" pill beside the field under
+            // Private Cinema — the drawing has none;
+            // Menu is the standard exit (the layer's
+            // onExitCommand closes it, and with focus on
+            // the strip it closes directly). Design-team
+            // call per the audit's fix text: removed, not
+            // relocated. (The legacy fieldRow keeps its
+            // button — other themes, other drawings.)
         }
         .focusSection()
     }

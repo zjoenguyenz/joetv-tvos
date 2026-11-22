@@ -46,7 +46,14 @@ struct PCClockLabel: View {
 /// the single source both the bar itself (JoeTVApp
 /// .topBar's PC arm) and the bar-clearance inset below
 /// read, so the two can never drift apart.
-let joePCBarHeight: CGFloat = 132
+/// FIX-214 (DESIGN-PASS-214 §1a): 132 → 148 — the raised
+/// band is one half of the clearance system (bar 148 +
+/// hero text zone 394 ≤ stage 560) that ends the
+/// band/text collisions of the 2.1.3 round for good;
+/// every reader of this constant (bar frame, inset,
+/// the homes' −joePCBarHeight compensations) moves
+/// together by construction.
+let joePCBarHeight: CGFloat = 148
 
 /// FIX-213 (Fault 16): the bar-clearance inset for the
 /// PC homes' scroll views. The shell's PC bar OVERLAYS
@@ -158,12 +165,26 @@ struct PCNavLabel: View {
             Text(title)
                 .font(JoePCType.outfit(24))
         }
-        .foregroundStyle(selected ? theme.bg : theme.text)
+        // FIX-214 (owner ruling 2026-11-22 14:46 CST —
+        // Chỉ thị 10): menu focus is the RING ONLY. While
+        // this item is focused, the selected treatment
+        // (ivory capsule + ink text) is SUPPRESSED — the
+        // celadon ring below is the only focus
+        // presentation, for every item including the
+        // selected one. Unfocused, the selected item
+        // keeps its ivory capsule: that capsule is the
+        // SELECTED marker (drawn), not a focus treatment.
+        // (Pre-fix the two combined by addition, so a
+        // selected + focused item wore fill AND ring
+        // while its neighbour wore ring only — the
+        // desync in the owner's clip.)
+        .foregroundStyle(selected && !isFocused ? theme.bg : theme.text)
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
         .padding(.horizontal, 27)
         .padding(.vertical, 13)
-        .background(Capsule().fill(selected ? theme.text : Color.clear))
+        .background(Capsule().fill(selected && !isFocused
+                                   ? theme.text : Color.clear))
         .overlay {
             if isFocused {
                 Capsule()
@@ -173,6 +194,126 @@ struct PCNavLabel: View {
         }
         .scaleEffect(isFocused ? 1.035 : 1.0)
         .animation(JoeCinemaFocus.tileCurve, value: isFocused)
+    }
+}
+
+// MARK: - Hero scrims (FIX-214, FULL-THEME-AUDIT-214 Phần C họ 1)
+//
+// The design's TWO static hero scrims, verbatim from the
+// many-rail specification ("Scrim tĩnh phía trên cả 2:
+// trái #0C1215ED 0% / A6 39% / 12 79%; đáy Ink32% /
+// 8C60% / 1F100%") — Ink stops, NOT black: the shipped
+// heroes painted a five-stop BLACK gradient (left) and a
+// two-stop clear→bg ramp (bottom), a different colour
+// family from the drawing on all three heroes
+// (cinemaHeroBlock, tvbHeroBlock, the Torrent hero).
+// One shared definition here; every hero paints these
+// two and no other scrim. The bottom ramp's stop
+// positions run top→bottom of the stage, exactly as the
+// design team's approved trial render painted them
+// (alpha 0x32 at the top, 0x8C at 60%, 0x1F at the
+// bottom edge).
+enum JoeCinemaScrims {
+    private static let ink = Color(red: 0.047, green: 0.070,
+                                   blue: 0.082) // #0C1215
+
+    static var left: LinearGradient {
+        // Exactly the spec's THREE stops — past 0.79
+        // the 0x12 ink holds to the edge, as drawn
+        // (gate R1 Lens 3: a fourth fade-to-clear stop
+        // was NOT in the drawing).
+        LinearGradient(stops: [
+            .init(color: ink.opacity(237.0 / 255.0), location: 0),
+            .init(color: ink.opacity(166.0 / 255.0), location: 0.39),
+            .init(color: ink.opacity(18.0 / 255.0), location: 0.79)
+        ], startPoint: .leading, endPoint: .trailing)
+    }
+
+    static var bottom: LinearGradient {
+        LinearGradient(stops: [
+            .init(color: ink.opacity(50.0 / 255.0), location: 0),
+            .init(color: ink.opacity(140.0 / 255.0), location: 0.6),
+            .init(color: ink.opacity(31.0 / 255.0), location: 1)
+        ], startPoint: .top, endPoint: .bottom)
+    }
+}
+
+// MARK: - Hero text measurement (FIX-214, DESIGN-PASS-214 §1a)
+//
+// The hero text-zone budget (bottom 394 of the 560 stage;
+// 428 of the HomeTVBFocus form's own 600) is enforced by
+// MEASURING the two variable rows — the title's wrapped
+// line count and the synopsis' — with the bundled fonts
+// themselves (UIFont metrics), then applying the pass's
+// compression order: synopsis collapses 2→1→0 lines,
+// then the origin-name row hides. Eyebrow · title ·
+// meta · actions are always kept. A font that fails to
+// load measures as the system font (a wider, conservative
+// stand-in — the compression then errs toward MORE air,
+// never toward the overlap this budget exists to kill).
+enum JoeHeroMeasure {
+    private static func font(_ postScriptName: String,
+                             _ size: CGFloat) -> UIFont {
+        UIFont(name: postScriptName, size: size)
+            ?? UIFont.systemFont(ofSize: size)
+    }
+
+    /// Wrapped line count of `text` in the given bundled
+    /// face at `width`, at least 1.
+    static func lines(of text: String, postScriptName: String,
+                      size: CGFloat, width: CGFloat) -> Int {
+        guard !text.isEmpty else { return 0 }
+        let f = font(postScriptName, size)
+        let rect = (text as NSString).boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: f], context: nil)
+        return max(1, Int(ceil(rect.height / f.lineHeight)))
+    }
+
+    static func lineHeight(postScriptName: String,
+                           size: CGFloat) -> CGFloat {
+        font(postScriptName, size).lineHeight
+    }
+}
+
+// MARK: - Hero meta line (FIX-214, FULL-THEME-AUDIT-214 B2)
+//
+// The drawn meta line is IVORY text with only the ★
+// celadon — the shipped heroes painted the whole line
+// celadon (theme.heroMeta). One shared renderer for the
+// homes' meta rows: the string is split on its " · "
+// separators; a segment that carries the rating star
+// paints the ★ glyph in celadon (theme.heroMeta) and
+// the rest of the segment — like every other segment —
+// in ivory (theme.text). The quality chip that rides
+// beside the line stays the callers' own.
+struct JoeCinemaMetaText: View {
+    let meta: String
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        text
+            .font(JoePCType.outfit(20))
+            .lineLimit(1)
+    }
+
+    private var text: Text {
+        let segments = meta.components(separatedBy: " · ")
+        var out = Text("")
+        for (index, segment) in segments.enumerated() {
+            if index > 0 {
+                out = out + Text(" · ").foregroundColor(theme.text)
+            }
+            if segment.hasPrefix("★") {
+                out = out + Text("★").foregroundColor(theme.heroMeta)
+                    + Text(String(segment.dropFirst()))
+                        .foregroundColor(theme.text)
+            } else {
+                out = out + Text(segment).foregroundColor(theme.text)
+            }
+        }
+        return out
     }
 }
 
@@ -306,6 +447,25 @@ final class JoeCinemaBackdropController: ObservableObject {
         pendingTask?.cancel()
         pendingTask = nil
         generation += 1
+        // FIX-214 (DESIGN-PASS-214 §3.3): crossfade
+        // coalescing — a focus move during an in-flight
+        // crossfade SETTLES that fade instantly (the
+        // incoming bitmap becomes the base layer)
+        // instead of leaving two fades to fight over the
+        // top layer; the new item's own fade (if its art
+        // differs) then starts from a settled base. The
+        // same-art branch below has settled this way
+        // since FIX-8; this is that settle generalised
+        // to every focus move. The superseded fade's
+        // promotion task identity-checks its bitmap
+        // before settling, so it no-ops against the
+        // cleared top layer. (No-op under Reduce Motion:
+        // no top layer ever exists there.)
+        if topImage != nil {
+            baseImage = topImage
+            topImage = nil
+            topOpacity = 0
+        }
         guard let item else {
             let gen = generation
             pendingTask = Task { @MainActor in

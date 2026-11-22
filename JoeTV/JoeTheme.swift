@@ -226,12 +226,27 @@ struct ThemeTokens {
         surfaceBottom: Color(red: 0.063, green: 0.086, blue: 0.102),       // #10161A (Panel family, darker stop)
         surface2: Color(red: 0.094, green: 0.125, blue: 0.141),            // #182024 Panel
         stroke: Color.white.opacity(0.16),
-        fieldBar: Color(red: 0.133, green: 0.180, blue: 0.200),            // #222E33 (Panel family)
-        accent: Color(red: 0.788, green: 0.867, blue: 0.698),
+        // FIX-214 (BAR-PROVENANCE): the design's fieldBar is
+        // #22312E (the DEVIATION-TABLE value); the 2.1.1
+        // Panel-family re-valuation #222E33 drifted from it
+        // and the PC Settings chrome did not even read the
+        // token. Restored here; the chrome reads it below.
+        fieldBar: Color(red: 0.133, green: 0.192, blue: 0.180),            // #22312E
+        // FIX-214 (FULL-THEME-AUDIT-214 A1): ONE celadon in
+        // this theme — the chip-selected fill and the TVB
+        // episode numbers read `accent`, the focus family
+        // reads accent2; #C9DDB2 vs #D8E6BB were two
+        // different celadons living side by side. The
+        // design's celadon is #D8E6BB.
+        accent: Color(red: 0.847, green: 0.902, blue: 0.733),              // #D8E6BB Celadon
         accent2: Color(red: 0.847, green: 0.902, blue: 0.733),
         onAccent: Color(red: 0.075, green: 0.106, blue: 0.090),
-        focus: Color(red: 0.957, green: 0.945, blue: 0.894),
-        focusTitle: Color(red: 0.957, green: 0.945, blue: 0.894),
+        // FIX-214 (FULL-THEME-AUDIT-214 A1): focus /
+        // focusTitle are the design's Ivory #F2EEE5 (the
+        // #F4F1E4 values were residue of the Fault-2
+        // colour-swap family).
+        focus: Color(red: 0.949, green: 0.933, blue: 0.898),               // #F2EEE5 Ivory
+        focusTitle: Color(red: 0.949, green: 0.933, blue: 0.898),          // #F2EEE5 Ivory
         text: Color(red: 0.949, green: 0.933, blue: 0.898),                // #F2EEE5
         meta: Color(red: 0.675, green: 0.718, blue: 0.722),                // #ACB7B8
         heroMeta: Color(red: 0.847, green: 0.902, blue: 0.733),
@@ -567,9 +582,11 @@ extension View {
 /// the design's field treatment — a celadon OUTSET outline
 /// (2 px, offset 4 px), paired with the celadon border the
 /// chromes paint on the field's own edge; under every other
-/// theme the legacy outset ring, value-for-value (the
-/// joeOutsetStrokeBorder band in theme.focus at ringWidth,
-/// offset 0).
+/// theme the focus stroke sits ON the bar (FIX-214,
+/// DESIGN-PASS-214 §1e / Ruling 17: the outset band that
+/// stood OFF the bar was the second, banned frame — an
+/// inside strokeBorder on the bar's own rounded rect, in
+/// theme.focus at ringWidth, replaces it).
 private struct JoeFieldFocusRing: View {
     let radius: CGFloat
     let focused: Bool
@@ -583,8 +600,8 @@ private struct JoeFieldFocusRing: View {
                               lineWidth: focused ? 2 : 0)
         } else {
             RoundedRectangle(cornerRadius: radius)
-                .joeOutsetStrokeBorder(focused ? theme.focus : .clear,
-                                       lineWidth: focused ? theme.ringWidth : 0)
+                .strokeBorder(focused ? theme.focus : .clear,
+                              lineWidth: focused ? theme.ringWidth : 0)
         }
     }
 }
@@ -624,8 +641,13 @@ struct JoePrimaryLabel: View {
         .foregroundStyle(theme.onAccent)
         .padding(.horizontal, 22)
         .padding(.vertical, 13)
-        .background(Capsule().fill(theme.accent2))
-        .overlay(JoeOutsetRing(shape: Capsule(),
+        // FIX-214 (FULL-THEME-AUDIT-214 A3): the Geometry
+        // sheet draws the action button as a rounded rect
+        // r7 (the source-card family), not a capsule — the
+        // shape changes, every other value (fill, padding,
+        // focus ring, scale) is the Fault-11 leg's own.
+        .background(RoundedRectangle(cornerRadius: 7).fill(theme.accent2))
+        .overlay(JoeOutsetRing(shape: RoundedRectangle(cornerRadius: 7),
                                color: JoeCinemaFocus.ivory,
                                lineWidth: 2, offset: 6))
         .scaleEffect(isFocused ? 1.025 : 1)
@@ -704,9 +726,13 @@ struct JoeSecondaryLabel: View {
         .foregroundStyle(theme.text)
         .padding(.horizontal, 22)
         .padding(.vertical, 13)
-        .background(Capsule().fill(theme.surface2))
-        .overlay(Capsule().strokeBorder(theme.stroke, lineWidth: 1.5))
-        .overlay(JoeOutsetRing(shape: Capsule(),
+        // FIX-214 (FULL-THEME-AUDIT-214 A3): rounded rect
+        // r7, as drawn (see JoePrimaryLabel's cinemaBody) —
+        // fill, resting stroke and focus ring unchanged.
+        .background(RoundedRectangle(cornerRadius: 7).fill(theme.surface2))
+        .overlay(RoundedRectangle(cornerRadius: 7)
+            .strokeBorder(theme.stroke, lineWidth: 1.5))
+        .overlay(JoeOutsetRing(shape: RoundedRectangle(cornerRadius: 7),
                                color: JoeCinemaFocus.ivory,
                                lineWidth: 2, offset: 6))
         .scaleEffect(isFocused ? 1.025 : 1)
@@ -928,14 +954,20 @@ private struct JoeSettingsFilledMark: View {
                 .foregroundStyle(JoeCinemaFocus.celadon)
                 .padding(.trailing, 22)
         } else {
-            ZStack {
-                Circle().fill(JoeTheme.okGreen)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 32, height: 32)
-            .padding(.trailing, 20)
+            // FIX-214 (DESIGN-PASS-214 §1e / Ruling 17):
+            // the legacy leg takes the same FORM as the PC
+            // leg — a bare check inside the bar, no disc —
+            // in the legacy field family's own accent
+            // colour (theme.accent2, the fields' caret /
+            // tint colour), at the same inside-the-bar
+            // placement. The 2026-11-19 law's FUNCTION (a
+            // filled field reads at a glance) is preserved;
+            // its green-disc FORM is what the owner's
+            // 2026-11-22 ruling retired, on every theme.
+            Image(systemName: "checkmark")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(theme.accent2)
+                .padding(.trailing, 22)
         }
     }
 }
@@ -952,8 +984,7 @@ struct JoeSettingsFieldChrome: ViewModifier {
     func body(content: Content) -> some View {
         // Fault 12 fix round (2026-11-22): under Private
         // Cinema the bar takes the design's field treatment —
-        // Panel fill (#182024, the surface2 token), ivory
-        // text, radius 7, the celadon border + outset outline
+        // ivory text, the celadon border + outset outline
         // focus (JoeFieldFocusRing, shared with the search
         // field), and the celadon filled check
         // (JoeSettingsFilledMark). The 2026-11-19 law's shape
@@ -963,17 +994,28 @@ struct JoeSettingsFieldChrome: ViewModifier {
         // are values in this same chain plus one
         // always-installed border overlay that paints
         // clear/0 off the PC path.
+        // FIX-214 (BAR-PROVENANCE): the PC leg's fill and
+        // radius were the code's own drift, not the drawing:
+        // the fill is the design's fieldBar #22312E (the
+        // token, restored in the PC token table — the legacy
+        // leg already filled theme.fieldBar), and the radius
+        // is the field family's rField 12 (the hard-coded 7
+        // was borrowed from the Search input in 2.1.3 — a
+        // different surface, which keeps its own r7 in
+        // JoeFieldChrome). Both legs now read the same two
+        // tokens, so the bar system is one system (Ruling
+        // 21/22).
         let pc = theme.id == .privateCinema
-        let radius: CGFloat = pc ? 7 : theme.rField
+        let radius: CGFloat = theme.rField
         return content
             .focusEffectDisabled()
             .foregroundStyle(pc ? theme.text : .white)
             .tint(theme.accent2)
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
-            // Room for the check disc at the bar's trailing
+            // Room for the check at the bar's trailing
             // end, inside the bar: when the mark is earned the
-            // content insets by an extra 48 pt (the 32 pt disc
+            // content insets by an extra 48 pt (the check
             // plus clearance) so text and
             // secure bullets never run under it (the field is
             // full-width in its row, so the bar itself keeps
@@ -981,7 +1023,7 @@ struct JoeSettingsFieldChrome: ViewModifier {
             // area, not the bar's frame).
             .padding(.trailing, filled ? 48 : 0)
             .background(RoundedRectangle(cornerRadius: radius)
-                .fill(pc ? theme.surface2 : theme.fieldBar))
+                .fill(theme.fieldBar))
             .overlay(RoundedRectangle(cornerRadius: radius)
                 .strokeBorder(pc ? (focused ? theme.accent2 : theme.stroke)
                                  : .clear,
@@ -1038,10 +1080,25 @@ struct JoeCardButtonStyle: ButtonStyle {
 }
 
 struct JoeCardButton: ViewModifier {
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
     func body(content: Content) -> some View {
         content
             .buttonStyle(JoeCardButtonStyle())
             .focusEffectDisabled()
+            // FIX-214 (DESIGN-PASS-214 §5, Finding 7 —
+            // Z-ORDER ONLY): under Private Cinema a focused
+            // rail card's scale + outset-ring overhang must
+            // paint ABOVE its neighbours deterministically,
+            // not by stack position. The modifier is applied
+            // to the button itself, so this zIndex lands on
+            // the stack child. Clipping is NOT revisited —
+            // the rails' .scrollClipDisabled() stays exactly
+            // as the design's outset rings require. Legacy
+            // themes: no zIndex change (their cards carry no
+            // overhang).
+            .zIndex(theme.id == .privateCinema && isFocused ? 1 : 0)
     }
 }
 
