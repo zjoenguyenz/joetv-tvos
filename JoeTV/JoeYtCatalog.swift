@@ -321,6 +321,15 @@ struct JoeYtFile: Codable, Sendable {
 //      that title's chain poster (its provider
 //      posterFallback first, in TP → KK → VS → F4K order;
 //      the title's own posterURLString behind it).
+//      v2.0.49: the index also claims each "/"-separated
+//      component of a combined chain title under its own
+//      key, so one component alone can borrow the poster.
+//   2.5 (v2.0.49). A TMDB SEARCH poster keyed on the
+//      series' local title (TMDBClient.searchPoster) —
+//      the leg for a series with tmdbId 0 (or a failed id
+//      leg) and no chain poster, which previously had no
+//      poster leg at all ("Hồ Sơ Trinh Sát II", VERDICT
+//      §4). It IS a real portrait poster (source .tmdb).
 //   3. Episode 1's YouTube thumbnail (the pre-2.0.47
 //      behaviour, JoeYtSeries.posterURL).
 // Every resolved result is cached per pid for the
@@ -395,12 +404,32 @@ enum JoeYtPosterResolver {
         if let catalog = TVBCatalog.loadBundled() {
             let ordered = catalog.titles.filter { $0.isDisplayed }
                 + catalog.titles.filter { !$0.isDisplayed }
-            for title in ordered {
-                for name in [title.titleVi, title.titleViTmdb,
-                             title.titleEn, title.titleOriginal] {
-                    let key = posterMatchKey(name)
-                    if !key.isEmpty, index[key] == nil {
-                        index[key] = title
+            // v2.0.49: two claim passes (gate R1, lens B).
+            // Pass 1 claims every name field WHOLE, exactly
+            // as before. Pass 2 claims each "/"-separated
+            // COMPONENT under its own key, into still-
+            // unclaimed slots only — a combined chain title
+            // ("Ỷ Thiên Đồ Long Ký / Cô Gái Đồ Long") thus
+            // also answers a lookup for one component alone
+            // ("co gai do long", VERDICT §4), while a title
+            // whose WHOLE name equals that component keeps
+            // its own poster (pass 1 already claimed it).
+            // First-claim-wins within each pass.
+            for pass in 0...1 {
+                for title in ordered {
+                    for name in [title.titleVi, title.titleViTmdb,
+                                 title.titleEn, title.titleOriginal] {
+                        let fields: [String] = pass == 0
+                            ? [name]
+                            : name.split(separator: "/")
+                                .map { $0.trimmingCharacters(in: .whitespaces) }
+                                .filter { !$0.isEmpty }
+                        for field in fields {
+                            let key = posterMatchKey(field)
+                            if !key.isEmpty, index[key] == nil {
+                                index[key] = title
+                            }
+                        }
                     }
                 }
             }
@@ -410,6 +439,16 @@ enum JoeYtPosterResolver {
         let published = chainIndex ?? index
         lock.unlock()
         return published
+    }
+
+    /// v2.0.49: the series' year for the TMDB search leg —
+    /// the first 4-digit run in its local title, else in
+    /// its matched Vi name (Providers.yearOf); "" when
+    /// neither carries one (the search leg then treats the
+    /// year as unknown and its year guard stays open).
+    private static func seriesYear(_ series: JoeYtSeries) -> String {
+        let fromTitle = Providers.yearOf(series.title)
+        return fromTitle.isEmpty ? Providers.yearOf(series.matchVi) : fromTitle
     }
 
     /// Tier 2 alone (synchronous, no network): the chain
@@ -440,7 +479,11 @@ enum JoeYtPosterResolver {
     /// pid. Tier 1 rides the pipeline's TMDB poster leg
     /// (TMDBClient.posterPath underneath, path cached per
     /// identity including negatives); tier 2 is the local
-    /// chain index; tier 3 is the episode-1 thumbnail.
+    /// chain index; tier 2.5 (v2.0.49) is the TMDB search
+    /// leg, run when the id leg is absent/failed AND the
+    /// chain leg missed; tier 3 is the episode-1
+    /// thumbnail. Fail-soft: a failed search leg falls
+    /// through to the thumbnail exactly as before.
     static func resolve(_ series: JoeYtSeries) async -> JoeYtResolvedPoster {
         if let hit = lock.withLock({ resolvedByPid[series.pid] }) {
             return hit
@@ -452,6 +495,13 @@ enum JoeYtPosterResolver {
             resolved = JoeYtResolvedPoster(url: tmdbURL, source: .tmdb)
         } else if let chainURL = chainPoster(for: series) {
             resolved = JoeYtResolvedPoster(url: chainURL, source: .chain)
+        } else if let searchURL = await TMDBClient.searchPoster(
+            name: series.title,
+            year: seriesYear(series)),
+           let searchPosterURL = URL(string: searchURL) {
+            // v2.0.49: a real TMDB poster found by search —
+            // source .tmdb, so isPortraitPoster stays true.
+            resolved = JoeYtResolvedPoster(url: searchPosterURL, source: .tmdb)
         } else {
             resolved = JoeYtResolvedPoster(url: series.posterURL,
                                             source: .youtubeThumbnail)

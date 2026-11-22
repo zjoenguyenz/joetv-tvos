@@ -647,6 +647,20 @@ struct JoeWallHomeView: View {
     /// landing Đóng writes when the panel folds (see the
     /// header note in `body`).
     @FocusState private var openerFocused: Bool
+    /// v2.0.49 (item 7, fix round 2): the host's exit
+    /// confirmation state, bound from JoePhimHome (the
+    /// wall's sole instantiation site) — the wall's own
+    /// Menu handler below raises the host's ONE alert
+    /// through it when focus already sits on the wall's
+    /// first element (the host presents the alert; the
+    /// wall never grows a second one).
+    @Binding var exitConfirm: Bool
+    /// v2.0.49 (item 7, fix round 2): bumped by the
+    /// wall's Menu handler to make its ScrollViewReader
+    /// jump to the top of the wall (owner order
+    /// 2026-11-21) — the same shape as every other
+    /// page's topScrollSignal.
+    @State private var topScrollSignal = 0
 
     private var wallMovies: [Movie] { filter.apply(phim: phim) }
 
@@ -754,6 +768,11 @@ struct JoeWallHomeView: View {
                 }
                 .focusSection()
             }
+            // v2.0.49 (item 7, fix round 2): the ScrollView
+            // sits inside a ScrollViewReader so Menu can
+            // jump straight to the top of the wall (see
+            // the .onExitCommand below).
+            ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 36) {
                 if nav.browseOpen {
@@ -842,6 +861,13 @@ struct JoeWallHomeView: View {
                         .foregroundStyle(.orange)
                 }
             }
+            .id("joeWallHomeTop")
+        }
+        // v2.0.49 (item 7, fix round 2): the Menu-to-top
+        // jump's scroll hook, inside the reader.
+        .onChange(of: topScrollSignal) { _, _ in
+            proxy.scrollTo("joeWallHomeTop", anchor: .top)
+        }
         }
         // v2.0.16 (owner's 2026-11-17 sweep): this container
         // CLIPS at its frame — no .scrollClipDisabled(). In
@@ -872,6 +898,37 @@ struct JoeWallHomeView: View {
         // entry, which is also where Đóng's explicit write
         // lands on a fold.)
         .defaultFocus($chipFocus, "genre:all")
+        // v2.0.49 (item 7, fix round 2 — owner order
+        // 2026-11-21 22:32): the wall's own Menu handler,
+        // the nearer ancestor while the wall is the Phim
+        // face (the JoeSearch shape: the layer's own
+        // handler wins over JoePhimHome's root handler, so
+        // one press still closes exactly one layer). Menu
+        // jumps straight to the top of the wall first:
+        // the "Tất cả phim" panel still folds on Menu
+        // exactly as before (JoePhimHome's first branch,
+        // carried here); focus already on the wall's first
+        // element keeps the existing exit confirmation —
+        // raised through the host's binding, so the host's
+        // one alert presents it; anywhere deeper, Menu
+        // scrolls to the top and lands focus on that first
+        // element, swallowing the exit. The first element
+        // is the home mode's "Tất cả phim" entry
+        // (openerFocused): the .defaultFocus note above
+        // establishes it as the home mode's first
+        // focusable element (the chip it names exists only
+        // in the panel mode, whose Menu press folds the
+        // panel before this check is reached).
+        .onExitCommand {
+            if nav.browseOpen {
+                nav.browseOpen = false
+            } else if openerFocused {
+                exitConfirm = true
+            } else {
+                topScrollSignal += 1
+                openerFocused = true
+            }
+        }
         // v2.0.11: every panel close (Đóng, Menu, section
         // change) resets the filter — the per-open semantics
         // the A/F browse layer gets from being recreated per

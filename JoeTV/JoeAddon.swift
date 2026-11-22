@@ -5,13 +5,14 @@ import SwiftUI
 // The owner's OWN Stremio addon (re TV is the first) as a
 // first-class library source, per the design's §5:
 //
-// - Its link resolves exactly like MediaFusion's
-//   (TorrentSettings.effectiveUserAddonURL — stored wins,
-//   the bundled RETV_URL secret is the fallback) and is
-//   NEVER logged: it carries his personal account token
-//   in its path (FL-073). DiagLog (tag ADDON) records
-//   presence, the addon's own name and catalogue counts
-//   only.
+// - Its link resolves from Settings alone
+//   (TorrentSettings.effectiveUserAddonURL — the stored
+//   value is the only source since v2.0.49, when the
+//   bundled retv.me default was removed by the owner's
+//   order of 2026-11-21 22:41 CST) and is NEVER logged:
+//   it carries his personal account token in its path
+//   (FL-073). DiagLog (tag ADDON) records presence, the
+//   addon's own name and catalogue counts only.
 // - The full library comes in as a Home section (one
 //   rail per non-search catalogue, manifest order,
 //   paged by skip=), EXCEPT titles that match a title

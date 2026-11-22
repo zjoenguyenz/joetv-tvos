@@ -46,15 +46,17 @@ jobs:
         run: |
           printf 'enum TMDBBundledKey {\n    static let value = "%s"\n}\n' "$TMDB_API_KEY" > JoeTV/TMDBKey.swift
           printf 'enum TMDBShelfKey {\n    static let value = "%s"\n}\n' "$TMDB_API_KEY" > JoeTVTopShelf/TMDBShelfKey.swift
+      # v2.0.49: the retvURL injection was removed with the
+      # bundled addon (owner order 2026-11-21) — the shipped
+      # binary must not contain that link at all.
       - name: Inject bundled tokens
         env:
           RD_TOKEN: ${{ secrets.RD_TOKEN }}
           TORBOX_TOKEN: ${{ secrets.TORBOX_TOKEN }}
           PREMIUMIZE_TOKEN: ${{ secrets.PREMIUMIZE_TOKEN }}
           MF_URL: ${{ secrets.MF_URL }}
-          RETV_URL: ${{ secrets.RETV_URL }}
         run: |
-          printf 'enum BundledTokens {\n    static let rdToken = "%s"\n    static let torboxToken = "%s"\n    static let premiumizeToken = "%s"\n    static let mfURL = "%s"\n    static let retvURL = "%s"\n}\n' "$RD_TOKEN" "$TORBOX_TOKEN" "$PREMIUMIZE_TOKEN" "$MF_URL" "$RETV_URL" > JoeTV/BundledTokens.swift
+          printf 'enum BundledTokens {\n    static let rdToken = "%s"\n    static let torboxToken = "%s"\n    static let premiumizeToken = "%s"\n    static let mfURL = "%s"\n}\n' "$RD_TOKEN" "$TORBOX_TOKEN" "$PREMIUMIZE_TOKEN" "$MF_URL" > JoeTV/BundledTokens.swift
 
       - name: Generate Xcode project
         run: xcodegen generate

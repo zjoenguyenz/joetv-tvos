@@ -66,6 +66,11 @@ struct JoeSearchView: View {
     /// key or the Quay lại button — see JoeSearchKeyFocus.
     /// The TextField that used to own this landing is gone.
     @FocusState private var keyFocus: JoeSearchKeyFocus?
+    /// v2.0.49 (item 7, fix round): bumped by the layer's
+    /// Menu handler to make the results ScrollViewReader
+    /// jump to the top of the page (owner order
+    /// 2026-11-21).
+    @State private var topScrollSignal = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -177,7 +182,27 @@ struct JoeSearchView: View {
         // and while a movie detail is open above the search,
         // the detail's own handler is the nearer ancestor and
         // wins, preserving exactly-one-layer-per-press.
-        .onExitCommand { nav.searchOpen = false }
+        .onExitCommand {
+            // v2.0.49 (item 7, fix round — owner order
+            // 2026-11-21 22:32): Menu jumps straight to
+            // the top of the page first. Focus anywhere
+            // on the letter strip or the Quay lại button
+            // (keyFocus != nil — the strip is the page's
+            // top region and its "a" key the declared
+            // landing, see .defaultFocus below), or on
+            // the Retry button of the pinned failure
+            // surface (no scrollable results under it),
+            // keeps the existing close; anywhere else,
+            // Menu scrolls the results to the top and
+            // lands focus on the strip, swallowing the
+            // exit.
+            if keyFocus != nil || retryFocused {
+                nav.searchOpen = false
+            } else {
+                topScrollSignal += 1
+                keyFocus = .key("a")
+            }
+        }
         // 1.9.2 (Team 9 item 8): the query field is the
         // layer's declared initial focus — a static,
         // appearance-time .defaultFocus, the same construction
@@ -239,6 +264,11 @@ struct JoeSearchView: View {
     @ViewBuilder
     private var resultsArea: some View {
         if theme.id == .sourceBoard && !results.isEmpty {
+            // v2.0.49 (item 7, fix round): the ScrollView
+            // sits inside a ScrollViewReader so Menu can
+            // jump straight to the top of the results (see
+            // the body's .onExitCommand).
+            ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36) {
                     ForEach([Providers.KK, Providers.F4K, Providers.VS, Providers.TP],
@@ -255,6 +285,13 @@ struct JoeSearchView: View {
                     addonGroupRail
                 }
                 .padding(.vertical, 8)
+                .id("joeSearchTop")
+            }
+            // v2.0.49 (item 7, fix round): the Menu-to-top
+            // jump's scroll hook, inside the reader.
+            .onChange(of: topScrollSignal) { _, _ in
+                proxy.scrollTo("joeSearchTop", anchor: .top)
+            }
             }
             // v2.0.12 (search overlap fix): this container
             // deliberately CLIPS at its frame — no
@@ -275,6 +312,11 @@ struct JoeSearchView: View {
             // this container, and this container's frame is
             // now the hard boundary nothing crosses.
         } else {
+            // v2.0.49 (item 7, fix round): the ScrollView
+            // sits inside a ScrollViewReader so Menu can
+            // jump straight to the top of the results (see
+            // the body's .onExitCommand).
+            ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 // v2.0.45 (leg 3): the grid and the addon
                 // group stack in one column — the group
@@ -302,6 +344,13 @@ struct JoeSearchView: View {
                 .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
                 addonGroupRail
                 }
+                .id("joeSearchTop")
+            }
+            // v2.0.49 (item 7, fix round): the Menu-to-top
+            // jump's scroll hook, inside the reader.
+            .onChange(of: topScrollSignal) { _, _ in
+                proxy.scrollTo("joeSearchTop", anchor: .top)
+            }
             }
             // v2.0.12 (search overlap fix): CLIPS at its
             // frame, same as the source-board branch above —

@@ -134,6 +134,15 @@ enum TMDBClient {
     private nonisolated(unsafe) static var ratingCache: [String: Double] = [:]
     private nonisolated(unsafe) static var personCreditsCache: [Int: [TMDBCreditTitle]] = [:]
     private nonisolated(unsafe) static var collectionCache: [Int: [TMDBCreditTitle]] = [:]
+    /// v2.0.49: searchPoster outcomes, keyed by normalised
+    /// title + year ("" value = a cached negative), so TVB
+    /// rails never re-search per card.
+    private nonisolated(unsafe) static var searchPosterCache: [String: String] = [:]
+    /// v2.0.49: the trailer-key cache (fetchTrailerKey) —
+    /// same discipline as the poster search cache: keyed
+    /// by kind|id, "" is a cached NEGATIVE (the title has
+    /// no usable trailer), every access under cacheLock.
+    private nonisolated(unsafe) static var trailerCache: [String: String] = [:]
     private static let cacheLock = NSLock()
 
     /// The title's logo art (TMDB /images): Vietnamese first,
@@ -244,20 +253,29 @@ enum TMDBClient {
     /// backdrop. One /search/multi call per query name —
     /// origin name first, the Vietnamese name as fallback —
     /// accepting only results that carry a backdrop_path,
-    /// whose normalized title matches either of the film's
-    /// names, and whose year matches when both years are
+    /// whose normalized title matches the film's LOCAL
+    /// name, and whose year matches when both years are
     /// known. Returns the w1280 URL or nil; fail-soft.
+    /// v2.0.49 (match guard): the origin name is a SEARCH
+    /// QUERY only — it NO LONGER qualifies a result by
+    /// itself. The old rule accepted a result matching
+    /// EITHER name, so KKPhim's "Xóm Nhỏ" (origin_name
+    /// "Hamlet", no TMDB id) shipped the foreign film
+    /// "Hamlet"'s backdrop on the strength of the bogus
+    /// origin name alone (VERDICT §2). On no confident
+    /// match this returns nil and the caller falls back
+    /// to the title's own art.
     static func searchBackdrop(name: String, origin: String,
                                year: String) async -> String? {
         let key = apiKey
         guard !key.isEmpty else { return nil }
+        let wantName = Providers.normalizeTitle(name)
+        guard !wantName.isEmpty else { return nil }
         var queries: [String] = []
         for q in [origin, name] {
             let t = q.trimmingCharacters(in: .whitespaces)
             if !t.isEmpty, !queries.contains(t) { queries.append(t) }
         }
-        let wantNames = [Providers.normalizeTitle(name),
-                         Providers.normalizeTitle(origin)]
         let wantYear = Providers.yearOf(year)
         for q in queries {
             guard let root = try? await JoeHTTP.getJSON(
@@ -269,9 +287,10 @@ enum TMDBClient {
                 if backdropPath.isEmpty { continue }
                 let candidates = ["title", "name", "original_title", "original_name"]
                     .map { Providers.normalizeTitle(JSON.str(item, $0)) }
-                guard candidates.contains(where: {
-                    !$0.isEmpty && wantNames.contains($0)
-                }) else { continue }
+                // v2.0.49: LOCAL name only — see the doc
+                // comment above; an origin-name match alone
+                // must never accept a backdrop.
+                guard candidates.contains(wantName) else { continue }
                 let release = JSON.str(item, "release_date")
                 let dateStr = release.isEmpty
                     ? JSON.str(item, "first_air_date") : release
@@ -282,6 +301,131 @@ enum TMDBClient {
             }
         }
         return nil
+    }
+
+    /// Poster by TV title search (v2.0.49): the TMDB
+    /// search leg of the TVB poster chain (JoeYtPoster
+    /// Resolver's tier between chain and thumbnail) for a
+    /// series whose tmdbId is 0 / unresolvable and which
+    /// borrowed no chain poster — e.g. "Hồ Sơ Trinh Sát
+    /// II", which had no poster leg at all (VERDICT §4).
+    /// /search/tv with language=vi-VN, keyed on the
+    /// series' LOCAL title. Acceptance is strict, the
+    /// same discipline as searchBackdrop's v2.0.49 guard:
+    /// a result counts ONLY when its name or original_name
+    /// normalises (Providers.normalizeTitle) to the local
+    /// title exactly — never an origin name, never a
+    /// fuzzy match — its year agrees when both years are
+    /// known, and it carries a poster_path. Returns the
+    /// w500 URL or nil; fail-soft. The outcome (negatives
+    /// included) is cached per normalised title + year
+    /// under cacheLock, so rails don't re-search per card.
+    static func searchPoster(name: String, year: String) async -> String? {
+        let key = apiKey
+        guard !key.isEmpty else { return nil }
+        let wantName = Providers.normalizeTitle(name)
+        guard !wantName.isEmpty else { return nil }
+        let wantYear = Providers.yearOf(year)
+        let cacheKey = wantName + "|" + wantYear
+        if let hit = cacheLock.withLock({ searchPosterCache[cacheKey] }) {
+            return hit.isEmpty ? nil : hit
+        }
+        var result: String?
+        // Gate R1 (lens B): only an ANSWERED search may be
+        // cached — a transport failure leaves responded
+        // false and caches nothing, so one network flap
+        // cannot disable this title's poster for the whole
+        // session.
+        var responded = false
+        if let root = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/search/tv?api_key=\(key)&language=vi-VN&query=\(JoeHTTP.qenc(name))&include_adult=false",
+            timeout: callTimeout) {
+            responded = true
+            for item in JSON.arr(root, "results") ?? [] {
+                let posterPath = JSON.str(item, "poster_path")
+                if posterPath.isEmpty { continue }
+                let candidates = ["name", "original_name"]
+                    .map { Providers.normalizeTitle(JSON.str(item, $0)) }
+                guard candidates.contains(wantName) else { continue }
+                let itemYear = Providers.yearOf(JSON.str(item, "first_air_date"))
+                if !wantYear.isEmpty, !itemYear.isEmpty,
+                   itemYear != wantYear { continue }
+                result = "https://image.tmdb.org/t/p/w500" + posterPath
+                break
+            }
+        }
+        if responded {
+            cacheLock.withLock { searchPosterCache[cacheKey] = result ?? "" }
+        }
+        return result
+    }
+
+    /// The title's trailer as a YouTube video key
+    /// (v2.0.49 — the backdrop preview's trailer leg; the
+    /// owner's 2026-11-21 22:34–22:39 contract: the
+    /// preview IS the trailer, TMDB first). Reads the
+    /// /videos endpoint of the title's own TMDB identity
+    /// — a native id, never a name search, so the item-5
+    /// match guard is not involved. TMDB filters videos
+    /// by language, so the vi-VN listing is read first
+    /// and the en-US listing second (trailers are
+    /// commonly English-only); the first listing that
+    /// yields a pick wins. A pick is a YouTube-hosted
+    /// entry with a non-empty key: type "Trailer" beats
+    /// "Teaser", an official entry beats an unofficial
+    /// one, and a later published_at beats an earlier
+    /// one. The caller resolves the key through the
+    /// app's own YouTube route (JoeYtResolver), exactly
+    /// like an episode id. Cached per kind|id under
+    /// cacheLock, negatives included ("" = no usable
+    /// trailer), so a detail visit never re-asks.
+    /// Fail-soft: nil on no key, no id, or any failure.
+    static func fetchTrailerKey(tmdbId: String, type: String) async -> String? {
+        let key = apiKey
+        guard !key.isEmpty, !tmdbId.isEmpty else { return nil }
+        let kind = (type == "tv") ? "tv" : "movie"
+        let cacheKey = kind + "|" + tmdbId
+        if let hit = cacheLock.withLock({ trailerCache[cacheKey] }) {
+            return hit.isEmpty ? nil : hit
+        }
+        var result: String?
+        // Gate R1 (lens B): as in searchPoster, only an
+        // ANSWERED lookup may be cached — a pure transport
+        // failure caches nothing and the next visit retries.
+        var responded = false
+        for language in ["vi-VN", "en-US"] {
+            guard let root = try? await JoeHTTP.getJSON(
+                "https://api.themoviedb.org/3/\(kind)/\(tmdbId)/videos?api_key=\(key)&language=\(language)",
+                timeout: callTimeout)
+            else { continue }
+            responded = true
+            var best: (score: Int, published: String, key: String)?
+            for item in JSON.arr(root, "results") ?? [] {
+                guard JSON.str(item, "site") == "YouTube" else { continue }
+                let videoKey = JSON.str(item, "key")
+                guard !videoKey.isEmpty else { continue }
+                let videoType = JSON.str(item, "type")
+                guard videoType == "Trailer" || videoType == "Teaser"
+                else { continue }
+                var score = videoType == "Trailer" ? 2 : 1
+                if (item["official"] as? Bool) == true { score += 2 }
+                let published = JSON.str(item, "published_at")
+                if let current = best {
+                    if score < current.score { continue }
+                    if score == current.score,
+                       published <= current.published { continue }
+                }
+                best = (score, published, videoKey)
+            }
+            if let best {
+                result = best.key
+                break
+            }
+        }
+        if responded {
+            cacheLock.withLock { trailerCache[cacheKey] = result ?? "" }
+        }
+        return result
     }
 
     /// The title's IMDB id, via TMDB's external_ids — the id

@@ -709,6 +709,14 @@ struct PosterCard: View {
     /// construction (FL-343, convicted from code).
     var artSlotClass: JoeImageSlotClass = .portrait
 
+    /// v2.0.49: fill (crop-to-fill) instead of fit for the
+    /// art bitmap. Default false — every existing call site
+    /// is unchanged. A caller passes true ONLY when it
+    /// KNOWS the winning art is a landscape still (the TVB
+    /// thumbnail leg — see the IMAGE INTEGRITY note on the
+    /// art block); real posters still always fit whole.
+    var artFill: Bool = false
+
     // v2.0.5 (N4): ONE focus source of truth — the card reads
     // its own focus from the environment, exactly like every
     // other label in the theme system (PillLabel, JoeChipLabel,
@@ -776,6 +784,11 @@ struct PosterCard: View {
     // whose "poster" field actually serves a landscape still (the Tủ
     // Phim name swap) is rejected and the TMDB fallback runs, instead
     // of the bitmap letterboxing into a band inside the frame.
+    // v2.0.49 exception: when a caller KNOWS the winning art is a
+    // landscape still (the TVB thumbnail leg — an episode-1 YouTube
+    // thumbnail in a 2:3 rail card, VERDICT §4), fill is that
+    // caller's explicit choice via `artFill`; real posters still
+    // always fit whole.
     /// The TMDB leg of the art slot's fallback ladder,
     /// present only when the record carries a TMDB identity.
     /// The pipeline caches the path lookup per identity, so
@@ -804,7 +817,7 @@ struct PosterCard: View {
             } else {
                 Color.black.opacity(0.35)
             }
-            JoeRemoteImage(url: posterURL, targetPixels: 720, fit: true,
+            JoeRemoteImage(url: posterURL, targetPixels: 720, fit: !artFill,
                            slotClass: artSlotClass,
                            fallbackProvider: tmdbFallback) {
                 if theme.id == .ultra {

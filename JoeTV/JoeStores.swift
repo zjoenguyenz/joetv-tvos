@@ -820,6 +820,94 @@ final class TorHomeStore: ObservableObject {
                 }
             }
         }
+        // Trending rails (v2.0.49, owner redirect 2026-11-21
+        // 22:46 CST): the trending data file (JoeTrendingFile —
+        // self-pulled from the data repo, NEVER a direct TMDB
+        // trending call) publishes as ADDITIONAL catalogues +
+        // rails alongside the discovered ones. Fail-open: any
+        // failure yields no rails and nothing below changes.
+        // Dedupe is against the catalogue rails ONLY (the genre
+        // rails below are a different axis — the same film
+        // legitimately appears under its genre); the file's own
+        // cross-rail dedupe (imdb_id + tmdb_id, first rail wins)
+        // already ran inside JoeTrendingFile.parse.
+        do {
+            let fileRails = await JoeTrendingFile.loadRails()
+            var landedRails = 0
+            var landedItems = 0
+            // Gate R1 (lens B): a superseded load must not
+            // publish — the deadline task can clear `loading`
+            // and a reload can start generation N+1 while
+            // this one is still in flight, and the insert
+            // below is NOT idempotent the way the catalogue
+            // key-writes are. A stale load logs 0/0 below and
+            // publishes nothing.
+            let stillCurrent = loadGeneration == generation
+                && !Task.isCancelled
+            if stillCurrent, !fileRails.isEmpty {
+                // Idempotent re-land: drop any trending
+                // catalogues an earlier load already inserted
+                // (and their rails) so this block can never
+                // duplicate a rail.
+                let staleIds = catalogs
+                    .filter { $0.id.hasPrefix("tmdb-") }.map { $0.id }
+                if !staleIds.isEmpty {
+                    catalogs.removeAll { $0.id.hasPrefix("tmdb-") }
+                    for staleId in staleIds {
+                        rails = rails.filter {
+                            !$0.key.hasPrefix(staleId + "|")
+                        }
+                    }
+                }
+                // Seen-set from ALL metas already in `rails`
+                // at this moment: the IMDb key is imdbId when
+                // the meta carries one, else its id when that
+                // is itself an IMDb id ("tt…").
+                var seen = Set<String>()
+                for metas in rails.values {
+                    for meta in metas {
+                        if !meta.imdbId.isEmpty {
+                            seen.insert(meta.imdbId)
+                        } else if meta.id.hasPrefix("tt") {
+                            seen.insert(meta.id)
+                        }
+                    }
+                }
+                // Placement: immediately after the Cinemeta
+                // fallback trending catalogues (id "top") when
+                // present, else after all discovered catalogues.
+                var insertAt = catalogs.lastIndex { $0.id == "top" }
+                    .map { $0 + 1 } ?? catalogs.count
+                for fileRail in fileRails {
+                    let deduped = fileRail.metas.filter {
+                        seen.insert($0.imdbId).inserted
+                    }
+                    // Preserve-on-empty: a rail deduped (or
+                    // parsed) to nothing is not appended.
+                    guard !deduped.isEmpty else { continue }
+                    var cat = TorCatalog()
+                    cat.type = deduped[0].type
+                    cat.id = "tmdb-" + fileRail.id
+                    cat.name = fileRail.title
+                    cat.base = TorrentSettings.cinemeta
+                    cat.searchable = false
+                    catalogs.insert(cat, at: insertAt)
+                    insertAt += 1
+                    rails[cat.id + "|" + cat.type] = deduped
+                    landedRails += 1
+                    landedItems += deduped.count
+                    // A rail actually landed: stamp the load
+                    // and clear any deadline state, exactly as
+                    // a catalogue rail landing does above.
+                    loadedAt = Date()
+                    loadTimedOut = false
+                }
+            }
+            // One line per load, counts only (never the file
+            // URL — DiagLog discipline); a failed load logs
+            // rails=0 items=0 and publishes nothing extra.
+            DiagLog.write("TOR", "trending file rails=\(landedRails) items=\(landedItems)")
+        }
         // Genre rails (C-5): fetched CONCURRENTLY and published
         // PER RAIL as each lands, merged over the previously
         // good rails in spec order — a failed or empty fetch

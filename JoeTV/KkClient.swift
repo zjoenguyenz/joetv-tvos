@@ -308,6 +308,11 @@ enum KkClient {
         m.name = JSON.str(o, "name")
         m.slug = JSON.str(o, "slug")
         m.originName = JSON.str(o, "origin_name")
+        // v2.0.49: the payload's own trailer URL — the
+        // backdrop preview's fallback trailer source when
+        // TMDB has none (trailer-only preview design).
+        // Absent on most items; empty stays empty.
+        m.trailerUrl = JSON.str(o, "trailer_url")
         m.poster = absImage(JSON.str(o, "poster_url"), cdn: cdn)
         m.thumb = absImage(JSON.str(o, "thumb_url"), cdn: cdn)
         // NO silent thumb→poster substitution (removed

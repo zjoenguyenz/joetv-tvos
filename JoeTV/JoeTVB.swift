@@ -383,6 +383,10 @@ struct JoeTVBView: View {
     /// this tab when an actor card is tapped — see
     /// JoeActorPage.swift (.tvb mode).
     @State private var actorRoute: JoeActorRoute?
+    /// v2.0.49 (item 7): bumped by the section's Menu
+    /// handler to make home's ScrollViewReader jump to
+    /// the top of the page (owner order 2026-11-21).
+    @State private var topScrollSignal = 0
     @FocusState private var headerSearchFocused: Bool
     @FocusState private var chipFocus: String?
     @FocusState private var cardFocus: String?
@@ -426,8 +430,17 @@ struct JoeTVBView: View {
         .onExitCommand {
             if searchOpen {
                 searchOpen = false
-            } else {
+            } else if headerSearchFocused == true {
                 nav.section = .phim
+            } else {
+                // v2.0.49 (item 7, owner order 2026-11-21
+                // 22:32): Menu jumps straight to the top of
+                // the page first — scroll to the top and
+                // land focus on the header search button
+                // (this page's declared first element),
+                // swallowing the exit.
+                topScrollSignal += 1
+                headerSearchFocused = true
             }
         }
         // Idea 1: the actor page (.tvb mode) over this tab.
@@ -468,7 +481,11 @@ struct JoeTVBView: View {
     // MARK: - Home
 
     private var home: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        // v2.0.49 (item 7): the ScrollView sits inside a
+        // ScrollViewReader so Menu can jump straight to
+        // the top of the page (see the body's handler).
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 40) {
                 header
                 if let catalog {
@@ -498,6 +515,13 @@ struct JoeTVBView: View {
                         .tint(theme.text)
                         .padding(.top, 30)
                 }
+            }
+            .id("joeTVBHomeTop")
+            }
+            // v2.0.49 (item 7): the Menu-to-top jump's
+            // scroll hook, inside the reader.
+            .onChange(of: topScrollSignal) { _, _ in
+                proxy.scrollTo("joeTVBHomeTop", anchor: .top)
             }
         }
         // v2.0.16 (owner's 2026-11-17 TVB clip): this
@@ -952,7 +976,14 @@ private struct JoeYtPosterCard: View {
                 quality: JoeYtQualityMap.badgeText(pid: series.pid) ?? "",
                 form: form,
                 artSlotClass: (resolved?.isPortraitPoster ?? true)
-                    ? .portrait : .any)
+                    ? .portrait : .any,
+                // v2.0.49: fill ONLY when the resolver's
+                // thumbnail leg won (a landscape still in a
+                // 2:3 frame letterboxed — VERDICT §4); while
+                // unresolved or on a real poster, exactly the
+                // pre-2.0.49 fit behaviour. (Argument order
+                // follows the declaration — memberwise init.)
+                artFill: (resolved != nil && !(resolved!.isPortraitPoster)))
         }
         .joeCardButton()
         .focused(focus, equals: focusID)

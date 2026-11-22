@@ -36,6 +36,11 @@ struct JoeTVSection: View {
     @State private var mfNoLiveCatalogs = false
     @State private var sportsHolder: JoeMovieDetail.DirectorHolder?
     @FocusState private var focusedEvent: String?
+    /// v2.0.49 (item 7, fix round): bumped by the
+    /// section's Menu handler to make the content
+    /// ScrollViewReader jump to the top of the page
+    /// (owner order 2026-11-21).
+    @State private var topScrollSignal = 0
 
     private static let sportsChipID = "mf|thethao-torrent"
 
@@ -99,10 +104,27 @@ struct JoeTVSection: View {
         // 1.9.2 (Team 9 item 4): Menu in this SECTION returns
         // to the Phim section — the app's main menu — instead
         // of exiting the app (the owner's Android model).
-        // Unconditional, on this section's own root; the player
+        // On this section's own root; the player
         // cover above this view carries its own handler and is
         // the nearer consumer while it is up.
-        .onExitCommand { nav.section = .phim }
+        .onExitCommand {
+            // v2.0.49 (item 7, fix round — owner order
+            // 2026-11-21 22:32): Menu jumps straight to
+            // the top of the page first. Focus anywhere
+            // on the chip row (focusedChip != nil — the
+            // row is the page's top region and its first
+            // group chip the declared landing, see
+            // .defaultFocus below) keeps the existing
+            // return to Phim; anywhere else, Menu scrolls
+            // the content grid to the top and lands focus
+            // on that chip, swallowing the exit.
+            if focusedChip != nil {
+                nav.section = .phim
+            } else {
+                topScrollSignal += 1
+                focusedChip = store.visibleGroups.first
+            }
+        }
         // v2.0.5 (N1/N2): the chip row's first group chip is
         // the section's DECLARED top element — the landing
         // the pill row's DOWN resigns focus to (the hero above
@@ -486,6 +508,11 @@ struct JoeTVSection: View {
                         .font(.system(size: 25))
                         .foregroundStyle(theme.meta)
                 }
+                // v2.0.49 (item 7, fix round): the grid
+                // sits inside a ScrollViewReader so Menu
+                // can jump straight to the top of the page
+                // (see the body's .onExitCommand).
+                ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
                         ForEach(gridChannels) { channel in
@@ -494,6 +521,14 @@ struct JoeTVSection: View {
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
+                    .id("joeTVSectionTop")
+                }
+                // v2.0.49 (item 7, fix round): the
+                // Menu-to-top jump's scroll hook, inside
+                // the reader.
+                .onChange(of: topScrollSignal) { _, _ in
+                    proxy.scrollTo("joeTVSectionTop", anchor: .top)
+                }
                 }
                 // v2.0.16 (owner's 2026-11-17 videos, TV +
                 // Live Events): this grid CLIPS at its frame
@@ -555,6 +590,11 @@ struct JoeTVSection: View {
                     .frame(maxWidth: 1200, alignment: .leading)
                 Spacer()
             } else {
+                // v2.0.49 (item 7, fix round): the grid
+                // sits inside a ScrollViewReader so Menu
+                // can jump straight to the top of the page
+                // (see the body's .onExitCommand).
+                ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
                         ForEach(favouriteChannels) { channel in
@@ -563,6 +603,14 @@ struct JoeTVSection: View {
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
+                    .id("joeTVSectionTop")
+                }
+                // v2.0.49 (item 7, fix round): the
+                // Menu-to-top jump's scroll hook, inside
+                // the reader.
+                .onChange(of: topScrollSignal) { _, _ in
+                    proxy.scrollTo("joeTVSectionTop", anchor: .top)
+                }
                 }
                 // Same clipping + focus-region rule as the
                 // group grid beside it (see gridSection).
@@ -628,6 +676,11 @@ struct JoeTVSection: View {
                 }
                 Spacer()
             } else {
+                // v2.0.49 (item 7, fix round): the grid
+                // sits inside a ScrollViewReader so Menu
+                // can jump straight to the top of the page
+                // (see the body's .onExitCommand).
+                ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 24) {
                         ForEach(orderedSportsEvents) { event in
@@ -636,6 +689,14 @@ struct JoeTVSection: View {
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
+                    .id("joeTVSectionTop")
+                }
+                // v2.0.49 (item 7, fix round): the
+                // Menu-to-top jump's scroll hook, inside
+                // the reader.
+                .onChange(of: topScrollSignal) { _, _ in
+                    proxy.scrollTo("joeTVSectionTop", anchor: .top)
+                }
                 }
                 // v2.0.16: this grid CLIPS at its frame, like
                 // the channel grid beside it (the section
@@ -949,8 +1010,17 @@ struct JoeTVSection: View {
                 // whether the stall began before any
                 // candidate existed or inside the player.
                 DiagLog.write("sports", "streams fetched count=\(streams.count)")
+                // v2.0.49 (item 8): hoist the ranked pool so
+                // the vavoo AVPlayer-promotion set below and
+                // the candidate conversion read the SAME
+                // ranked array (design §4, change 2 step 1).
+                // Sports URLs pass resolvePlayable unchanged
+                // on this path, so candidate URLs match the
+                // stream URLs verbatim.
+                let ranked = TorrentClient.rankPool(streams)
+                let avFirstURLs = Set(ranked.filter { $0.sourceTag == "vavoo" }.map { $0.url })
                 let ladder = await TorrentClient.playCandidates(
-                    streams: TorrentClient.rankPool(streams), preferred: nil)
+                    streams: ranked, preferred: nil)
                 // v2.0.33 (item 4b): bounded AVPlayer twins
                 // for HLS live candidates. Rationale: the
                 // KSPlayer 5.6.2 FFmpeg engine stalls on
@@ -979,16 +1049,35 @@ struct JoeTVSection: View {
                 withTwins.reserveCapacity(min(ladder.count + 2, 8))
                 var twinsAdded = 0
                 for (index, candidate) in ladder.enumerated() {
-                    withTwins.append(candidate)
                     let isHLS = candidate.url.pathExtension.lowercased() == "m3u8"
                         || candidate.url.absoluteString.contains(".m3u8")
                     if twinsAdded < 2, candidate.engine == .ffmpeg, isHLS {
                         var twin = candidate
                         twin.engine = .avPlayer
                         twin.label = candidate.label + " · AVPlayer"
-                        withTwins.append(twin)
-                        twinsAdded += 1
-                        DiagLog.write("sports", "avplayer twin added after ffmpeg candidate idx=\(index) host=\(candidate.url.host ?? "?")")
+                        // v2.0.49 (item 8, design §4 change 2
+                        // step 2): a vavoo-sourced candidate's
+                        // twin goes FIRST — the session then
+                        // opens on the AVPlayer host instead of
+                        // burning the 12 s FFmpeg live deadline
+                        // in front of it — and the FFmpeg
+                        // original stays right behind it as
+                        // that stream's fallback. Every other
+                        // candidate keeps the original order
+                        // (original, then twin) exactly.
+                        if avFirstURLs.contains(candidate.url.absoluteString) {
+                            withTwins.append(twin)
+                            withTwins.append(candidate)
+                            twinsAdded += 1
+                            DiagLog.write("sports", "avplayer promoted ahead of ffmpeg candidate idx=\(index) source=vavoo")
+                        } else {
+                            withTwins.append(candidate)
+                            withTwins.append(twin)
+                            twinsAdded += 1
+                            DiagLog.write("sports", "avplayer twin added after ffmpeg candidate idx=\(index) host=\(candidate.url.host ?? "?")")
+                        }
+                    } else {
+                        withTwins.append(candidate)
                     }
                 }
                 let result = Array(withTwins.prefix(8))

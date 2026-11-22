@@ -54,12 +54,33 @@ struct JoeAddonDetail: View {
     /// see backFallback in the body.
     @FocusState private var backFocused: Bool
     @FocusState private var focusedRow: String?
+    /// v2.0.49 (item 7, fix round): bumped by the
+    /// detail's Menu handler to make the body's
+    /// ScrollViewReader jump to the top of the page
+    /// (owner order 2026-11-21).
+    @State private var topScrollSignal = 0
 
     private var isSeries: Bool { route.type == "series" }
+
+    /// v2.0.49 (item 7, fix round): the focus identity of
+    /// this page's first row — the first episode row for
+    /// a series, else the first stream row; nil while
+    /// neither list carries a row (the fallback exit
+    /// button is the page's only focusable then).
+    private var firstRowFocusID: String? {
+        if let first = videos.first { return "ep|" + first.id }
+        if let first = streams.first { return "st|" + first.id.uuidString }
+        return nil
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             backdrop
+            // v2.0.49 (item 7, fix round): the ScrollView
+            // sits inside a ScrollViewReader so Menu can
+            // jump straight to the top of the page (see
+            // .onExitCommand below).
+            ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 32) {
                 header
@@ -98,7 +119,14 @@ struct JoeAddonDetail: View {
             }
             .padding(.horizontal, 80)
             .padding(.vertical, 60)
-        }
+            .id("joeAddonDetailTop")
+            }
+            // v2.0.49 (item 7, fix round): the Menu-to-top
+            // jump's scroll hook, inside the reader.
+            .onChange(of: topScrollSignal) { _, _ in
+                proxy.scrollTo("joeAddonDetailTop", anchor: .top)
+            }
+            }
         .task { await load() }
         .fullScreenCover(item: $playerHolder) { holder in
             JoePlayerView(director: holder.director,
@@ -108,7 +136,23 @@ struct JoeAddonDetail: View {
         }
         // Own-root Menu handler (the house construction):
         // one press closes exactly this layer.
-        .onExitCommand { nav.addonDetail = nil }
+        .onExitCommand {
+            // v2.0.49 (item 7, fix round — owner order
+            // 2026-11-21 22:32): Menu jumps straight to
+            // the top of the page first. Focus on the
+            // first row (or on the fallback exit button,
+            // the page's only focusable while no row
+            // exists) keeps the existing close; anywhere
+            // else, Menu scrolls to the top and lands
+            // focus on the first row, swallowing the
+            // exit.
+            if backFocused || focusedRow == firstRowFocusID {
+                nav.addonDetail = nil
+            } else {
+                topScrollSignal += 1
+                focusedRow = firstRowFocusID
+            }
+        }
         }
     }
 

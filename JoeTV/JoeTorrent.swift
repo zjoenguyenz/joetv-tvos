@@ -55,8 +55,16 @@ struct JoeTorrentHome: View {
     /// stale round's results can never land over a newer
     /// term's grid (JoeSearchView's roundID rule).
     @State private var searchRound = 0
+    /// v2.0.49 (item 7): bumped by the section's Menu
+    /// handler to make the home ScrollViewReader jump to
+    /// the top of the page (owner order 2026-11-21).
+    @State private var topScrollSignal = 0
 
     var body: some View {
+            // v2.0.49 (item 7): the ScrollView sits inside
+            // a ScrollViewReader so Menu can jump straight
+            // to the top of the page (see .onExitCommand).
+            ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 36) {
                     header
@@ -131,6 +139,13 @@ struct JoeTorrentHome: View {
                         }
                     }
                 }
+                .id("joeTorHomeTop")
+            }
+            // v2.0.49 (item 7): the Menu-to-top jump's
+            // scroll hook, inside the reader.
+            .onChange(of: topScrollSignal) { _, _ in
+                proxy.scrollTo("joeTorHomeTop", anchor: .top)
+            }
             }
             // CONVERGENCE (Team 7 D4, 2026-11-15): the four
             // JoeMoveTrap modifiers that wrapped this ScrollView
@@ -174,7 +189,23 @@ struct JoeTorrentHome: View {
         // key — the TextField this declaration used to name
         // (.field) no longer exists, exactly as in
         // JoeSearchView since v2.0.17.
-        .onExitCommand { nav.section = .phim }
+        .onExitCommand {
+            // v2.0.49 (item 7, owner order 2026-11-21
+            // 22:32): Menu jumps straight to the top of
+            // the page first. Focus anywhere on the
+            // letter strip (keyFocus != nil — the strip
+            // is the page's top region and its "a" key
+            // the declared landing) keeps the existing
+            // return to Phim; anywhere else, Menu scrolls
+            // to the top and lands focus on the strip,
+            // swallowing the exit.
+            if keyFocus != nil {
+                nav.section = .phim
+            } else {
+                topScrollSignal += 1
+                keyFocus = .key("a")
+            }
+        }
         .defaultFocus($keyFocus, .key("a"))
     }
 
@@ -625,6 +656,11 @@ struct JoeTorrentDetail: View {
     /// renders, exactly like the Phim detail's fail-soft.
     @State private var cast: [TMDBCastMember] = []
     @State private var actorRoute: JoeActorRoute?
+    /// v2.0.49 (item 7): bumped by the detail's Menu
+    /// handler to make standardBody's ScrollViewReader
+    /// jump to the top of the page (owner order
+    /// 2026-11-21).
+    @State private var topScrollSignal = 0
     @FocusState private var focusedRow: String?
 
     private var meta: TorMeta { route.meta }
@@ -659,11 +695,32 @@ struct JoeTorrentDetail: View {
         // from its OWN root (the wrapper-handler lesson, same
         // as JoeMovieDetail), and the favourite button is the
         // declared initial focus — see favButton.
-        .onExitCommand { nav.tor = nil }
+        .onExitCommand {
+            // v2.0.49 (item 7, owner order 2026-11-21
+            // 22:32): Menu jumps straight to the top of
+            // the page first. Focus on the favourite
+            // button (this page's declared first element)
+            // keeps the existing close; anywhere else,
+            // Menu scrolls to the top and lands focus on
+            // the favourite button, swallowing the exit.
+            // (The Ultra body has no scroll surface, so
+            // there the signal is inert and only the
+            // focus landing applies.)
+            if focusedRow == "fav" {
+                nav.tor = nil
+            } else {
+                topScrollSignal += 1
+                focusedRow = "fav"
+            }
+        }
         .defaultFocus($focusedRow, "fav")
     }
 
     private var standardBody: some View {
+        // v2.0.49 (item 7): the ScrollView sits inside a
+        // ScrollViewReader so Menu can jump straight to
+        // the top of the page (see the body's handler).
+        ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: false) {
             // v2.0.8 (Phase 7d): LazyVStack — the eager VStack
             // built the hero, episode block and stream block
@@ -685,8 +742,15 @@ struct JoeTorrentDetail: View {
                 streamSection
                     .focusSection()
             }
+            .id("joeTorDetailTop")
             // No manual padding: the layer sits inside the root
             // safe area, which IS the §4 inset (80/60).
+        }
+        // v2.0.49 (item 7): the Menu-to-top jump's scroll
+        // hook, inside the reader.
+        .onChange(of: topScrollSignal) { _, _ in
+            proxy.scrollTo("joeTorDetailTop", anchor: .top)
+        }
         }
     }
 

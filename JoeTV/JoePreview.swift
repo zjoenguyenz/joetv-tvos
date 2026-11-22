@@ -2,14 +2,31 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-// MARK: - Backdrop preview (2.0.48)
+// MARK: - Backdrop preview (2.0.48; v2.0.49 trailer redesign)
 // The Netflix-style preview (owner-approved design,
-// Option C as amended by the 2026-11-21 16:52 torrent
-// ruling): when a DETAIL screen opens, a short MUTED
-// segment of the title itself plays in the backdrop
-// layer, over the static backdrop image and under the
-// existing scrims. Static image first; the video
-// crossfades in only when frames are really flowing.
+// Option C as amended by the 2026-11-21 22:39 torrent
+// ruling): when a DETAIL screen opens, the title's
+// TRAILER plays MUTED in the backdrop layer, over the
+// static backdrop image and under the existing scrims.
+// Static image first; the video crossfades in only
+// when frames are really flowing.
+//
+// v2.0.49 — THE PREVIEW IS THE TRAILER (owner contract
+// 2026-11-21 22:34–22:39 CST): the shipped 2.0.48
+// preview resolved the title's EPISODE stream and
+// played a segment of the episode itself. The owner's
+// exported DiagLog (joetv-diag_13) convicted it: 58
+// PREVIEW lines, 16 attempts — every one an episode
+// leg (chain / YouTube episode), ZERO trailer attempts;
+// the legs failed (404, no first frame) or were
+// killed, and no trailer was ever shown. Episode-
+// content preview is therefore REMOVED in 2.0.49.
+// The one preview source now: the title's trailer —
+// TMDB's trailer for the title first (resolved to a
+// YouTube key, then through the app's YouTube resolver),
+// the title's own source trailer (the provider
+// payload's trailer URL) as fallback. No trailer →
+// no attempt; the static backdrop simply stays.
 //
 // The rules, as ruled:
 // - D1: ANY remote input kills the preview for that
@@ -17,27 +34,42 @@ import UIKit
 //   binding, the Menu command, the player presentation
 //   and scenePhase to kill(reason:). Once killed it
 //   never restarts inside the same detail presentation
-//   (killedForVisit latch). The latch engages from the
-//   moment the detail appears, dwell included: the ONE
-//   event that is not user input — the app's own
-//   initial focus landing — is identified BY VALUE
-//   (the visit's first transition of a focus binding
-//   from unset to set) and routed through
-//   focusInput(landingShaped:), never by timing.
-// - Start position: 20–25% into the item Play would
-//   play (the resume episode for a series, else the
-//   first playable); the segment is capped at 120 s.
+//   (killedForVisit latch).
+// - D1 ARMING (v2.0.49 — the kill latch's arming rule,
+//   restated precisely): focus-driven kills engage ONLY
+//   while an attempt is in flight (an attempt has begun
+//   and not yet aborted, or a player exists). Input
+//   BEFORE the attempt starts — the dwell included,
+//   and with it every programmatic focus landing the
+//   load itself performs — never latches: focusInput
+//   ignores such transitions entirely. Once the dwell
+//   completes and the attempt begins, ANY input kills
+//   instantly and the visit never retries. A user who
+//   opens a detail and simply waits therefore sees
+//   the trailer. Explicit kill(reason:) calls (Menu,
+//   a Play presentation, a provider switch, the scene
+//   leaving the foreground) are deliberate actions and
+//   keep their unconditional latch at any moment.
+// - Start position: a trailer plays from its OWN
+//   start (startFraction 0 — play(url:headers:
+//   startFraction:) carries the fraction; the 0.22
+//   default remains for any future mid-item use).
+//   The shown segment is capped at 120 s.
 // - QUALITY GATE (owner ruling 2026-11-21 17:50): a
 //   preview segment whose resolved quality is LOW is
 //   not shown at all — the static backdrop stays; only
 //   a good-quality preview may pass. Concrete rule:
 //   a resolved format height below 720p suppresses
-//   the preview entirely. The gate is enforced at
-//   three points: a series whose MEASURED ceiling
-//   (the Approach C map) is below 720p never starts
-//   a YouTube preview at all (the detail skips before
-//   the resolve); the built item's presentation
-//   height is checked when it becomes ready, and
+//   the preview entirely. The gate judges THIS
+//   attempt's resolved height only (v2.0.49: the
+//   banked measured-ceiling pre-skip is retired —
+//   the Approach C map still feeds the honest
+//   quality badge, never a pre-emptive skip). The
+//   gate is enforced at three points: the detail
+//   refuses a variant whose resolver-known height is
+//   below 720p before any hand-over; the built
+//   item's presentation height is checked when it
+//   becomes ready, and
 //   again at the last moment before the first frame
 //   can appear (a late-settling size below 720p
 //   still suppresses); and CONTINUOUSLY while the
@@ -66,25 +98,24 @@ import UIKit
 // - D3: skipped entirely when Reduce Motion is on.
 // - D4: Settings toggle "Xem trước video trên ảnh nền",
 //   default ON (JoePreviewSettings).
-// - Torrent titles: NO preview, ever — their only
-//   "trailer" upstream is a YouTube id this app cannot
-//   play, and torrent media is never cached on this
-//   device (playback streams from the debrid), so the
-//   ruling's precondition (a clip from an already-cached
-//   file) cannot occur; the static backdrop stays and
-//   no debrid download is ever triggered for a preview.
+// - Torrent titles (owner ruling 2026-11-21 22:39
+//   CST, v2.0.49): the torrent backdrop is a STATIC
+//   image by ruling — the cached-clip preview design
+//   is retired entirely. Torrent titles get NO preview
+//   machinery, full stop: no clip is ever built, no
+//   debrid download is ever triggered for a preview,
+//   and the static backdrop is the whole backdrop.
 // - The video layer is NOT focusable and takes no hit
 //   testing: tvOS focus is OS-rendered and this layer
 //   never fights it (no AVPlayerViewController — it
 //   would trap focus; a bare AVPlayerLayer is used).
 // - The preview's own code never writes WatchStore,
-//   never fails over and never shows a slate. (Its
-//   chain leg rides the shared Providers.ladderFor
-//   path, whose VS/TP resolves record SourceHealth
-//   outcomes exactly as the pre-existing dwell
-//   pre-resolve through the same path already does —
-//   the preview adds no health reporting of its own.)
-//   Every failure is silent — the static
+//   never fails over and never shows a slate. Its one
+//   resolve path is the trailer's YouTube resolve
+//   (JoeYtResolver, the player's own route); there is
+//   no chain ladder and no episode resolve behind a
+//   preview any more (v2.0.49). Every failure is
+//   silent — the static
 //   backdrop simply stays — and leaves ONE DiagLog line
 //   (category PREVIEW: attempt / resolve kind /
 //   fallback-with-reason / first frame with its ms /
@@ -135,12 +166,6 @@ final class JoePreviewController: ObservableObject {
     /// this controller's lifetime (one controller = one
     /// detail presentation).
     private var killedForVisit = false
-    /// The initial focus landing's one-time pass: the
-    /// first landing-shaped focus transition of the
-    /// visit is the app focusing its default element,
-    /// not user input. Consumed exactly once; every
-    /// later focus transition is user input.
-    private var landingConsumed = false
     /// Attempt bookkeeping: the kind label for the log
     /// lines and the stamp the first-frame latency is
     /// measured from (attempt = the moment the dwell
@@ -193,18 +218,23 @@ final class JoePreviewController: ObservableObject {
         attemptStartedAt = nil
     }
 
-    /// Play one resolved URL (the attempt's own stream,
-    /// produced by the app's existing playback paths —
-    /// a chain ladder entry or a YouTube assembly/direct
-    /// URL). Muted, capped at 120 s of media from the
-    /// 20–25% start point, crossfaded in by the view
-    /// when `visible` flips at first frame. Returns true
-    /// only when the variant was actually handed to a
-    /// built player — callers that bank measurements
-    /// (the Approach C ceiling map) key off this, so a
-    /// kill that landed mid-resolve banks nothing.
+    /// Play one resolved URL (the attempt's own stream:
+    /// v2.0.49 — the trailer's YouTube assembly/direct
+    /// URL, produced by JoeYtResolver). Muted, capped at
+    /// 120 s of shown media, crossfaded in by the view
+    /// when `visible` flips at first frame.
+    /// `startFraction` is where playback begins inside
+    /// the item: the trailer leg passes 0 (a trailer
+    /// plays from its own start); the 0.22 default is
+    /// the old mid-item point, kept for any future use.
+    /// Returns true only when the variant was actually
+    /// handed to a built player — callers that bank
+    /// measurements (the Approach C ceiling map) key
+    /// off this, so a kill that landed mid-resolve
+    /// banks nothing.
     @discardableResult
-    func play(url: URL, headers: [String: String]) -> Bool {
+    func play(url: URL, headers: [String: String],
+            startFraction: Double = 0.22) -> Bool {
         guard let kind = attemptKind, !killedForVisit else {
             log("preview play refused — killed before resolve landed")
             attemptKind = nil
@@ -247,7 +277,8 @@ final class JoePreviewController: ObservableObject {
         workTask = Task { [weak self] in
             await self?.runPlayback(item: item, player: p,
                                     generation: gen,
-                                    startedAt: startedAt)
+                                    startedAt: startedAt,
+                                    startFraction: startFraction)
         }
         // First-frame deadline watchdog (review round
         // 1/3, defect): the pre-play phase contains
@@ -279,23 +310,23 @@ final class JoePreviewController: ObservableObject {
     }
 
     /// A focus transition reported by the detail's
-    /// hooks. `landingShaped` is the transition's shape
-    /// BY VALUE (a binding going from unset to set:
-    /// nil→value, false→true). The visit's FIRST
-    /// landing-shaped transition is the app's own
-    /// initial focus landing — the focus engine sets
-    /// exactly one binding when the screen appears,
-    /// before any user press can move focus anywhere —
-    /// so it is consumed as the landing and latches
-    /// nothing. EVERY other transition (a later gain, a
-    /// loss, a non-shaped change) is user input and
-    /// kills, dwell included: there is no window in
-    /// which a real press is ignored.
+    /// hooks. v2.0.49 arming rule: a focus transition
+    /// is user input ONLY while an attempt is in
+    /// flight (attemptKind != nil || player != nil) —
+    /// then it kills instantly, exactly as before.
+    /// Before the attempt starts (the dwell included)
+    /// a transition is ignored ENTIRELY: no latch, no
+    /// landing bookkeeping — the programmatic focus
+    /// landings the load itself performs (the initial
+    /// landing, a default-focus move when content
+    /// lands) can no longer kill a preview that has
+    /// not begun. `landingShaped` (the transition's
+    /// shape BY VALUE: a binding going from unset to
+    /// set) is kept in the signature so the details'
+    /// hook call sites stay unchanged; under the new
+    /// arming rule the shape no longer decides anything.
     func focusInput(landingShaped: Bool) {
-        if !landingConsumed, landingShaped {
-            landingConsumed = true
-            return
-        }
+        guard attemptKind != nil || player != nil else { return }
         kill(reason: "input")
     }
 
@@ -307,17 +338,17 @@ final class JoePreviewController: ObservableObject {
     /// first frame on the way IN and to the natural
     /// END on the way out, never to a kill).
     ///
-    /// The latch is unconditional: it engages from the
-    /// moment the detail appears — during the dwell,
-    /// during a resolve, during playback. Teardown with
-    /// nothing in flight is a no-op beyond the latch
-    /// itself, and beginAttempt refuses from then on, so
-    /// an owner who interacts during the dwell gets no
-    /// preview at all this visit, exactly as ruled. The
-    /// single non-input event, the app's own initial
-    /// focus landing, never reaches this method — the
-    /// detail routes focus transitions through
-    /// focusInput(landingShaped:), which consumes it.
+    /// This method's latch is unconditional — but it is
+    /// reached only by DELIBERATE actions (Menu, a Play
+    /// presentation, a provider switch, the scene
+    /// leaving the foreground, a hooked button's own
+    /// action below) or by focusInput while an attempt
+    /// is in flight (v2.0.49 arming rule — see the file
+    /// header's D1 ARMING note). A bare focus transition
+    /// before the attempt starts never reaches this
+    /// method at all. Teardown with nothing in flight is
+    /// a no-op beyond the latch itself, and beginAttempt
+    /// refuses from then on.
     /// A press that changes no hooked state at all (a
     /// Select on the favourite/follow toggle, a
     /// source-mode chip or row, the torrent row's no-op
@@ -332,6 +363,22 @@ final class JoePreviewController: ObservableObject {
         killedForVisit = true
         log("preview kill reason=\(reason)")
         teardown()
+    }
+
+    /// v2.0.49 (gate R1, lens C): the ARMED kill — for
+    /// input that does NOT end the visit (a Menu press
+    /// spent on the Back-to-top jump, a source-chip press
+    /// or an episode tap on the YouTube-only detail while
+    /// the user stays on the page). It acts only when an
+    /// attempt is actually in flight — the same guard
+    /// focusInput applies — so pre-attempt input (the
+    /// dwell included) never latches the visit: a user
+    /// who jumps to the top and then simply waits still
+    /// sees the trailer. Actions that LEAVE the page keep
+    /// the unconditional kill() above.
+    func killIfAttempting(reason: String) {
+        guard attemptKind != nil || player != nil else { return }
+        kill(reason: reason)
     }
 
     /// The detail disappeared: full teardown, no latch
@@ -365,7 +412,8 @@ final class JoePreviewController: ObservableObject {
 
     /// Drive one built item to its first frame and on to
     /// its end: wait for readyToPlay, seek to the
-    /// 20–25% point, play, flip `visible` when frames
+    /// startFraction point (0 for a trailer — its own
+    /// start), play, flip `visible` when frames
     /// really flow, and finish at the 120 s cap. Every
     /// exit is either a logged finish or a logged
     /// fallback — never a hang: a 12 s first-frame
@@ -376,7 +424,8 @@ final class JoePreviewController: ObservableObject {
     /// load, seek) is suspended past it.
     private func runPlayback(item: AVPlayerItem, player p: AVPlayer,
                              generation gen: Int,
-                             startedAt: Date) async {
+                             startedAt: Date,
+                             startFraction: Double) async {
         func alive() -> Bool {
             gen == generation && !Task.isCancelled && player === p
         }
@@ -389,7 +438,10 @@ final class JoePreviewController: ObservableObject {
         var startSeconds = 0.0
         var endSeconds = Double.greatestFiniteMagnitude
         if let duration, duration.isNumeric, duration.seconds > 0 {
-            startSeconds = duration.seconds * 0.22
+            // v2.0.49: the start point is the caller's
+            // fraction (0 for the trailer leg), no longer
+            // a hard-coded mid-item point.
+            startSeconds = duration.seconds * startFraction
             endSeconds = min(duration.seconds, startSeconds + 120)
             item.forwardPlaybackEndTime = CMTime(
                 seconds: endSeconds, preferredTimescale: 600)

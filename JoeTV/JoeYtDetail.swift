@@ -92,6 +92,23 @@ struct JoeYtDetail: View {
     /// the content's resolve task lands; the header paints
     /// its placeholder meanwhile, never the thumbnail first.
     @State private var resolvedPoster: JoeYtResolvedPoster?
+    /// v2.0.49: the backdrop preview's controller — this
+    /// screen gains the trailer preview the chain detail
+    /// has (TMDB trailer only; see runPreview below).
+    @StateObject private var preview = JoePreviewController()
+    /// v2.0.49: the series' own TMDB backdrop URL
+    /// (backdrop leg 1), resolved alongside the poster.
+    /// Empty until / unless it lands; the backdrop then
+    /// falls to the next leg.
+    @State private var tmdbBackdropURLString = ""
+    /// v2.0.49 (owner order 2026-11-21 22:32 CST): the
+    /// Back-to-top signal — the exit handler bumps it
+    /// and the ScrollViewReader scrolls the content's
+    /// top id back into view.
+    @State private var topScrollSignal = 0
+    /// v2.0.49: scene phase, for the preview kill hook
+    /// (mirrors JoeMovieDetail's wiring).
+    @Environment(\.scenePhase) private var scenePhase
     /// Super VIP press feedback: the honest above-tier
     /// message, promoted from a quiet line to the accented
     /// notice when an episode is actually pressed.
@@ -138,29 +155,104 @@ struct JoeYtDetail: View {
                     .tint(theme.text)
             }
         }
-        // Own-root Menu handler (the 1.9.2 construction):
-        // one press closes exactly this layer.
-        .onExitCommand { nav.ytDetail = nil }
+        // Own-root Menu handler (the 1.9.2 construction),
+        // extended v2.0.49 by the owner's Back-to-top
+        // order — see handleExitCommand.
+        .onExitCommand { handleExitCommand() }
+        // v2.0.49: the preview kill hooks, wired exactly
+        // as JoeMovieDetail wires them — every focus
+        // binding reports through focusInput (the value
+        // shape rule: an optional binding landing is
+        // unset → set), the player presentation and the
+        // scene phase kill explicitly, and disappearing
+        // stops the preview outright.
+        .onChange(of: epFocus) { old, new in
+            preview.focusInput(landingShaped: old == nil && new != nil)
+        }
+        .onChange(of: chipFocus) { old, new in
+            preview.focusInput(landingShaped: old == nil && new != nil)
+        }
+        .onChange(of: nav.ytPlayer?.id) { handleYtPlayerPresentation() }
+        .onChange(of: scenePhase) { handleScenePhaseChange() }
+        .onDisappear { preview.stop() }
         .task {
             ytStore.ensureLoaded()
             await session.refresh()
         }
     }
 
+    /// The YouTube player's presentation kills the
+    /// preview (v2.0.49; mirrors JoeMovieDetail's hook —
+    /// an episode tap with focus already resting on the
+    /// row changes no focus binding, so this hook is
+    /// the one that catches it).
+    private func handleYtPlayerPresentation() {
+        if nav.ytPlayer != nil { preview.kill(reason: "play") }
+    }
+
+    /// The scene leaving the foreground kills the
+    /// preview (v2.0.49; mirrors JoeMovieDetail).
+    private func handleScenePhaseChange() {
+        if scenePhase != .active { preview.kill(reason: "inactive") }
+    }
+
+    /// Menu / exit (v2.0.49 — owner order 2026-11-21
+    /// 22:32 CST: "nút back trên tvos sẽ nhảy thẳng về
+    /// đầu trang"). The press kills the preview per
+    /// branch (unconditional on close, armed on the
+    /// jump — see the body). Then: focus
+    /// already resting on the page's first focusable
+    /// element — the "src:auto" source chip at the top
+    /// of the page — means the press closes the detail
+    /// as before; anywhere else, the press jumps
+    /// straight back to the top (scroll signal + focus
+    /// to the chip) and the exit is swallowed.
+    private func handleExitCommand() {
+        // Gate R1 (lens C): as in the chain detail — the
+        // close branch kills unconditionally; the
+        // jump-to-top branch keeps the visit alive, so it
+        // may only kill an attempt in flight, never latch.
+        if chipFocus == "src:auto" {
+            preview.kill(reason: "menu")
+            nav.ytDetail = nil
+        } else {
+            preview.killIfAttempting(reason: "menu")
+            topScrollSignal += 1
+            chipFocus = "src:auto"
+        }
+    }
+
     // MARK: Content
 
     private func content(_ series: JoeYtSeries) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 30) {
-                header(series)
-                sourceRow(series)
-                if series.isSuperVIP {
-                    vipNotice
+        // v2.0.49: the content now sits OVER a full-screen
+        // backdrop stack (backdrop(series) below) — this
+        // screen previously painted straight onto the
+        // bare theme background.
+        ZStack {
+            backdrop(series)
+            // v2.0.49 Back-to-top: the reader owns the
+            // scroll view; the exit handler's signal
+            // scrolls the content VStack's top id back
+            // into view (see handleExitCommand).
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 30) {
+                        header(series)
+                        sourceRow(series)
+                        if series.isSuperVIP {
+                            vipNotice
+                        }
+                        episodes(series)
+                    }
+                    .id("joeYtDetailTop")
+                    .padding(.horizontal, 80)
+                    .padding(.vertical, 60)
                 }
-                episodes(series)
+                .onChange(of: topScrollSignal) {
+                    proxy.scrollTo("joeYtDetailTop", anchor: .top)
+                }
             }
-            .padding(.horizontal, 80)
-            .padding(.vertical, 60)
         }
         // FL-352 (2.0.45, leg 5): entry focus lands on
         // the saved episode when one exists (clamped to
@@ -171,9 +263,203 @@ struct JoeYtDetail: View {
         } ?? 0)
         // 2.0.47: resolve this series' real poster (cached
         // per pid in the resolver, so a re-entry is a
-        // cache read, not a new TMDB call).
+        // cache read, not a new TMDB call). v2.0.49: the
+        // backdrop's TMDB leg resolves in the same task.
         .task(id: series.pid) {
             resolvedPoster = await JoeYtPosterResolver.resolve(series)
+            await loadBackdrop(series)
+        }
+        // v2.0.49: the preview dwell — keyed on the pid
+        // ONLY, never on focus: a focus move is an input
+        // that kills an in-flight attempt (through the
+        // hooks above); it must never restart this task
+        // into a fresh attempt.
+        .task(id: "preview|" + series.pid) {
+            await runPreview(series)
+        }
+    }
+
+    // MARK: Backdrop (v2.0.49)
+
+    /// The full-screen backdrop stack: the chain
+    /// detail's Ultra stack (JoeMovieDetail) mirrored in
+    /// miniature — same layer order, same two scrims.
+    /// The art is the series' OWN, aspect-FILLED
+    /// edge-to-edge, in priority order: (1) the TMDB
+    /// backdrop by the series' tmdbId, (2) the resolved
+    /// poster's art, (3) the episode-1 thumbnail. The
+    /// trailer preview layer sits over the art and
+    /// under both scrims. When no trailer plays, this
+    /// backdrop is what shows — never the bare theme
+    /// background.
+    private func backdrop(_ series: JoeYtSeries) -> some View {
+        let previewOpacity: Double = preview.visible && !preview.fadingOut
+            ? 1 : 0
+        let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
+        let posterMode: JoeBandImage.PortraitMode =
+            (resolvedPoster?.isPortraitPoster ?? false) ? .blurField : .slice
+        return ZStack {
+            if let thumb = series.posterURL {
+                JoeBandImage(url: thumb, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .slice)
+            }
+            if let poster = resolvedPoster?.url {
+                JoeBandImage(url: poster, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: posterMode)
+            }
+            if !tmdbBackdropURLString.isEmpty,
+               let u = URL(string: tmdbBackdropURLString) {
+                JoeBandImage(url: u, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .slice)
+            }
+            // The trailer preview's video layer — above
+            // the backdrop images, below BOTH scrims,
+            // exactly as in the chain detail's stack.
+            // Present only while a preview player exists;
+            // opacity carries the crossfades (see
+            // JoePreview.swift).
+            if preview.player != nil {
+                JoePreviewLayerView(controller: preview)
+                    .opacity(previewOpacity)
+                    .animation(.easeInOut(duration: previewFadeDuration),
+                               value: preview.visible)
+                    .animation(.easeInOut(duration: 0.8),
+                               value: preview.fadingOut)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.85), location: 0),
+                .init(color: .black.opacity(0.40), location: 0.5),
+                .init(color: .black.opacity(0.05), location: 1)
+            ], startPoint: .leading, endPoint: .trailing)
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.30), location: 0),
+                .init(color: .clear, location: 0.35),
+                .init(color: theme.bg.opacity(0.88), location: 0.85),
+                .init(color: theme.bg, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Background layers ignore the safe area,
+        // content respects it — the platform's own
+        // idiom, as in the chain detail (v2.0.22 there).
+        .ignoresSafeArea()
+    }
+
+    /// Backdrop leg 1 (v2.0.49): the series' OWN TMDB
+    /// backdrop, fetched by its tmdbId as "tv" — the
+    /// same identity pin the chain detail's enrichment
+    /// uses. Fail-soft: no id / no backdrop / a failed
+    /// call leaves the string empty and the backdrop
+    /// falls to the poster leg.
+    private func loadBackdrop(_ series: JoeYtSeries) async {
+        tmdbBackdropURLString = ""
+        guard series.tmdbId > 0 else { return }
+        let info = await TMDBClient.fetchInfo(
+            tmdbId: String(series.tmdbId), type: "tv")
+        guard !Task.isCancelled else { return }
+        tmdbBackdropURLString = info?.backdropURL ?? ""
+    }
+
+    // MARK: - Backdrop preview (v2.0.49: TMDB trailer only)
+
+    /// The trailer attempt: after the 1.5 s dwell, the
+    /// series' TMDB trailer — resolved through
+    /// JoeYtResolver (the player's own route) and handed
+    /// to the preview player at startFraction 0 (a
+    /// trailer plays from its own start). Gates mirror
+    /// JoeMovieDetail's runPreview (Settings toggle,
+    /// Reduce Motion). No TMDB id or no trailer → ONE
+    /// PREVIEW log line and no attempt; the full
+    /// backdrop above simply stays. NO episode resolve
+    /// ever happens for a preview (v2.0.49 trailer
+    /// redesign — the episode legs are deleted).
+    private func runPreview(_ series: JoeYtSeries) async {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        guard !Task.isCancelled else { return }
+        guard JoePreviewSettings.enabled else {
+            DiagLog.write("PREVIEW", "preview skipped rule=settings-off")
+            return
+        }
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            DiagLog.write("PREVIEW", "preview skipped rule=reduce-motion")
+            return
+        }
+        guard series.tmdbId > 0,
+              let key = await TMDBClient.fetchTrailerKey(
+                  tmdbId: String(series.tmdbId), type: "tv"),
+              !key.isEmpty else {
+            DiagLog.write("PREVIEW", "preview skipped rule=no-trailer")
+            return
+        }
+        // v2.0.49 fix round (Lens B F-B1): the key fetch
+        // above runs BEFORE beginAttempt, so a dismissal
+        // during the fetch must not let this orphaned
+        // task go on to begin an attempt on a dead view.
+        guard !Task.isCancelled else { return }
+        guard preview.beginAttempt(kind: "trailer") else { return }
+        let result = await JoeYtResolver.shared.resolve(videoId: key)
+        switch result {
+        case .playable(let playable, _):
+            // The playable handling mirrors the chain
+            // detail's trailer leg exactly (assembly
+            // through the HLS server, muxed fallback,
+            // direct forms; trailer-prefixed reasons).
+            switch playable.kind {
+            case .assembly:
+                // QUALITY GATE (17:50 ruling): a known
+                // sub-720 height suppresses before any
+                // hand-over; unknown (0) proceeds to the
+                // controller's item-level gates.
+                if playable.height > 0, playable.height < 720 {
+                    preview.abortAttempt(reason: "trailer-low-quality-\(playable.height)p")
+                    return
+                }
+                if let session = await JoeYtHlsServer.shared.makeSession(
+                    playable: playable,
+                    userAgent: JoeYtClientSpec.tvSamsung.userAgent) {
+                    DiagLog.write("PREVIEW", "preview resolve kind=trailer-assembly")
+                    preview.play(url: session.url, headers: [:],
+                                 startFraction: 0)
+                    return
+                }
+                if let direct = playable.fallbackDirectURL {
+                    if playable.fallbackHeight > 0, playable.fallbackHeight < 720 {
+                        preview.abortAttempt(reason: "trailer-low-quality-muxed-\(playable.fallbackHeight)p")
+                        return
+                    }
+                    DiagLog.write("PREVIEW", "preview resolve kind=trailer-muxed-fallback")
+                    preview.play(url: direct, headers: [:],
+                                 startFraction: 0)
+                    return
+                }
+                preview.abortAttempt(reason: "trailer-assembly-failed")
+            case .muxed, .hlsManifest:
+                if playable.height > 0, playable.height < 720 {
+                    preview.abortAttempt(reason: "trailer-low-quality-\(playable.height)p")
+                    return
+                }
+                if let direct = playable.directURL {
+                    DiagLog.write("PREVIEW", "preview resolve kind=trailer-direct")
+                    preview.play(url: direct, headers: [:],
+                                 startFraction: 0)
+                    return
+                }
+                preview.abortAttempt(reason: "trailer-no-direct-url")
+            }
+        case .needsIdentity:
+            preview.abortAttempt(reason: "trailer-needs-identity")
+        case .membersRequired(let reason):
+            preview.abortAttempt(reason: "trailer-members-required \(reason)")
+        case .unplayable(let status, let reason):
+            preview.abortAttempt(reason: "trailer-unplayable \(status) \(reason)")
+        case .httpFailure(let status):
+            preview.abortAttempt(reason: "trailer-http-\(status)")
+        case .transportFailure(let message):
+            preview.abortAttempt(reason: "trailer-transport \(message)")
+        case .solverFailed(let step, let message):
+            preview.abortAttempt(reason: "trailer-solver \(step) \(message)")
         }
     }
 
@@ -291,7 +577,17 @@ struct JoeYtDetail: View {
 
     private func sourceChip(id: String, title: String, selected: Bool,
                             action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        // v2.0.49: every chip press kills an in-flight
+        // preview first — a press with focus already
+        // resting on the chip changes no focus binding,
+        // so the focus hooks alone would miss it. Gate
+        // R1 (lens C): the press keeps the user on this
+        // detail, so it is the ARMED kill — pre-attempt
+        // presses never latch the visit.
+        Button {
+            preview.killIfAttempting(reason: "input")
+            action()
+        } label: {
             JoeChipLabel(title: title, selected: selected)
         }
         .joeCardButton()
@@ -361,6 +657,12 @@ struct JoeYtDetail: View {
     // MARK: Actions
 
     private func tapEpisode(_ index: Int, series: JoeYtSeries) {
+        // v2.0.49: the tap kills an in-flight preview
+        // first (the ARMED kill — gate R1, lens C); the
+        // ytPlayer presentation hook then kills with
+        // reason "play" when the request actually lands,
+        // which is the visit-ending latch.
+        preview.killIfAttempting(reason: "input")
         // EVERY tier mints the request (design §4.1 —
         // the single-route ruling superseded the 2.0.41
         // label gates that used to live here): the

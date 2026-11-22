@@ -203,6 +203,11 @@ struct JoePhimHome: View {
     /// catalogue is trivially empty).
     @State private var attempted = false
     @State private var exitConfirm = false
+    /// v2.0.49 (item 7, fix round): bumped by the root
+    /// Menu handler to make the rail/Ultra homes'
+    /// ScrollViewReaders jump to the top of the page
+    /// (owner order 2026-11-21).
+    @State private var topScrollSignal = 0
     /// UI-6 defect D-2: the featured film's DETAIL, fetched
     /// fail-soft for the hero's synopsis (the list payloads
     /// carry no synopsis) and as the fallback source for the
@@ -245,7 +250,7 @@ struct JoePhimHome: View {
                 // in the A/F browse surface instead. For A/F
                 // nothing changes: their posterWall check is
                 // false and the browse branch follows as before.
-                JoeWallHomeView()
+                JoeWallHomeView(exitConfirm: $exitConfirm)
             } else if nav.browseOpen {
                 JoeBrowseView()
             } else if theme.id == .ultra {
@@ -302,7 +307,38 @@ struct JoePhimHome: View {
             if nav.browseOpen {
                 nav.browseOpen = false
             } else if !nav.searchOpen {
-                exitConfirm = true
+                // v2.0.49 (item 7, fix round — owner order
+                // 2026-11-21 22:32): Menu jumps straight
+                // to the top of the page first. This jump
+                // covers the rail and Ultra homes, whose
+                // ScrollViews live in this file; focus on
+                // either home's declared top element (the
+                // hero's Play button, or the slim header's
+                // browse button when no hero is on screen)
+                // keeps the existing exit confirmation.
+                // Anywhere deeper, Menu scrolls to the top
+                // and lands focus on that top element,
+                // swallowing the exit. (The poster-wall
+                // home is a separate view — JoeWallHomeView
+                // — which since fix round 2 carries its
+                // own nearer Menu handler and reader, with
+                // this view's exit confirmation bound into
+                // it, so this branch serves the rail/Ultra
+                // homes; a press that still reaches this
+                // handler under the poster-wall theme
+                // keeps the confirmation.)
+                if theme.id != .posterWall
+                    && !heroPlayFocused && !heroBrowseFocused
+                    && !headerFocused {
+                    topScrollSignal += 1
+                    if heroMovie != nil {
+                        heroPlayFocused = true
+                    } else {
+                        headerFocused = true
+                    }
+                } else {
+                    exitConfirm = true
+                }
             }
         }
         // v2.0.5 (N3): delivery for the presses this handler
@@ -369,6 +405,11 @@ struct JoePhimHome: View {
     // MARK: - Rail home (designs A and F)
 
     private var railHome: some View {
+        // v2.0.49 (item 7, fix round): the ScrollView sits
+        // inside a ScrollViewReader so Menu can jump
+        // straight to the top of the page (see the root
+        // .onExitCommand).
+        ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 40) {
                 if theme.id == .billboard {
@@ -431,6 +472,13 @@ struct JoePhimHome: View {
                         .foregroundStyle(.orange)
                 }
             }
+            .id("joePhimHomeTop")
+        }
+        // v2.0.49 (item 7, fix round): the Menu-to-top
+        // jump's scroll hook, inside the reader.
+        .onChange(of: topScrollSignal) { _, _ in
+            proxy.scrollTo("joePhimHomeTop", anchor: .top)
+        }
         }
         // v2.0.8 (Phase 1 — navigation freedom): routing between
         // the header/hero and the rails is FULLY geometric. The
@@ -465,6 +513,11 @@ struct JoePhimHome: View {
     /// (600 stage, its own two scrims, logo-first text column)
     /// unchanged.
     private var ultraHome: some View {
+        // v2.0.49 (item 7, fix round): the ScrollView sits
+        // inside a ScrollViewReader so Menu can jump
+        // straight to the top of the page (see the root
+        // .onExitCommand).
+        ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 40) {
                 if heroMovie != nil {
@@ -507,6 +560,13 @@ struct JoePhimHome: View {
                         .foregroundStyle(.orange)
                 }
             }
+            .id("joePhimHomeTop")
+        }
+        // v2.0.49 (item 7, fix round): the Menu-to-top
+        // jump's scroll hook, inside the reader.
+        .onChange(of: topScrollSignal) { _, _ in
+            proxy.scrollTo("joePhimHomeTop", anchor: .top)
+        }
         }
     }
 

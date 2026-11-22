@@ -137,6 +137,10 @@ struct JoeMovieDetail: View {
 
     @FocusState private var ytEpFocus: Int?
     @FocusState private var focusedEp: String?
+    /// v2.0.49 (item 7): bumped by handleExitCommand to
+    /// make detailScrollContent's ScrollViewReader jump
+    /// to the top of the page (owner order 2026-11-21).
+    @State private var topScrollSignal = 0
     @FocusState private var focusedPlay: Bool
     /// v2.0.5 (N1, pair h): the favourite button joins the
     /// detail's focus system — pre-fix it was the one header
@@ -203,7 +207,12 @@ struct JoeMovieDetail: View {
     /// order, views and conditions are unchanged
     /// everywhere.
     private var detailScrollContent: AnyView {
-        AnyView(ScrollView(.vertical, showsIndicators: false) {
+        // v2.0.49 (item 7): the ScrollView now sits inside
+        // a ScrollViewReader so Menu can jump straight to
+        // the top of the page (see handleExitCommand). The
+        // shape stays one AnyView wrapping one expression.
+        AnyView(ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
             // v2.0.8 (Phase 7): lazy root — server groups and
             // their episode chips build as they scroll into
             // view instead of all up front. Children, order
@@ -283,8 +292,15 @@ struct JoeMovieDetail: View {
                         .tint(theme.text)
                 }
             }
+            .id("joeDetailTop")
             // No manual padding: the layer sits inside the root
             // safe area, which IS the §4 inset (80/60).
+            }
+            // v2.0.49 (item 7): the Menu-to-top jump's scroll
+            // hook, inside the reader.
+            .onChange(of: topScrollSignal) { _, _ in
+                proxy.scrollTo("joeDetailTop", anchor: .top)
+            }
         })
     }
 
@@ -564,8 +580,26 @@ struct JoeMovieDetail: View {
     /// Menu closes THIS detail (was an inline
     /// .onExitCommand closure in the covers stage).
     private func handleExitCommand() {
-        preview.kill(reason: "menu")
-        nav.movie = nil
+        // v2.0.49 (item 7, owner order 2026-11-21 22:32):
+        // Menu jumps straight to the top of the page
+        // first. Focus on the Play button (this page's
+        // declared first element) keeps today's behaviour
+        // — Menu closes the detail; anywhere else, Menu
+        // scrolls to the top and lands focus on Play,
+        // swallowing the exit. Gate R1 (lens C): the
+        // preview kill follows the branch — leaving the
+        // page kills unconditionally; the jump-to-top
+        // branch keeps the visit alive, so it may only
+        // kill an attempt actually in flight
+        // (killIfAttempting), never latch the visit.
+        if focusedPlay == true {
+            preview.kill(reason: "menu")
+            nav.movie = nil
+        } else {
+            preview.killIfAttempting(reason: "menu")
+            topScrollSignal += 1
+            focusedPlay = true
+        }
     }
 
     /// The error branch's Retry press (was inline
@@ -3790,22 +3824,29 @@ private struct JoeCastCellLabel: View {
             tmdbId: movie.tmdbId, type: movie.tmdbType)
     }
 
-    // MARK: - Backdrop preview (2.0.48, Leg 3)
+    // MARK: - Backdrop preview (v2.0.49: trailer only)
     //
     // The driver for JoePreviewController (JoePreview
-    // .swift holds the rules and the player). Target =
-    // the item Play would play right now (the resume /
-    // start episode), resolved through the app's OWN
-    // playback paths: the YouTube route first when the
-    // unified YouTube mode is in force (Auto falls
-    // through to the chain on a YouTube failure, exactly
-    // as Play does; a pinned YouTube mode does not), the
-    // chain ladder otherwise. Torrent titles never
-    // reach here — this detail's torrent entry hands off
-    // to the torrent detail, whose backdrop stays static
-    // by the 2026-11-21 ruling (no cached file exists on
-    // device to clip from, and no debrid download may be
-    // triggered for a preview).
+    // .swift holds the rules and the player). v2.0.49
+    // redesign (owner contract 2026-11-21 22:34–22:39
+    // CST, convicted by the exported DiagLog
+    // joetv-diag_13: 16 shipped attempts, ALL episode
+    // legs, ZERO trailer attempts): the preview is the
+    // title's TRAILER and nothing else. The episode
+    // legs (the YouTube-episode leg and the chain
+    // ladder leg) are DELETED — no episode resolve, no
+    // chain fall-through, no measured-ceiling pre-skip
+    // (that block went with them; the quality gate now
+    // judges this attempt's resolved height only).
+    // Trailer source order: TMDB's trailer for the
+    // title first; the title's own source trailer (the
+    // provider payload's trailer URL, Movie.trailerUrl)
+    // as fallback. Neither → no attempt, the static
+    // backdrop stays. Torrent titles never reach here —
+    // this detail's torrent entry hands off to the
+    // torrent detail, whose backdrop is a STATIC image
+    // by the 2026-11-21 22:39 ruling (no preview
+    // machinery for torrent titles, full stop).
 
     private func runPreview() async {
         // The same ~1.5 s dwell as the pre-resolve: an
@@ -3828,178 +3869,170 @@ private struct JoeCastCellLabel: View {
             DiagLog.write("PREVIEW", "preview skipped rule=no-backdrop-surface")
             return
         }
-        if let yt = ytMatch, let mode = ytActiveMode {
-            if await startYtPreview(d, yt: yt) { return }
-            // Auto's own fall-through: a total YouTube
-            // failure hands the episode to the chain. A
-            // PINNED YouTube mode never falls through —
-            // Play would show the honest slate instead.
-            guard mode == .auto else { return }
-        }
-        await startChainPreview(d)
+        await startTrailerPreview(d)
     }
 
-    /// The YouTube leg: resolve the start episode through
-    /// JoeYtResolver (the player's own route) and play
-    /// the assembly (or the direct muxed/HLS form)
-    /// muted in the backdrop. True only when a playable
-    /// was handed to the preview player; every failure
-    /// aborts the attempt with its reason logged and
-    /// returns false so Auto can fall through.
-    private func startYtPreview(_ d: Detail, yt: JoeYtSeries) async -> Bool {
-        let names = chainEpisodeNames(d)
-        var index = 0
-        if let start = startEpisode(d),
-           let i = names.firstIndex(of: start) {
-            index = i
+    /// The trailer attempt (v2.0.49): find the title's
+    /// trailer as a YouTube video key, resolve it
+    /// through JoeYtResolver (the player's own route)
+    /// and hand the playable to the preview player at
+    /// startFraction 0 — a trailer plays from its own
+    /// start. Identity: a TVB session pins the snapshot
+    /// identity (its TMDB id, as "tv"), exactly like the
+    /// enrichment; otherwise the payload's own TMDB
+    /// id/type. The keys are tried IN ORDER — TMDB's
+    /// trailer first, the title's own source trailer
+    /// (mined from Movie.trailerUrl) as the fallback —
+    /// and the fallback covers a TMDB key that fails to
+    /// RESOLVE as well as one that is absent (gate R1,
+    /// lens C: "TMDB first, source as fallback" read
+    /// whole). One attempt covers the whole key list;
+    /// it aborts once, with the last key's reason, only
+    /// when every key failed. The static backdrop stays.
+    /// No JoeYtQualityMap banking here: a trailer's
+    /// height is not the series' measured ceiling, and
+    /// the map feeds the honest badge only.
+    private func startTrailerPreview(_ d: Detail) async {
+        let identity: (id: String, type: String)?
+        if let tvbCtx = route.tvb {
+            identity = ("\(tvbCtx.tmdbId)", "tv")
+        } else if !d.movie.tmdbId.isEmpty {
+            identity = (d.movie.tmdbId, d.movie.tmdbType)
+        } else {
+            identity = nil
         }
-        guard index < yt.eps.count else { return false }
-        // QUALITY GATE (owner ruling 2026-11-21 17:50):
-        // a series whose MEASURED ceiling (Leg 4's map)
-        // is below 720p never starts a YouTube preview
-        // at all — skipped here, BEFORE beginAttempt and
-        // the resolve, so no work is spent on a preview
-        // that could only be suppressed. Returning false
-        // lets Auto fall through to the chain leg, whose
-        // own encode is gated on its own measured height
-        // inside the preview player; a pinned YouTube
-        // mode simply keeps the static backdrop.
-        if let ceiling = JoeYtQualityMap.ceiling(pid: yt.pid),
-           ceiling < 720 {
-            DiagLog.write("PREVIEW", "preview skipped rule=measured-ceiling-\(ceiling)p pid=\(yt.pid)")
-            return false
+        var keys: [String] = []
+        if let identity,
+           let tmdbKey = await TMDBClient.fetchTrailerKey(
+               tmdbId: identity.id, type: identity.type),
+           !tmdbKey.isEmpty {
+            keys.append(tmdbKey)
         }
-        guard preview.beginAttempt(kind: "youtube") else { return false }
-        let result = await JoeYtResolver.shared.resolve(
-            videoId: yt.eps[index])
+        // v2.0.49 fix round (Lens B F-B1): the key fetch
+        // above runs BEFORE beginAttempt, so a dismissal
+        // during the fetch must not let this orphaned
+        // task go on to begin an attempt on a dead view.
+        guard !Task.isCancelled else { return }
+        if let sourceKey = youtubeVideoId(
+               fromTrailerURL: d.movie.trailerUrl),
+           !keys.contains(sourceKey) {
+            keys.append(sourceKey)
+        }
+        guard !keys.isEmpty else {
+            DiagLog.write("PREVIEW", "preview skipped rule=no-trailer")
+            return
+        }
+        guard preview.beginAttempt(kind: "trailer") else { return }
+        var lastReason = "trailer-unresolved"
+        for key in keys {
+            if let reason = await attemptTrailerKey(key) {
+                lastReason = reason
+                continue
+            }
+            return
+        }
+        preview.abortAttempt(reason: lastReason)
+    }
+
+    /// One trailer key's resolve + hand-over. Returns
+    /// nil when the playable was handed to the preview
+    /// player (the attempt is under way); otherwise the
+    /// abort reason for this key — the caller decides
+    /// whether another key remains before aborting.
+    private func attemptTrailerKey(_ videoKey: String) async -> String? {
+        let result = await JoeYtResolver.shared.resolve(videoId: videoKey)
         switch result {
         case .playable(let playable, _):
-            // Approach C discipline: the ceiling map is
-            // banked ONLY with the variant actually handed
-            // to the player, in the branch that hands it
-            // over — and only when play() ACCEPTED the
-            // hand-over (it refuses when a kill landed
-            // mid-resolve; a refused hand-over banks
-            // nothing). The assembly height after a
-            // session is really made, the muxed fallback's
-            // OWN height (playable.fallbackHeight, the
-            // native player's buildItem rule) in its
-            // branch, the direct variant's height in the
-            // direct branch. A resolve that ends in
-            // abortAttempt banks nothing: nothing was
-            // ever played.
+            // The playable handling mirrors the retired
+            // YouTube-episode leg's shape exactly (the
+            // assembly through the HLS server, the muxed
+            // fallback, the direct forms), with trailer-
+            // prefixed reasons and NO ceiling-map banking.
             switch playable.kind {
             case .assembly:
-                // QUALITY GATE (17:50 ruling; review
-                // round 3, defect 2): the resolver already
-                // KNOWS this variant's height — a known
-                // sub-720 height suppresses HERE, before
-                // any hand-over, instead of delegating the
-                // decision to the item's presentationSize
-                // timing. An unknown height (0) proceeds;
-                // the item-level gates still apply.
+                // QUALITY GATE (17:50 ruling): the
+                // resolver already KNOWS this variant's
+                // height — a known sub-720 height
+                // suppresses HERE, before any hand-over.
+                // An unknown height (0) proceeds; the
+                // controller's item-level gates still
+                // apply.
                 if playable.height > 0, playable.height < 720 {
-                    preview.abortAttempt(reason: "youtube-low-quality-\(playable.height)p")
-                    return false
+                    return "trailer-low-quality-\(playable.height)p"
                 }
                 if let session = await JoeYtHlsServer.shared.makeSession(
                     playable: playable,
                     userAgent: JoeYtClientSpec.tvSamsung.userAgent) {
-                    DiagLog.write("PREVIEW", "preview resolve kind=youtube-assembly pid=\(yt.pid)")
-                    if preview.play(url: session.url, headers: [:]) {
-                        JoeYtQualityMap.record(pid: yt.pid,
-                                               height: playable.height)
-                    }
-                    return true
+                    DiagLog.write("PREVIEW", "preview resolve kind=trailer-assembly")
+                    preview.play(url: session.url, headers: [:],
+                                 startFraction: 0)
+                    return nil
                 }
                 if let direct = playable.fallbackDirectURL {
-                    // The muxed fallback's OWN known height
-                    // gates it the same way (defect 2).
+                    // The muxed fallback's OWN known
+                    // height gates it the same way.
                     if playable.fallbackHeight > 0, playable.fallbackHeight < 720 {
-                        preview.abortAttempt(reason: "youtube-low-quality-muxed-\(playable.fallbackHeight)p")
-                        return false
+                        return "trailer-low-quality-muxed-\(playable.fallbackHeight)p"
                     }
-                    DiagLog.write("PREVIEW", "preview resolve kind=youtube-muxed-fallback pid=\(yt.pid)")
-                    if preview.play(url: direct, headers: [:]) {
-                        JoeYtQualityMap.record(pid: yt.pid,
-                                               height: playable.fallbackHeight)
-                    }
-                    return true
+                    DiagLog.write("PREVIEW", "preview resolve kind=trailer-muxed-fallback")
+                    preview.play(url: direct, headers: [:],
+                                 startFraction: 0)
+                    return nil
                 }
-                preview.abortAttempt(reason: "youtube-assembly-failed")
-                return false
+                return "trailer-assembly-failed"
             case .muxed, .hlsManifest:
                 // Known-height gate, same as the assembly
-                // branch (defect 2).
+                // branch.
                 if playable.height > 0, playable.height < 720 {
-                    preview.abortAttempt(reason: "youtube-low-quality-\(playable.height)p")
-                    return false
+                    return "trailer-low-quality-\(playable.height)p"
                 }
                 if let direct = playable.directURL {
-                    DiagLog.write("PREVIEW", "preview resolve kind=youtube-direct pid=\(yt.pid)")
-                    if preview.play(url: direct, headers: [:]) {
-                        JoeYtQualityMap.record(pid: yt.pid,
-                                               height: playable.height)
-                    }
-                    return true
+                    DiagLog.write("PREVIEW", "preview resolve kind=trailer-direct")
+                    preview.play(url: direct, headers: [:],
+                                 startFraction: 0)
+                    return nil
                 }
-                preview.abortAttempt(reason: "youtube-no-direct-url")
-                return false
+                return "trailer-no-direct-url"
             }
+            // Unreachable — every kind path above returns;
+            // present so the compiler sees the case return.
+            return "trailer-unresolved"
         case .needsIdentity:
-            preview.abortAttempt(reason: "youtube-needs-identity")
-            return false
+            return "trailer-needs-identity"
         case .membersRequired(let reason):
-            preview.abortAttempt(reason: "youtube-members-required \(reason)")
-            return false
+            return "trailer-members-required \(reason)"
         case .unplayable(let status, let reason):
-            preview.abortAttempt(reason: "youtube-unplayable \(status) \(reason)")
-            return false
+            return "trailer-unplayable \(status) \(reason)"
         case .httpFailure(let status):
-            preview.abortAttempt(reason: "youtube-http-\(status)")
-            return false
+            return "trailer-http-\(status)"
         case .transportFailure(let message):
-            preview.abortAttempt(reason: "youtube-transport \(message)")
-            return false
+            return "trailer-transport \(message)"
         case .solverFailed(let step, let message):
-            preview.abortAttempt(reason: "youtube-solver \(step) \(message)")
-            return false
+            return "trailer-solver \(step) \(message)"
         }
     }
 
-    /// The chain leg: the start episode's ladder, built
-    /// by the same Providers.ladderFor the player uses
-    /// (memoised — the dwell pre-resolve usually landed
-    /// it already), first entry, through the JoeProxy
-    /// conversion when the entry is a proxy entry,
-    /// exactly as the play path builds it.
-    private func startChainPreview(_ d: Detail) async {
-        guard let epName = startEpisode(d) else {
-            DiagLog.write("PREVIEW", "preview skipped rule=no-start-episode")
-            return
-        }
-        guard preview.beginAttempt(kind: "chain-\(provider)") else { return }
-        let ladder = await Providers.ladderFor(
-            code: provider, detail: d, filmTitle: d.movie.name,
-            epName: epName, epNum: Providers.episodeNumber(epName))
-        guard let first = ladder.entries.first else {
-            preview.abortAttempt(reason: "chain-no-candidate")
-            return
-        }
-        if first.proxy {
-            guard let proxyURL = JoeProxy.shared.playlistURL(
-                for: first.url, headers: first.headers) else {
-                preview.abortAttempt(reason: "chain-proxy-unavailable")
-                return
+    /// Mine a YouTube video id out of a source trailer
+    /// URL (v2.0.49): the shapes the provider payloads
+    /// carry — watch?v=…, youtu.be/…, /embed/…, /shorts/…
+    /// The id is the run of id characters right after
+    /// the marker; anything else (a non-YouTube URL, an
+    /// empty field) yields nil and the caller treats it
+    /// as "no source trailer". The URL itself is never
+    /// logged — only the extracted key is used.
+    private func youtubeVideoId(fromTrailerURL raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        let markers = ["youtu.be/", "watch?v=", "/embed/", "/shorts/"]
+        for marker in markers {
+            guard let r = s.range(of: marker) else { continue }
+            let tail = s[r.upperBound...]
+            let id = tail.prefix {
+                $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_"
             }
-            preview.play(url: proxyURL, headers: first.headers)
-            return
+            if !id.isEmpty { return String(id) }
         }
-        guard let url = URL(string: first.url) else {
-            preview.abortAttempt(reason: "chain-bad-url")
-            return
-        }
-        preview.play(url: url, headers: first.headers)
+        return nil
     }
 
     /// Dwell pre-resolve (v2.0.8, Phase 2/3): after ~1.5 s

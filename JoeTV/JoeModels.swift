@@ -48,6 +48,14 @@ struct Movie: Identifiable, Hashable, Codable, Sendable {
     var tmdbId = ""
     var tmdbType = ""
     var tmdbSeason = 0
+    /// v2.0.49: the title's own source trailer URL (the KK
+    /// payload's `trailer_url`, stamped in KkClient's parse) —
+    /// the backdrop preview's FALLBACK source when TMDB has
+    /// no trailer for the title (the trailer-only preview
+    /// design, owner's 2026-11-21 contract). Additive with a
+    /// default, so older payloads and cached decodes simply
+    /// leave it empty; empty = no source trailer known.
+    var trailerUrl = ""
     /// "kk" | "f4k" | "vsmov" | "tp" (see Providers).
     var provider = ""
 

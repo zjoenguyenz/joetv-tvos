@@ -159,16 +159,16 @@ enum TorrentSettings {
     }
 
     /// v2.0.45 (leg 3): the owner's OWN Stremio addon link
-    /// (re TV is the first) — a general user-addon slot,
-    /// modelled exactly on MediaFusion's above: a stored
-    /// value wins, the bundled RETV_URL build secret is
-    /// the fallback (the owner's Q2 ruling — the link is
-    /// closed into the build like MF_URL, because a
-    /// reinstall wipes everything typed). The link
-    /// carries his personal account token in its path:
-    /// it is never logged and never sent anywhere but
-    /// the addon host itself (FL-073) — DiagLog records
-    /// presence + the addon's own name + counts only.
+    /// — a general user-addon slot. v2.0.49: the bundled
+    /// default that originally sat behind this slot was
+    /// REMOVED by the owner's order (2026-11-21 22:41 CST),
+    /// so the slot is stored-only now: the link the owner
+    /// pastes in Settings is the only one that can ever be
+    /// in force. The link carries his personal account
+    /// token in its path: it is never logged and never
+    /// sent anywhere but the addon host itself (FL-073) —
+    /// DiagLog records presence + the addon's own name +
+    /// counts only.
     static let keyUserAddonURL = "user_addon_url"
 
     static var userAddonURL: String {
@@ -176,24 +176,21 @@ enum TorrentSettings {
         set { UserDefaults.standard.set(newValue, forKey: keyUserAddonURL) }
     }
 
-    /// The EFFECTIVE user-addon link: stored wins,
-    /// bundled fallback — the effectiveMfURL shape,
-    /// verbatim.
+    /// The EFFECTIVE user-addon link (v2.0.49): the stored
+    /// value, trimmed — there is no bundled fallback any
+    /// more (see the note on keyUserAddonURL above).
     static var effectiveUserAddonURL: String {
-        let stored = userAddonURL.trimmingCharacters(in: .whitespaces)
-        return stored.isEmpty ? BundledTokens.retvURL : stored
+        userAddonURL.trimmingCharacters(in: .whitespaces)
     }
 
     /// Which source the effective link comes from, for
     /// the ADDON presence log line (never the link
-    /// itself): "stored" / "bundled" / nil when no link
-    /// is in force at all.
+    /// itself): "stored" when a stored value exists, else
+    /// nil when no link is in force at all (v2.0.49: the
+    /// old "bundled" case went with the bundled default).
     static var userAddonSource: String? {
         if !userAddonURL.trimmingCharacters(in: .whitespaces).isEmpty {
             return "stored"
-        }
-        if !BundledTokens.retvURL.trimmingCharacters(in: .whitespaces).isEmpty {
-            return "bundled"
         }
         return nil
     }
@@ -492,6 +489,15 @@ struct TorStream: Identifiable, Sendable {
     /// (Torrentio, the default) or "MF" (MediaFusion).
     var gateway: String = "TOR"
 
+    /// v2.0.49 (item 8): the payload's _source field
+    /// (e.g. "vavoo" on Nuvio sports rows); empty for
+    /// Torrentio/MediaFusion, which carry no _source —
+    /// zero behaviour change there. The sports ladder
+    /// reads it to promote the AVPlayer twin ahead of
+    /// the FFmpeg candidate for the vavoo shape (see
+    /// SPORTS-PLAYBACK-DIAGNOSIS-20261119 §4).
+    var sourceTag = ""
+
     /// v2.0.26 (idea 10): the stream's parsed display
     /// features, stamped at fetch time from the SAME parse
     /// the ranking uses (RankFeat.of — see fetchStreams).
@@ -767,6 +773,9 @@ enum TorrentClient {
             // (a no-op for Torrentio, which fills "title").
             if s.title.isEmpty { s.title = JSON.str(o, "description") }
             s.gateway = gateway
+            // v2.0.49 (item 8): stamp the payload's _source
+            // tag alongside the other fields (see TorStream).
+            s.sourceTag = JSON.str(o, "_source")
             s.url = JSON.str(o, "url")
             s.infoHash = JSON.str(o, "infoHash")
             s.fileIdx = JSON.int(o, "fileIdx", -1)

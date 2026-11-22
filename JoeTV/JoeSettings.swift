@@ -74,12 +74,22 @@ struct JoeSettingsView: View {
     /// the app's standard destructive shape, the exit
     /// dialog's: destructive confirm + cancel.
     @State private var cwResetConfirm = false
+    /// v2.0.49 (item 7, fix round): bumped by the
+    /// section's Menu handler to make the settings
+    /// ScrollViewReader jump to the top of the page
+    /// (owner order 2026-11-21).
+    @State private var topScrollSignal = 0
 
     private enum KKRouteStatus {
         case idle, probing, ok(ms: Int), down
     }
 
     var body: some View {
+        // v2.0.49 (item 7, fix round): the ScrollView sits
+        // inside a ScrollViewReader so Menu can jump
+        // straight to the top of the page (see
+        // .onExitCommand below).
+        ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: false) {
             // v2.0.8 (Phase 7): lazy root stack — identical
             // children, order and spacing; the eager VStack
@@ -176,26 +186,27 @@ struct JoeSettingsView: View {
                 .joeCardButton()
                 .focused($mfToggleFocused)
                 // v2.0.45 (leg 3): the user-addon link —
-                // the owner's own Stremio addon (re TV is
-                // the first) as a library section + backup
-                // stream source. The field is the MF
-                // field's exact config (secure, paste,
-                // bundled fallback status); its focus id
-                // is "useraddon" — the design's "addon" id
+                // the owner's own Stremio addon as a
+                // library section + backup stream source.
+                // The field is the MF field's exact config
+                // (secure, paste); its focus id is
+                // "useraddon" — the design's "addon" id
                 // is already the Torrentio field's in this
                 // file, and two fields may not share one
-                // focus identity.
+                // focus identity. v2.0.49: the bundled
+                // addon default was REMOVED by the owner's
+                // order (2026-11-21 22:41 CST), so the
+                // field is stored-only now — no bundled
+                // fallback, and "in force" means a stored
+                // link alone.
                 field(title: "Link Addon (tuỳ chọn)",
-                      hint: "Dán link manifest của addon Stremio anh muốn thêm (ví dụ re TV). Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
+                      hint: "Dán link manifest của addon Stremio anh muốn thêm. Link này là khoá riêng — chỉ lưu trong app này trên Apple TV của anh.",
                       text: $userAddonURL, id: "useraddon", secure: true, allowsPaste: true,
                       status: fieldStatus(stored: TorrentSettings.userAddonURL,
                                           secret: false,
-                                          bundledFallback: BundledTokens.retvURL,
-                                          bundledText: "Chưa điền — đang dùng link addon tích hợp sẵn ✓",
+                                          bundledFallback: nil,
                                           emptyText: "Chưa điền — chưa có link addon nào"),
                       inForce: !TorrentSettings.userAddonURL
-                                   .trimmingCharacters(in: .whitespaces).isEmpty
-                               || !BundledTokens.retvURL
                                    .trimmingCharacters(in: .whitespaces).isEmpty)
                 // v2.0.24: the Thể Thao Torrent tab's primary
                 // source (Sony 2.3.37 parity). Empty = the
@@ -310,6 +321,13 @@ struct JoeSettingsView: View {
                     .font(.system(size: 23))
                     .foregroundStyle(theme.meta)
             }
+            .id("joeSettingsTop")
+        }
+        // v2.0.49 (item 7, fix round): the Menu-to-top
+        // jump's scroll hook, inside the reader.
+        .onChange(of: topScrollSignal) { _, _ in
+            proxy.scrollTo("joeSettingsTop", anchor: .top)
+        }
         }
         // CONVERGENCE (Team 7 D4 + spec item 3, 2026-11-15):
         // the JoeSettingsMoveTrap (enabled: focusedField ==
@@ -337,8 +355,23 @@ struct JoeSettingsView: View {
         // 1.9.2 (Team 9 item 4): Menu in this SECTION returns
         // to the Phim section — the app's main menu — instead
         // of exiting the app (the owner's Android model).
-        // Unconditional, on this section's own root.
-        .onExitCommand { nav.section = .phim }
+        // On this section's own root.
+        .onExitCommand {
+            // v2.0.49 (item 7, fix round — owner order
+            // 2026-11-21 22:32): Menu jumps straight to
+            // the top of the page first. Focus on the
+            // first theme chip (this page's declared
+            // first element — see .defaultFocus below)
+            // keeps the existing return to Phim; anywhere
+            // else, Menu scrolls to the top and lands
+            // focus on that chip, swallowing the exit.
+            if themeChipFocused == JoeThemeID.billboard.rawValue {
+                nav.section = .phim
+            } else {
+                topScrollSignal += 1
+                themeChipFocused = JoeThemeID.billboard.rawValue
+            }
+        }
         // v2.0.5 (N1/N2): the section's DECLARED top element —
         // the first theme chip (the column's first focusable).
         .defaultFocus($themeChipFocused, JoeThemeID.billboard.rawValue)
