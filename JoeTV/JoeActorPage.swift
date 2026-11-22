@@ -1,4 +1,6 @@
+import AVFoundation
 import SwiftUI
+import UIKit
 
 // MARK: - Actor page (Ideas 1 + 20)
 //
@@ -71,6 +73,41 @@ struct JoeActorPage: View {
     @StateObject private var cinemaPreview = JoePreviewController()
     @State private var cinemaFocusTask: Task<Void, Never>?
     @State private var cinemaFocusedItem: CinemaItem?
+    /// v2.1.2 (filmography spec §4/§8): the TMDB person
+    /// record (.tmdb mode) — h632 profile + biography for
+    /// the cinema header. nil until the fetch lands, and
+    /// nil for good in .tvb mode (the snapshot carries no
+    /// person record; the header then runs on the route's
+    /// own name with the spec's portrait fallback).
+    @State private var person: TMDBPerson?
+    /// v2.1.2 (filmography spec §5): the cinema grid's
+    /// unified card list, built once at load from the
+    /// SAME records the standard page splits into
+    /// matched/unmatched — every credit (or snapshot
+    /// title) whose art ladder is non-empty, newest
+    /// first. The standard page never reads it.
+    @State private var cinemaCards: [CinemaCard] = []
+    /// v2.1.2 (filmography spec §7/§11): the trailer
+    /// frame's status note — "Không có trailer" once a
+    /// focus attempt has concluded with no player;
+    /// "" while an attempt is pending or playing (the
+    /// playing state has its own drawn text).
+    @State private var cinemaTrailerNote = ""
+    /// v2.1.2 (filmography spec §4): the header's
+    /// tagline, computed ONCE at load (the biography's
+    /// first sentence, truncated at a word boundary to
+    /// its drawn 604 slot) — body never measures text.
+    @State private var cinemaTagline = ""
+    /// v2.1.2 (filmography spec §4, adaptation A6): the
+    /// known-for titles that FIT the meta line's drawn
+    /// slot, fitted once at load by the greedy rule.
+    @State private var cinemaKnownFor: [String] = []
+    /// v2.1.2 (filmography spec §11): the credits load
+    /// FAILED (the client now returns nil for failure,
+    /// distinct from a genuinely empty filmography) —
+    /// the grid title slot renders the failure line
+    /// instead of the no-data line. .tmdb mode only.
+    @State private var creditsLoadFailed = false
 
     private struct MovieMatch: Identifiable {
         let credit: TMDBCreditTitle
@@ -84,17 +121,21 @@ struct JoeActorPage: View {
         var id: Int { title.tmdbId }
     }
 
-    /// v2.1.0 (Private Cinema): the focused playable
-    /// item's info-block + backdrop record for the PC
-    /// filmography, built ONLY from fields the record
-    /// itself carries — a PhimStore Movie carries no
-    /// rating and no synopsis on this page, a TVBTitle
-    /// carries a vote average but no overview; absent
-    /// fields stay absent (rating 0 / empty synopsis
-    /// render nothing), never invented. Index/total are
-    /// stamped at resolve time so the counter is a plain
-    /// read in body — nothing is recomputed on the
-    /// focus path.
+    /// v2.1.2 (filmography spec §6/§7): the focused
+    /// card's record for the cinema composition — the
+    /// trailer frame's static ladder, the info line
+    /// under the frame and the fixed bottom bar's role
+    /// line. Built from the CREDIT's own fields wherever
+    /// a credit exists (v2.1.2: TMDBCreditTitle now
+    /// carries the vote, the overview and the character,
+    /// so a matched film's info no longer degrades to
+    /// its playable record's thinner fields); a snapshot
+    /// title contributes its vote and leaves character /
+    /// synopsis empty. Absent fields stay absent (rating
+    /// 0 / empty strings render nothing), never invented.
+    /// Index/total are stamped at resolve time so the
+    /// counter is a plain read in body — nothing is
+    /// recomputed on the focus path.
     private struct CinemaItem {
         let title: String
         let year: String
@@ -102,8 +143,42 @@ struct JoeActorPage: View {
         let synopsis: String
         let backdropURL: URL?
         let posterURL: URL?
+        let character: String
         let index: Int
         let total: Int
+    }
+
+    /// v2.1.2 (filmography spec §5): one card of the
+    /// cinema grid. The target is the page's existing
+    /// plumbing, unchanged: a matched PhimStore Movie, a
+    /// matched (or snapshot) TVBTitle, or an unmatched
+    /// credit whose press runs the page's resolve-by-
+    /// TMDB-id discipline (resolveAndOpen). The display
+    /// fields ride the credit (or the snapshot title in
+    /// .tvb mode); date/popularity are the spec's sort
+    /// keys, kept so the grid order is a load-time
+    /// decision, never a body computation.
+    private struct CinemaCard: Identifiable {
+        enum Target {
+            case movie(Movie)
+            case tvb(TVBTitle)
+            case credit(TMDBCreditTitle)
+        }
+        let focusID: String
+        let target: Target
+        let title: String
+        let year: String
+        let character: String
+        let rating: Double
+        let overview: String
+        let posterURL: URL?
+        let backdropURL: URL?
+        let tmdbId: String
+        let tmdbType: String
+        let trailerUrl: String
+        let date: String
+        let popularity: Double
+        var id: String { focusID }
     }
 
     var body: some View {
@@ -527,68 +602,420 @@ struct JoeActorPage: View {
 
     // MARK: - Private Cinema filmography (v2.1.0 (Private Cinema))
 
-    /// The PC composition: the focused film's backdrop
-    /// (plus its trailer preview when one runs) fills
-    /// the screen; the actor header, counter and a
-    /// 2-column poster grid ride a ~720 pt left column;
-    /// the focused film's info block sits bottom-right.
-    /// The cards are the SAME builders the standard page
-    /// uses (movieCard/tvbCard/unmatchedRow), bound to
-    /// the SAME cardFocus — a tap still opens through
-    /// the untouched open()/performPendingOpen() path.
+    /// The PC composition (v2.1.2 — rebuilt to
+    /// FILMOGRAPHY-DESIGN-SPEC.md, the design expert's
+    /// spec measured off the Replit ActorFilmography
+    /// drawing; this closes flag F3 of the 2.1.1 closure
+    /// table). Flat Ink ground — NO full-screen backdrop:
+    /// the left zone (x 94–740) carries the actor header,
+    /// the 2-column poster grid in its hard-clipped
+    /// scroll viewport and the FIXED bottom bar; the
+    /// right zone (x 930–1826) carries the focused film's
+    /// trailer in its drawn 896×504 frame with the info
+    /// line under it. Every slot is fixed-geometry: data
+    /// changes contents, never positions. The cards are
+    /// new local builders (the spec's fixed title/year
+    /// slots), bound to the SAME cardFocus, and a tap
+    /// still opens through the untouched open() /
+    /// performPendingOpen() path (a matched title) or
+    /// the resolve-by-id discipline (an unmatched one).
     private var cinemaBody: some View {
-        ZStack {
-            cinemaBackdropLayer
-            HStack(alignment: .top, spacing: 48) {
-                cinemaLeftColumn
-                Spacer()
-            }
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    cinemaInfoBlock
+        ZStack(alignment: .topLeading) {
+            theme.bg.ignoresSafeArea()
+            cinemaSpecHeader
+            if loaded {
+                cinemaActorHeader
+                cinemaGridTitleRow
+                cinemaGridViewport
+                if !cinemaCards.isEmpty {
+                    cinemaBottomBar
+                    cinemaTrailerRegion
                 }
+            } else {
+                cinemaSkeleton
             }
-            .padding(.bottom, 24)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity,
+               alignment: .topLeading)
         .onChange(of: cardFocus) { _, newValue in
             cinemaFocusChanged(newValue)
         }
     }
 
-    /// The backdrop stack, in the detail's order: the
-    /// focused film's OWN art (a Movie's landscape thumb,
-    /// else its poster; a TVBTitle's TMDB backdrop path,
-    /// else its poster) sliced full-bleed, the preview
-    /// layer over it when a trailer is live, then the
-    /// theme.bg scrims (left + bottom). Nothing focused
-    /// yet: the actor's own photo rides as a dim backdrop
-    /// (the .tmdb route carries one; the .tvb route has
-    /// none and simply shows theme.bg).
-    private var cinemaBackdropLayer: some View {
+    // MARK: Cinema spec header (spec §3)
+
+    /// The drawing's own header for this screen: the
+    /// back affordance at (94, 56), the centre nav
+    /// labels painted as drawn (plain text — the cover
+    /// presents this page over the shell, whose own bar
+    /// carries the working navigation; the labels are
+    /// the drawing's furniture, never fake buttons), and
+    /// the live clock at the right inset. Only the back
+    /// button takes focus.
+    private var cinemaSpecHeader: some View {
+        HStack(spacing: 0) {
+            Button {
+                dismiss()
+            } label: {
+                HStack(spacing: 12) {
+                    Text("←")
+                    Text("Quay lại")
+                }
+                .font(.system(size: 24))
+                .foregroundStyle(backFocused
+                    ? theme.text : theme.text.opacity(0.75))
+            }
+            .joeCardButton()
+            .focused($backFocused)
+            Spacer()
+            HStack(spacing: 64) {
+                Text("Home")
+                Text("Movies")
+                Text("Series")
+                Text("TVB")
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 20))
+                    Text("Search")
+                }
+            }
+            .font(.system(size: 24))
+            .foregroundStyle(theme.text)
+            Spacer()
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                Text(context.date, format: PCClockLabel.clockStyle)
+                    .font(.system(size: 24))
+                    .foregroundStyle(theme.text)
+            }
+        }
+        .padding(.horizontal, 94)
+        .frame(maxWidth: .infinity)
+        .offset(y: 42)
+        .focusSection()
+    }
+
+    // MARK: Cinema actor header (spec §4)
+
+    /// The actor header: portrait 186×262 r3 at (94, 168)
+    /// (cover-crop, face anchor 0.18; no photo on record
+    /// → the Panel block + the name's initial in serif
+    /// 44, spec §8), then the text column at x 296 —
+    /// eyebrow y 180, the name in serif light 104 at
+    /// y 202 (shrinking toward 60 to hold its 548 slot,
+    /// never wrapping), the tagline slot at y 316 (the
+    /// biography's first sentence, A3 — pre-truncated at
+    /// load to its 604 slot at a word boundary; empty
+    /// when TMDB carries no biography), and the
+    /// "Được biết đến qua" meta line at y 360, fitted at
+    /// load under the A6 rule.
+    private var cinemaActorHeader: some View {
+        ZStack(alignment: .topLeading) {
+            cinemaPortrait
+                .offset(x: 94, y: 168)
+            HStack(spacing: 8) {
+                Text("DIỄN VIÊN")
+                    .foregroundStyle(theme.accent2)
+                Text("/")
+                    .foregroundStyle(theme.meta)
+                Text("PHIM ĐÃ THAM GIA")
+                    .foregroundStyle(theme.accent2)
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .tracking(5)
+            .offset(x: 296, y: 180)
+            Text(cinemaDisplayName)
+                .font(.system(size: 104, weight: .light,
+                              design: .serif))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(60.0 / 104.0)
+                .frame(width: 548, alignment: .leading)
+                .offset(x: 296, y: 202)
+            Text(cinemaTagline)
+                .font(.system(size: 27, design: .serif))
+                .italic()
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .frame(width: 604, height: 34, alignment: .leading)
+                .offset(x: 296, y: 316)
+            cinemaMetaLine
+                .offset(x: 296, y: 360)
+        }
+    }
+
+    private var cinemaPortrait: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(theme.surface2)
+            if let url = cinemaPortraitURL {
+                JoeBandImage(url: url, targetPixels: 632,
+                             anchor: 0.18, portraitMode: .slice)
+            } else {
+                Text(String(cinemaDisplayName.prefix(1)))
+                    .font(.system(size: 44, design: .serif))
+                    .foregroundStyle(theme.text)
+            }
+        }
+        .frame(width: 186, height: 262)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+    }
+
+    /// The person record's h632 profile when the fetch
+    /// carried one; the route's own photo behind it (the
+    /// cast row's w185 — a lesser size of the same art);
+    /// nil when neither exists (the Panel + initial
+    /// fallback then paints).
+    private var cinemaPortraitURL: URL? {
+        if let profile = person?.profileURL, !profile.isEmpty {
+            return URL(string: profile)
+        }
+        return route.photoURL.isEmpty ? nil : URL(string: route.photoURL)
+    }
+
+    private var cinemaDisplayName: String {
+        if let name = person?.name, !name.isEmpty { return name }
+        return route.name
+    }
+
+    /// The meta line's segments (spec §4): the Muted
+    /// label, the fitted known-for titles in Ivory, the
+    /// Muted slash, the Muted count — gaps of 18. With
+    /// no titles at all the label and slash go too and
+    /// the count stands alone.
+    private var cinemaMetaLine: some View {
+        HStack(spacing: 18) {
+            if !cinemaKnownFor.isEmpty {
+                Text("Được biết đến qua")
+                    .foregroundStyle(theme.meta)
+                Text(cinemaKnownFor.joined(separator: ", "))
+                    .foregroundStyle(theme.text)
+                Text("/")
+                    .foregroundStyle(theme.meta)
+            }
+            Text("\(cinemaCards.count) phim trong tuyển tập")
+                .foregroundStyle(theme.meta)
+        }
+        .font(.system(size: 20))
+        .lineLimit(1)
+    }
+
+    // MARK: Cinema grid (spec §5)
+
+    /// The grid's title row at y 430 (x 94–740): the
+    /// grid title at 27/500, the focus counter right-
+    /// aligned at x 740 (15/400 Muted, zero-padded). The
+    /// title slot also carries the §11 states: the
+    /// load-failure line and the no-data line, both
+    /// 27/500 Muted in this same slot.
+    private var cinemaGridTitleRow: some View {
+        HStack(alignment: .center, spacing: 16) {
+            if case .tmdb(_, _, _) = route, creditsLoadFailed {
+                Text("Không tải được danh sách phim")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+            } else if cinemaCards.isEmpty {
+                Text("Chưa có dữ liệu phim")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+            } else {
+                Text("Phim có \(cinemaDisplayName)")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                Spacer()
+                Text(String(format: "%02d / %02d",
+                            (cinemaFocusedItem?.index ?? 0) + 1,
+                            cinemaCards.count))
+                    .font(.system(size: 15))
+                    .foregroundStyle(theme.meta)
+            }
+        }
+        .frame(width: 646, alignment: .leading)
+        .offset(x: 94, y: 430)
+    }
+
+    /// The scroll viewport (spec §5): x 94–740,
+    /// y 470–930 — a HARD clip at y 930, so the second
+    /// row shows only its posters' tops and the cut
+    /// row's titles never paint. Focus scrolls inside
+    /// this viewport only; the header, the bottom bar
+    /// and the trailer zone stand outside it, fixed.
+    /// Columns at x 94 / 334 (205 cards, 35 gap); row
+    /// pitch 377 (a 324 cell + 53 spacing); the first
+    /// row's posters start at y 483.
+    private var cinemaGridViewport: some View {
+        Group {
+            if !cinemaCards.isEmpty {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.fixed(205), spacing: 35),
+                            GridItem(.fixed(205), spacing: 35),
+                        ],
+                        alignment: .leading, spacing: 53
+                    ) {
+                        ForEach(cinemaCards) { card in
+                            Button {
+                                cinemaCardTapped(card)
+                            } label: {
+                                CinemaPosterCard(
+                                    title: cinemaCardTitle(card),
+                                    year: card.year,
+                                    posterURL: card.posterURL,
+                                    backdropURL: card.backdropURL,
+                                    tmdbId: card.tmdbId,
+                                    tmdbType: card.tmdbType)
+                            }
+                            .joeCardButton()
+                            .focused($cardFocus, equals: card.focusID)
+                        }
+                    }
+                    .padding(.top, 13)
+                    .focusSection()
+                }
+            }
+        }
+        .frame(width: 646, height: 460)
+        .clipped()
+        .offset(x: 94, y: 470)
+    }
+
+    // MARK: Cinema bottom bar (spec §6)
+
+    /// The FIXED bottom bar of the left zone: the hint
+    /// line at y 941 (13/400 Muted), the 1 pt divider
+    /// at y 964 (Muted at 24%), and the role line at
+    /// y 984 — "Vai diễn" / the focused film's character
+    /// (Ivory 600) · its year; a credit with no character
+    /// on record leaves the line with the year alone
+    /// (spec §8). Nothing here scrolls with the grid.
+    private var cinemaBottomBar: some View {
+        ZStack(alignment: .topLeading) {
+            Text("Mới nhất trước · ↑↓ Duyệt thêm · Giữ tiêu điểm để xem trailer")
+                .font(.system(size: 13))
+                .foregroundStyle(theme.meta)
+                .lineLimit(1)
+                .offset(x: 94, y: 941)
+            Rectangle()
+                .fill(theme.meta.opacity(0.24))
+                .frame(width: 646, height: 1)
+                .offset(x: 94, y: 964)
+            cinemaRoleLine
+                .offset(x: 94, y: 984)
+        }
+    }
+
+    @ViewBuilder
+    private var cinemaRoleLine: some View {
+        if let item = cinemaFocusedItem {
+            if !item.character.isEmpty {
+                HStack(spacing: 8) {
+                    Text("Vai diễn")
+                        .foregroundStyle(theme.meta)
+                    Text("/")
+                        .foregroundStyle(theme.meta)
+                    Text(item.character)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(theme.text)
+                    if !item.year.isEmpty {
+                        Text("·")
+                            .foregroundStyle(theme.meta)
+                        Text(item.year)
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .font(.system(size: 20))
+                .lineLimit(1)
+            } else if !item.year.isEmpty {
+                // Spec §8: a credit with no character on
+                // record leaves the line with the year
+                // alone — no label, no separator.
+                Text(item.year)
+                    .font(.system(size: 20))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    // MARK: Cinema trailer region (spec §7)
+
+    /// The right zone: the eyebrow row at y 364 (the
+    /// Muted eyebrow left; the sound state as a NON-
+    /// focusable indicator at the right — A2: the
+    /// drawing's transport-looking labels are status
+    /// indicators here, never extra focus points), the
+    /// 896×504 trailer frame at (930, 388), the info
+    /// line at y 912 and the one-line synopsis at y 954.
+    /// The frame's stack: the Panel ground, the focused
+    /// film's static art (the §7 fallback chain —
+    /// backdrop w1280, else the poster cover-cropped
+    /// into the frame, else the Panel + the film's title
+    /// centred), and the preview layer letterboxed over
+    /// it while a trailer runs. The static art follows
+    /// focus immediately; the trailer crossfades in over
+    /// it when its first frames flow, and its natural
+    /// end crossfades back to the same static art (the
+    /// shared controller's own contract — the frame
+    /// never freezes on a last frame, never flashes
+    /// black, never changes size).
+    private var cinemaTrailerRegion: some View {
+        ZStack(alignment: .topLeading) {
+            HStack(spacing: 16) {
+                Text("TRAILER THEO TIÊU ĐIỂM")
+                    .font(.system(size: 15, weight: .semibold))
+                    .tracking(5)
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                Spacer()
+                Text("Tắt tiếng")
+                    .font(.system(size: 15))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+            }
+            .frame(width: 896)
+            .offset(x: 930, y: 364)
+            cinemaTrailerFrame
+                .offset(x: 930, y: 388)
+            cinemaInfoLine
+                .offset(x: 930, y: 912)
+            if let item = cinemaFocusedItem, !item.synopsis.isEmpty {
+                Text(item.synopsis)
+                    .font(.system(size: 18))
+                    .foregroundStyle(theme.text.opacity(0.92))
+                    .lineLimit(1)
+                    .frame(width: 896, alignment: .leading)
+                    .offset(x: 930, y: 954)
+            }
+        }
+    }
+
+    private var cinemaTrailerFrame: some View {
         let previewOpacity: Double =
             cinemaPreview.visible && !cinemaPreview.fadingOut ? 1 : 0
         let previewFadeDuration: Double =
             cinemaPreview.visible ? 0.8 : 0.15
         return ZStack {
-            theme.bg
+            theme.surface2
             if let item = cinemaFocusedItem {
                 if let url = item.backdropURL {
-                    JoeBandImage(url: url, targetPixels: 1920,
-                                 anchor: 0.16, portraitMode: .slice)
+                    JoeBandImage(url: url, targetPixels: 1280,
+                                 anchor: 0.5, portraitMode: .slice)
                 } else if let url = item.posterURL {
-                    JoeBandImage(url: url, targetPixels: 1920,
-                                 anchor: 0.16, portraitMode: .blurField)
+                    JoeBandImage(url: url, targetPixels: 1280,
+                                 anchor: 0.35, portraitMode: .slice)
+                } else {
+                    Text(item.title)
+                        .font(.system(size: 20))
+                        .foregroundStyle(theme.meta)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
                 }
-            } else if !route.photoURL.isEmpty,
-                      let url = URL(string: route.photoURL) {
-                JoeBandImage(url: url, targetPixels: 1920,
-                             anchor: 0.16, portraitMode: .blurField)
-                    .opacity(0.5)
             }
             if cinemaPreview.player != nil {
-                JoePreviewLayerView(controller: cinemaPreview)
+                CinemaTrailerHostView(controller: cinemaPreview)
                     .opacity(previewOpacity)
                     .animation(.easeInOut(duration: previewFadeDuration),
                                value: cinemaPreview.visible)
@@ -597,189 +1024,156 @@ struct JoeActorPage: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
-            LinearGradient(stops: [
-                .init(color: theme.bg.opacity(0.85), location: 0),
-                .init(color: theme.bg.opacity(0.40), location: 0.5),
-                .init(color: theme.bg.opacity(0.05), location: 1)
-            ], startPoint: .leading, endPoint: .trailing)
-            LinearGradient(stops: [
-                .init(color: theme.bg.opacity(0.30), location: 0),
-                .init(color: .clear, location: 0.35),
-                .init(color: theme.bg.opacity(0.88), location: 0.85),
-                .init(color: theme.bg, location: 1)
-            ], startPoint: .top, endPoint: .bottom)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .ignoresSafeArea()
+        .frame(width: 896, height: 504)
+        .clipped()
     }
 
-    private var cinemaLeftColumn: some View {
-        VStack(alignment: .leading, spacing: 28) {
-            header
+    /// The info line under the frame (spec §7): the
+    /// focused film's title at 26/500 Ivory, its year
+    /// (20/400 Muted) and — only when the record carries
+    /// a real vote — the Celadon ★ + the vote in VN
+    /// decimal form + "· điểm TMDB"; right-aligned, the
+    /// playback status ("Đang phát · Tắt tiếng" while a
+    /// trailer shows; "Không có trailer" once an attempt
+    /// concluded with nothing to play).
+    private var cinemaInfoLine: some View {
+        HStack(alignment: .center, spacing: 16) {
             if let item = cinemaFocusedItem {
-                Text(String(format: "%02d / %02d",
-                            item.index + 1, item.total))
-                    .font(.system(size: 25))
-                    .foregroundStyle(theme.meta)
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(item.title)
+                        .font(.system(size: 26, weight: .medium))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    if !item.year.isEmpty {
+                        Text(item.year)
+                            .font(.system(size: 20))
+                            .foregroundStyle(theme.meta)
+                            .lineLimit(1)
+                    }
+                    if item.rating > 0 {
+                        (Text("★ ").foregroundStyle(theme.accent2)
+                            + Text(cinemaVoteText(item.rating))
+                                .foregroundStyle(theme.text)
+                            + Text(" · điểm TMDB")
+                                .foregroundStyle(theme.meta))
+                            .font(.system(size: 20))
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: 620, alignment: .leading)
             }
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 30) {
-                    if !loaded {
-                        ProgressView("Đang tải…")
-                            .font(.system(size: 29))
-                            .foregroundStyle(theme.text)
-                            .tint(theme.text)
-                            .padding(.top, 30)
-                    } else {
-                        cinemaGridContent
-                        if case .tmdb = route, !unmatched.isEmpty {
-                            VStack(alignment: .leading, spacing: 18) {
-                                sectionTitle("Chưa có nguồn phát")
-                                LazyVStack(alignment: .leading,
-                                           spacing: 16) {
-                                    ForEach(
-                                        Array(unmatched.enumerated()),
-                                        id: \.offset
-                                    ) { _, credit in
-                                        unmatchedRow(credit)
-                                    }
-                                }
-                            }
+            Spacer()
+            Text(cinemaPreview.visible
+                    ? "Đang phát · Tắt tiếng" : cinemaTrailerNote)
+                .font(.system(size: 15))
+                .foregroundStyle(theme.meta)
+                .lineLimit(1)
+        }
+        .frame(width: 896)
+    }
+
+    /// The vote in the spec's VN decimal form: one
+    /// decimal place, a comma for the point ("8,1").
+    private func cinemaVoteText(_ vote: Double) -> String {
+        String(format: "%.1f", vote)
+            .replacingOccurrences(of: ".", with: ",")
+    }
+
+    // MARK: Cinema skeleton (spec §11)
+
+    /// The loading surface: Panel blocks at the REAL
+    /// geometry (portrait 186×262, four grid cards, the
+    /// 896×504 frame) — no text, no centred spinner.
+    /// The spec header above it is live furniture (the
+    /// back button works while the page loads).
+    private var cinemaSkeleton: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(theme.surface2)
+                .frame(width: 186, height: 262)
+                .offset(x: 94, y: 168)
+            // Row pitch matches the real grid exactly:
+            // the second row's posters start at
+            // 483 + 377 = 860 (263 art + 114 of the
+            // pitch), and the stack is hard-clipped at
+            // the viewport's y 930 line (447 from 483),
+            // like the loaded grid.
+            HStack(alignment: .top, spacing: 35) {
+                ForEach(0..<2, id: \.self) { _ in
+                    VStack(spacing: 114) {
+                        ForEach(0..<2, id: \.self) { _ in
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(theme.surface2)
+                                .frame(width: 205, height: 263)
                         }
                     }
                 }
             }
-        }
-        .frame(width: 720, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var cinemaGridContent: some View {
-        switch route {
-        case .tvb:
-            if tvbTitles.isEmpty {
-                Text("Chưa có phim nào của diễn viên này trong danh sách TVB.")
-                    .font(.system(size: 29))
-                    .foregroundStyle(theme.meta)
-            } else {
-                cinemaCardGrid {
-                    ForEach(tvbTitles) { title in
-                        tvbCard(title)
-                    }
-                }
-            }
-        case .tmdb:
-            if credits.isEmpty {
-                Text("Chưa tải được danh sách phim của diễn viên này.")
-                    .font(.system(size: 29))
-                    .foregroundStyle(theme.meta)
-            } else if !matchedMovies.isEmpty || !matchedTVB.isEmpty {
-                cinemaCardGrid {
-                    ForEach(matchedMovies) { match in
-                        movieCard(match.movie)
-                    }
-                    ForEach(matchedTVB) { match in
-                        tvbCard(match.title)
-                    }
-                }
-            }
+            .frame(height: 447, alignment: .top)
+            .clipped()
+            .offset(x: 94, y: 483)
+            theme.surface2
+                .frame(width: 896, height: 504)
+                .offset(x: 930, y: 388)
         }
     }
 
-    private var cinemaGridColumns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
-              count: 2)
-    }
+    // MARK: - Cinema focus + card data (v2.1.2)
 
-    private func cinemaCardGrid<Content: View>(
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        LazyVGrid(columns: cinemaGridColumns, alignment: .leading,
-                  spacing: 40) {
-            content()
-        }
-        .padding(.vertical, 8)
-        .focusSection()
-    }
-
-    /// The bottom-right info block: the focused film's
-    /// title in the PC serif, its year · ★rating line
-    /// (rating only when the record carries one) and
-    /// its synopsis (only when the record carries one,
-    /// ≤3 lines). Absent fields are omitted, never
-    /// invented.
-    @ViewBuilder
-    private var cinemaInfoBlock: some View {
-        if let item = cinemaFocusedItem {
-            VStack(alignment: .trailing, spacing: 10) {
-                Text(item.title)
-                    .font(.system(size: 40, design: .serif))
-                    .foregroundStyle(theme.text)
-                    .multilineTextAlignment(.trailing)
-                    .lineLimit(2)
-                let metaLine = [
-                    item.year,
-                    item.rating > 0
-                        ? "★" + String(format: "%.1f", item.rating)
-                        : ""
-                ].filter { !$0.isEmpty }.joined(separator: " · ")
-                if !metaLine.isEmpty {
-                    Text(metaLine)
-                        .font(.system(size: 25))
-                        .foregroundStyle(theme.meta)
-                }
-                if !item.synopsis.isEmpty {
-                    Text(item.synopsis)
-                        .font(.system(size: 25))
-                        .foregroundStyle(theme.text)
-                        .multilineTextAlignment(.trailing)
-                        .lineLimit(3)
-                        .frame(maxWidth: 640, alignment: .trailing)
-                }
-            }
+    /// A PC card tap routes through the page's existing
+    /// plumbing: a matched title opens exactly as its
+    /// standard-page card does; an unmatched credit runs
+    /// the resolve-by-exact-TMDB-id discipline.
+    private func cinemaCardTapped(_ card: CinemaCard) {
+        switch card.target {
+        case .movie(let movie):
+            openMovie(movie)
+        case .tvb(let title):
+            openTVB(title)
+        case .credit(let credit):
+            Task { await resolveAndOpen(credit) }
         }
     }
 
-    // MARK: Cinema focus → trailer
-
-    /// One cardFocus change under PC (v2.1.0 (Private
-    /// Cinema)): the previous focus's dwell task is
-    /// cancelled and any in-flight attempt is torn
-    /// down with stop() — per-focus D1 discipline
-    /// WITHOUT the detail's per-visit kill latch (see
-    /// the note inside); the newly
-    /// focused item is recorded for the backdrop + info
-    /// block; then, when the preview rules allow, a
-    /// 1.2 s dwell runs the IDENTICAL trailer chain the
-    /// detail runs (JoeCinemaTrailer) for that item.
-    /// Non-card focus (the header's Quay lại, an
-    /// unmatched row) clears the info record and starts
-    /// no attempt.
+    /// The PC focus handler — the page's own discipline
+    /// since v2.1.0, retargeted at the spec's trailer
+    /// frame: a focus move ends the CURRENT film's
+    /// attempt with stop() (full teardown, NO latch),
+    /// never killIfAttempting — the kill latch is
+    /// per-VISIT semantics from the detail page (one
+    /// title per visit), while this page's design is
+    /// per-FOCUS trailers; latching would silence every
+    /// later film's trailer for the rest of the visit.
+    /// The focused card's record resolves at once (the
+    /// info line, the role line and the frame's static
+    /// art follow focus immediately, the previous film's
+    /// art never lingering); the dwell task then runs
+    /// the preview contract — 1.2 s, cancellable, gated
+    /// by the Settings toggle + Reduce Motion
+    /// (JoeCinemaTrailer.allowedByRules, checked before
+    /// the task is even formed). An attempt that
+    /// concludes with no player stamps the frame's
+    /// status note; a rules-blocked attempt leaves the
+    /// note empty (the film may well have a trailer —
+    /// previews are simply off).
     private func cinemaFocusChanged(_ focus: String?) {
         cinemaFocusTask?.cancel()
         cinemaFocusTask = nil
-        // v2.1.0 (Private Cinema) — leader correction:
-        // a focus move ends the CURRENT film's attempt
-        // with stop() (full teardown, NO latch), never
-        // killIfAttempting: the kill latch is per-VISIT
-        // semantics from the detail (one title per
-        // visit), while this page's whole design is
-        // per-FOCUS trailers — latching would silence
-        // every later film's trailer for the rest of
-        // the page visit. stop() clears player +
-        // attemptKind, so the next film's dwell can
-        // begin its own attempt cleanly.
         cinemaPreview.stop()
+        cinemaTrailerNote = ""
         guard let focus,
-              let resolved = resolveCinemaFocus(focus) else {
+              let index = cinemaCards.firstIndex(
+                  where: { $0.focusID == focus }) else {
             cinemaFocusedItem = nil
             return
         }
-        cinemaFocusedItem = resolved.item
+        let card = cinemaCards[index]
+        cinemaFocusedItem = resolveCinemaItem(card, index: index)
         guard JoeCinemaTrailer.allowedByRules() else { return }
-        let tmdbId = resolved.tmdbId
-        let tmdbType = resolved.tmdbType
-        let trailerUrl = resolved.trailerUrl
+        let tmdbId = card.tmdbId
+        let tmdbType = card.tmdbType
+        let trailerUrl = card.trailerUrl
         cinemaFocusTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             guard !Task.isCancelled else { return }
@@ -787,87 +1181,254 @@ struct JoeActorPage: View {
                 tmdbId: tmdbId, tmdbType: tmdbType,
                 sourceTrailerUrl: trailerUrl,
                 into: cinemaPreview)
-        }
-    }
-
-    /// Map a cardFocus value back to its playable item
-    /// (the cards bind cardFocus to "movie|" + movie.id
-    /// and "tvb|" + tmdbId). Returns the info record
-    /// plus the trailer identity: a Movie's own TMDB
-    /// id/type and its source trailer URL; a TVBTitle's
-    /// snapshot TMDB id as "tv" with no source trailer
-    /// (the snapshot carries no trailer field, so its
-    /// chain is TMDB-only, exactly as the task spec
-    /// states).
-    private func resolveCinemaFocus(
-        _ focus: String
-    ) -> (item: CinemaItem, tmdbId: String, tmdbType: String,
-          trailerUrl: String)? {
-        if focus.hasPrefix("movie|") {
-            let movieId = String(focus.dropFirst("movie|".count))
-            guard let index = matchedMovies.firstIndex(
-                where: { $0.movie.id == movieId }) else { return nil }
-            let movie = matchedMovies[index].movie
-            let item = CinemaItem(
-                title: movie.name,
-                year: Providers.yearOf(movie.year),
-                rating: 0,
-                synopsis: "",
-                backdropURL: movie.thumbURL ?? movie.posterURL,
-                posterURL: movie.posterURL,
-                index: index,
-                total: matchedMovies.count + matchedTVB.count)
-            return (item, movie.tmdbId, movie.tmdbType,
-                    movie.trailerUrl)
-        }
-        if focus.hasPrefix("tvb|") {
-            let idText = String(focus.dropFirst("tvb|".count))
-            guard let tmdbId = Int(idText) else { return nil }
-            switch route {
-            case .tvb:
-                guard let index = tvbTitles.firstIndex(
-                    where: { $0.tmdbId == tmdbId }) else { return nil }
-                let title = tvbTitles[index]
-                return (cinemaItem(for: title, index: index,
-                                   total: tvbTitles.count),
-                        "\(title.tmdbId)", "tv", "")
-            case .tmdb:
-                guard let index = matchedTVB.firstIndex(
-                    where: { $0.title.tmdbId == tmdbId })
-                else { return nil }
-                let title = matchedTVB[index].title
-                return (cinemaItem(
-                            for: title,
-                            index: matchedMovies.count + index,
-                            total: matchedMovies.count
-                                + matchedTVB.count),
-                        "\(title.tmdbId)", "tv", "")
+            guard !Task.isCancelled else { return }
+            if cinemaPreview.player == nil {
+                cinemaTrailerNote = "Không có trailer"
             }
         }
-        return nil
     }
 
-    /// A TVBTitle's info record: its TMDB backdrop path
-    /// (the w1280 convention TMDBClient uses) over its
-    /// own poster; its vote average rides as the rating
-    /// (0 renders nothing); the snapshot carries no
-    /// overview, so the synopsis stays empty.
-    private func cinemaItem(for title: TVBTitle, index: Int,
-                            total: Int) -> CinemaItem {
-        var backdropURL: URL?
-        if let path = title.backdropPath, !path.isEmpty {
-            backdropURL = URL(string: "https://image.tmdb.org/t/p/w1280"
-                + (path.hasPrefix("/") ? path : "/" + path))
-        }
-        return CinemaItem(
-            title: title.titleVi,
-            year: title.yearString,
-            rating: title.voteAverage,
-            synopsis: "",
-            backdropURL: backdropURL ?? title.posterURL,
-            posterURL: title.posterURL,
+    /// The card title as the grid paints it (spec §5):
+    /// shaped ONCE per card at build time — word-boundary
+    /// truncation with the ellipsis at the drawn 205
+    /// width, 18 pt — so the card's Text never cuts a
+    /// word in two. The one edge the rule cannot serve
+    /// (a single word longer than the whole slot) falls
+    /// back to the raw title rather than no title at all.
+    private func cinemaCardTitle(_ card: CinemaCard) -> String {
+        let shaped = truncatedToFit(
+            card.title, maxWidth: 205,
+            font: UIFont.systemFont(ofSize: 18))
+        return shaped.isEmpty ? card.title : shaped
+    }
+
+    /// Resolve the focused card into the record the
+    /// composition paints. The synopsis is pre-shaped
+    /// here (first sentence, word-boundary truncation to
+    /// the drawn 896 line at 18 pt) so body stays a plain
+    /// read on the focus path.
+    private func resolveCinemaItem(
+        _ card: CinemaCard, index: Int
+    ) -> CinemaItem {
+        CinemaItem(
+            title: card.title,
+            year: card.year,
+            rating: card.rating,
+            synopsis: truncatedToFit(
+                firstSentence(of: card.overview),
+                maxWidth: 896, font: UIFont.systemFont(ofSize: 18)),
+            backdropURL: card.backdropURL,
+            posterURL: card.posterURL,
+            character: card.character,
             index: index,
-            total: total)
+            total: cinemaCards.count)
+    }
+
+    /// Build the cinema card list (spec §5/§7) from the
+    /// records load() just produced. A credit (or a
+    /// snapshot title) becomes a card only when its art
+    /// ladder is non-empty — poster first, backdrop
+    /// behind it (A7: ONE 205×263 frame for every card).
+    /// A matched credit's art prefers the CREDIT's own
+    /// TMDB art (its poster is the right person's film);
+    /// the playable record's art fills only the rungs
+    /// the credit lacks. Sort: release date descending,
+    /// popularity descending as the tie-break (credits
+    /// without a date ride last). The .tvb list keeps
+    /// the snapshot's own popularity order.
+    private func buildCinemaCards() {
+        switch route {
+        case .tvb:
+            cinemaCards = tvbTitles.compactMap { title in
+                guard title.posterURL != nil
+                        || title.cinemaBackdropURL != nil
+                else { return nil }
+                return CinemaCard(
+                    focusID: "tvb|" + "\(title.tmdbId)",
+                    target: .tvb(title),
+                    title: title.titleVi,
+                    year: title.yearString,
+                    character: "",
+                    rating: title.voteAverage,
+                    overview: "",
+                    posterURL: title.posterURL,
+                    backdropURL: title.cinemaBackdropURL,
+                    tmdbId: "\(title.tmdbId)",
+                    tmdbType: "tv",
+                    trailerUrl: "",
+                    date: "",
+                    popularity: title.popularity)
+            }
+        case .tmdb:
+            let movieByCredit = Dictionary(
+                matchedMovies.map { ($0.credit.id, $0.movie) },
+                uniquingKeysWith: { first, _ in first })
+            let tvbByCredit = Dictionary(
+                matchedTVB.map { ($0.credit.id, $0.title) },
+                uniquingKeysWith: { first, _ in first })
+            var cards: [CinemaCard] = []
+            for credit in credits {
+                var poster = credit.posterURL.isEmpty
+                    ? nil : URL(string: credit.posterURL)
+                var backdrop = credit.backdropURL.isEmpty
+                    ? nil : URL(string: credit.backdropURL)
+                let focusID: String
+                let target: CinemaCard.Target
+                var trailerUrl = ""
+                if let movie = movieByCredit[credit.id] {
+                    focusID = "movie|" + movie.id
+                    target = .movie(movie)
+                    trailerUrl = movie.trailerUrl
+                    if poster == nil { poster = movie.posterURL }
+                    if backdrop == nil {
+                        backdrop = movie.thumbURL ?? movie.posterURL
+                    }
+                } else if let title = tvbByCredit[credit.id] {
+                    focusID = "tvb|" + "\(title.tmdbId)"
+                    target = .tvb(title)
+                    if poster == nil { poster = title.posterURL }
+                    if backdrop == nil {
+                        backdrop = title.cinemaBackdropURL
+                    }
+                } else {
+                    focusID = "unmatched|" + credit.id
+                    target = .credit(credit)
+                }
+                guard poster != nil || backdrop != nil else {
+                    continue
+                }
+                cards.append(CinemaCard(
+                    focusID: focusID,
+                    target: target,
+                    title: credit.title,
+                    year: credit.year == "0" ? "" : credit.year,
+                    character: credit.character,
+                    rating: credit.voteAverage,
+                    overview: credit.overview,
+                    posterURL: poster,
+                    backdropURL: backdrop,
+                    tmdbId: credit.tmdbId,
+                    tmdbType: credit.type,
+                    trailerUrl: trailerUrl,
+                    date: credit.date,
+                    popularity: credit.popularity))
+            }
+            cards.sort { a, b in
+                if a.date != b.date { return a.date > b.date }
+                return a.popularity > b.popularity
+            }
+            cinemaCards = cards
+        }
+    }
+
+    /// The header's derived texts, computed once per
+    /// load: the tagline (spec §4/A3 — the biography's
+    /// first sentence in the language TMDB returned,
+    /// truncated at a word boundary to its 604 slot;
+    /// empty when there is no biography) and the
+    /// known-for fit (spec §4/A6 — titles in popularity
+    /// order, added only while the composed line still
+    /// ends inside its slot; at least one title whenever
+    /// any exist).
+    private func computeCinemaHeaderTexts() {
+        cinemaTagline = truncatedToFit(
+            firstSentence(of: person?.biography ?? ""),
+            maxWidth: 604, font: cinemaSerifFont(size: 27, italic: true))
+        let popularityOrdered: [String]
+        switch route {
+        case .tvb:
+            popularityOrdered = tvbTitles.map(\.titleVi)
+        case .tmdb:
+            popularityOrdered = cinemaCards
+                .sorted { $0.popularity > $1.popularity }
+                .map(\.title)
+        }
+        // Spec §8: the slot's source is the FIRST THREE
+        // titles by popularity in the displayed list;
+        // the A6 fit below may only trim that set further.
+        let candidates = Array(popularityOrdered.prefix(3))
+        let font = UIFont.systemFont(ofSize: 20)
+        let countText = "\(cinemaCards.count) phim trong tuyển tập"
+        func composedWidth(_ titles: [String]) -> CGFloat {
+            var width = textWidth(countText, font: font)
+            if !titles.isEmpty {
+                width += textWidth("Được biết đến qua", font: font)
+                width += 18
+                width += textWidth(
+                    titles.joined(separator: ", "), font: font)
+                width += 18
+                width += textWidth("/", font: font)
+                width += 18
+            }
+            return width
+        }
+        var chosen: [String] = []
+        for title in candidates {
+            if chosen.isEmpty
+                || composedWidth(chosen + [title]) <= 604 {
+                chosen.append(title)
+            } else {
+                break
+            }
+        }
+        cinemaKnownFor = chosen
+    }
+
+    // MARK: - Text shaping helpers
+
+    /// The first sentence of a text: everything up to
+    /// and including the first sentence terminator
+    /// ('.', '!', '?', '…'); the whole text when it
+    /// carries none. Whitespace-trimmed; empty stays
+    /// empty (never invented content — A3).
+    private func firstSentence(of text: String) -> String {
+        let trimmed = text.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if let index = trimmed.firstIndex(where: {
+            $0 == "." || $0 == "!" || $0 == "?" || $0 == "…"
+        }) {
+            return String(trimmed[...index])
+        }
+        return trimmed
+    }
+
+    /// Truncate to fit a width at a word boundary,
+    /// appending the ellipsis when text was cut; a text
+    /// that already fits passes through unchanged.
+    private func truncatedToFit(
+        _ text: String, maxWidth: CGFloat, font: UIFont
+    ) -> String {
+        guard !text.isEmpty,
+              textWidth(text, font: font) > maxWidth else {
+            return text
+        }
+        var candidate = text
+        while let cut = candidate.lastIndex(of: " ") {
+            candidate = String(candidate[..<cut])
+            if textWidth(candidate + "…", font: font) <= maxWidth {
+                return candidate + "…"
+            }
+        }
+        return ""
+    }
+
+    private func textWidth(_ text: String, font: UIFont) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    /// The serif face the spec's tagline slot draws
+    /// (serif italic 27), for measuring that slot.
+    private func cinemaSerifFont(size: CGFloat, italic: Bool) -> UIFont {
+        var descriptor = UIFont.systemFont(ofSize: size).fontDescriptor
+        if let serif = descriptor.withDesign(.serif) {
+            descriptor = serif
+        }
+        if italic,
+           let traits = descriptor.withSymbolicTraits(.traitItalic) {
+            descriptor = traits
+        }
+        return UIFont(descriptor: descriptor, size: size)
     }
 
     // MARK: - Load + matching
@@ -885,16 +1446,26 @@ struct JoeActorPage: View {
                     .sorted { $0.popularity > $1.popularity }
             }.value
             tvbTitles = titles
+            buildCinemaCards()
+            computeCinemaHeaderTexts()
             loaded = true
             landInitialFocus()
         case .tmdb(let personId, _, _):
             async let creditsFetch =
                 TMDBClient.fetchPersonCredits(personId: personId)
+            // v2.1.2: the person record rides the same
+            // window (the cinema header's h632 portrait +
+            // biography); fail-soft — a nil person leaves
+            // the header on the route's own name/photo.
+            async let personFetch =
+                TMDBClient.fetchPerson(personId: personId)
             let snapshot = await Task.detached(priority: .userInitiated) {
                 TVBCatalog.loadBundled()
             }.value
             let fetched = await creditsFetch
-            credits = fetched
+            creditsLoadFailed = fetched == nil
+            credits = fetched ?? []
+            person = await personFetch
             // tmdbId → Movie over every list the PhimStore
             // holds (the trending matcher's catalogue map,
             // JoePhimHome.catalogueByTmdbId, mirrored).
@@ -908,7 +1479,7 @@ struct JoeActorPage: View {
             var movies: [MovieMatch] = []
             var tvbs: [TVBMatch] = []
             var rest: [TMDBCreditTitle] = []
-            for credit in fetched {
+            for credit in credits {
                 // The credit's tmdbId is matched in its
                 // string form (the Movie map's key form);
                 // the same text reads back as the TVB map's
@@ -936,6 +1507,8 @@ struct JoeActorPage: View {
             matchedMovies = movies
             matchedTVB = tvbs
             unmatched = rest
+            buildCinemaCards()
+            computeCinemaHeaderTexts()
             loaded = true
             landInitialFocus()
         }
@@ -956,6 +1529,22 @@ struct JoeActorPage: View {
     /// film row at all. Same mechanism as the detail's
     /// focusedRetry write in JoeMovieDetail.load().
     private func landInitialFocus() {
+        // v2.1.2 (filmography spec §10): under Private
+        // Cinema the initial focus is the cinema grid's
+        // first card — that grid is the cinema card list,
+        // not the standard page's matched sections. With
+        // NO cinema cards (the §11 no-data state) the PC
+        // tree's only focusable is the header back
+        // button: land there, never on a standard-page
+        // card ID the PC tree does not contain.
+        if theme.id == .privateCinema {
+            if let first = cinemaCards.first {
+                cardFocus = first.focusID
+            } else {
+                backFocused = true
+            }
+            return
+        }
         if let first = matchedMovies.first {
             cardFocus = "movie|" + first.movie.id
         } else if let first = matchedTVB.first {
@@ -1014,5 +1603,164 @@ struct JoeActorPage: View {
             add(phim.countryLists[spec.slug] ?? [])
         }
         return map
+    }
+}
+
+/// v2.1.2 (filmography spec §5): one card of the cinema
+/// grid — a FIXED 324 pt cell: the 205×263 art frame
+/// (r6 art / r7 button), the title at +276 (18/400
+/// Ivory, ONE line — it arrives pre-shaped by the page
+/// at a word boundary with the ellipsis at the 205
+/// width, never a mid-word cut), the year at +307
+/// (14/400 Muted). Every card
+/// carries the same frame (A7): the poster when the
+/// record has one, else its backdrop cover-cropped
+/// into the same 205×263. The focus treatment is the
+/// house PC construction (A1): the system platter is
+/// stripped by the caller's .joeCardButton() and the
+/// ring drawn here is the theme's own inset ivory ring
+/// — the same ring PosterCard's cinema body paints —
+/// so focus reads as the design's pale outline without
+/// a second geometry fighting the OS. The quality chip
+/// of the drawing is NOT painted: no per-title measured
+/// quality exists at this surface (A4 — a chip only
+/// with a real measurement).
+private struct CinemaPosterCard: View {
+    @Environment(\.joeTheme) private var theme
+    @Environment(\.isFocused) private var isFocused
+
+    let title: String
+    let year: String
+    let posterURL: URL?
+    let backdropURL: URL?
+    let tmdbId: String
+    let tmdbType: String
+
+    /// PosterCard's own fallback leg, mirrored: when the
+    /// primary bitmap fails to load (or fails its aspect
+    /// gate), the pipeline's TMDB poster for this title
+    /// is tried before the placeholder paints — the same
+    /// recovery every other poster card in the app gets.
+    private var tmdbFallback: (() async -> URL?)? {
+        guard !tmdbId.isEmpty, tmdbId != "0" else { return nil }
+        let id = tmdbId, type = tmdbType
+        return {
+            await JoeImagePipeline.shared.tmdbPosterURL(
+                tmdbId: id, type: type)
+        }
+    }
+
+    /// The placeholder PosterCard itself paints under
+    /// every non-Ultra theme (JoeTheme.swift): the film
+    /// glyph at 64 pt in the meta colour at 55%.
+    private var placeholderArt: some View {
+        Image(systemName: "film")
+            .font(.system(size: 64))
+            .foregroundStyle(theme.meta.opacity(0.55))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack {
+                theme.surface2
+                if let posterURL {
+                    JoeRemoteImage(
+                        url: posterURL, targetPixels: 480,
+                        fit: true, slotClass: .portrait,
+                        fallbackProvider: tmdbFallback
+                    ) {
+                        placeholderArt
+                    }
+                    .frame(width: 205, height: 263)
+                    .clipped()
+                } else if let backdropURL {
+                    JoeRemoteImage(
+                        url: backdropURL, targetPixels: 480,
+                        fit: false, slotClass: .any,
+                        fallbackProvider: tmdbFallback
+                    ) {
+                        placeholderArt
+                    }
+                    .frame(width: 205, height: 263)
+                    .clipped()
+                } else {
+                    placeholderArt
+                        .frame(width: 205, height: 263)
+                }
+            }
+            .frame(width: 205, height: 263)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(theme.focus,
+                                      lineWidth: theme.ringWidth)
+                }
+            }
+            Text(title)
+                .font(.system(size: 18))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.top, 13)
+            Text(year)
+                .font(.system(size: 14))
+                .foregroundStyle(theme.meta)
+                .lineLimit(1)
+                .padding(.top, 9)
+        }
+        .frame(width: 205, height: 324, alignment: .top)
+    }
+}
+
+/// v2.1.2 (filmography spec §7): the trailer frame's
+/// video surface — a LOCAL host for the shared preview
+/// controller's player layer. JoePreviewLayerView (in
+/// the protected JoePreview.swift) sets its layer to
+/// resizeAspectFill for the detail page's full-bleed
+/// backdrop; the spec's bounded 896×504 frame letter-
+/// boxes instead, so this host mirrors that view's
+/// structure with resizeAspect. The controller, its
+/// playback and its end-of-clip behaviour are the
+/// shared ones, untouched — only the gravity differs.
+private struct CinemaTrailerHostView: View {
+    @ObservedObject var controller: JoePreviewController
+
+    var body: some View {
+        CinemaTrailerHostUIView(player: controller.player)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct CinemaTrailerHostUIView: UIViewRepresentable {
+    let player: AVPlayer?
+
+    func makeUIView(context: Context) -> CinemaTrailerHostPlatformView {
+        CinemaTrailerHostPlatformView()
+    }
+
+    func updateUIView(_ view: CinemaTrailerHostPlatformView,
+                      context: Context) {
+        view.playerLayer.player = player
+    }
+}
+
+private final class CinemaTrailerHostPlatformView: UIView {
+    let playerLayer = AVPlayerLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        playerLayer.videoGravity = .resizeAspect
+        layer.addSublayer(playerLayer)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        playerLayer.frame = bounds
     }
 }

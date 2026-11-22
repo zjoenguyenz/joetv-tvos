@@ -364,13 +364,20 @@ enum TVBSnapshotLookup {
 //
 // One new section beside the existing ones, on the shell's
 // unchanged scaffolding: a header (title + the tab's own search
-// entry, the Phim slim-header construction), the genre chips
-// row (plan §3.2), then either the rails home (the five pipeline
-// rails of plan §3.3/§3 in build order, then the seven genre
-// shelves) or — while a genre chip is selected — that shelf's
-// grid (the JoeBrowseView 6-column construction). The in-tab
+// entry, the Phim slim-header construction), then the rails
+// home (the five pipeline rails of plan §3.3/§3 in build order,
+// then the seven genre shelves AS RAILS). The in-tab
 // search (plan §3.1) swaps in above the home exactly as the
 // Phim search swaps in above JoePhimHome.
+//
+// v2.1.2 (owner ruling 2026-11-22 03:43 CST): the genre
+// chips row that used to stand between the header and the
+// rails is REMOVED — "Trang tvb vẫn giữ tìm kiếm thôi, vì
+// có rail rồi": the search entry stays, and the seven genre
+// shelves stay reachable as the rails railSpecs already
+// appends (both arms render them), so the chip-selected
+// genre grid and its state went with the row. Nothing else
+// on this page moved.
 //
 // MENU: this root carries the section handler in the
 // JoeTVSection / JoeSettingsView shape — Menu returns to the
@@ -390,8 +397,6 @@ struct JoeTVBView: View {
     @State private var catalog: TVBCatalog?
     @State private var loadFailed = false
     @State private var searchOpen = false
-    /// The selected genre shelf's name; nil = the rails home.
-    @State private var selectedGenre: String?
     /// Idea 1 (actor rail): the actor page presented over
     /// this tab when an actor card is tapped — see
     /// JoeActorPage.swift (.tvb mode).
@@ -401,7 +406,6 @@ struct JoeTVBView: View {
     /// the top of the page (owner order 2026-11-21).
     @State private var topScrollSignal = 0
     @FocusState private var headerSearchFocused: Bool
-    @FocusState private var chipFocus: String?
     @FocusState private var cardFocus: String?
     /// v2.1.1 (WS-I): the PC arm's focus-follows-backdrop
     /// controller (the shared JoeCinemaBackdropController,
@@ -559,20 +563,14 @@ struct JoeTVBView: View {
             LazyVStack(alignment: .leading, spacing: 40) {
                 header
                 if let catalog {
-                    chipsRow(catalog)
-                    if let genre = selectedGenre,
-                       let ids = catalog.shelves[genre] {
-                        genreSection(genre, ids: ids)
-                    } else {
-                        // YouTube rails stage ABOVE the 803
-                        // rails (design §1.2), only on the
-                        // rails home; with no snapshot the
-                        // home is exactly what it was.
-                        if let snapshot = ytStore.snapshot {
-                            ytRailSections(snapshot)
-                        }
-                        railSections(catalog)
+                    // YouTube rails stage ABOVE the 803
+                    // rails (design §1.2), only on the
+                    // rails home; with no snapshot the
+                    // home is exactly what it was.
+                    if let snapshot = ytStore.snapshot {
+                        ytRailSections(snapshot)
                     }
+                    railSections(catalog)
                 } else if loadFailed {
                     Text("Không tải được danh sách TVB.")
                         .font(.system(size: 29))
@@ -609,8 +607,10 @@ struct JoeTVBView: View {
 
     // MARK: - Private Cinema Many-Rails home (v2.1.1, WS-H)
 
-    /// The PC arm of the TVB home (WS-H): header + genre
-    /// chips unchanged (function never cut), then the
+    /// The PC arm of the TVB home (WS-H): the header
+    /// (v2.1.2: the genre chips row is gone — the owner
+    /// ruling at the section doc above; only the search
+    /// entry stands above the hero now), then the
     /// rails inside a Section whose header is the pinned
     /// context strip (the OS pins it once scrolled past —
     /// no scroll-offset APIs). The design's lead rails
@@ -629,7 +629,6 @@ struct JoeTVBView: View {
                        pinnedViews: [.sectionHeaders]) {
                 header
                 if let catalog {
-                    chipsRow(catalog)
                     // v2.1.1 (FIX-6): the full PC hero
                     // (485 stage, the Phim hero's
                     // composition) — it supersedes WS-I's
@@ -639,26 +638,20 @@ struct JoeTVBView: View {
                     // the hero text + actions follow
                     // focus (tvbHeroResolved).
                     tvbHeroBlock(catalog)
-                    if let genre = selectedGenre,
-                       let ids = catalog.shelves[genre] {
-                        genreSection(genre, ids: ids)
-                            .background(theme.bg)
-                    } else {
-                        Section {
-                            // v2.1.1 (FIX-6): the design's
-                            // FIRST rail — TVB Continue
-                            // Watching, when entries exist.
-                            pcTVBCwRail
-                            pcPipelineRails(catalog)
-                            if let snapshot = ytStore.snapshot {
-                                ytRailSections(snapshot)
-                            }
-                            pcAppendSections(catalog)
-                        } header: {
-                            tvbContextStrip(catalog)
+                    Section {
+                        // v2.1.1 (FIX-6): the design's
+                        // FIRST rail — TVB Continue
+                        // Watching, when entries exist.
+                        pcTVBCwRail
+                        pcPipelineRails(catalog)
+                        if let snapshot = ytStore.snapshot {
+                            ytRailSections(snapshot)
                         }
-                        .background(theme.bg)
+                        pcAppendSections(catalog)
+                    } header: {
+                        tvbContextStrip(catalog)
                     }
+                    .background(theme.bg)
                 } else if loadFailed {
                     Text("Không tải được danh sách TVB.")
                         .font(.system(size: 29))
@@ -1421,39 +1414,6 @@ struct JoeTVBView: View {
         .defaultFocus($headerSearchFocused, true)
     }
 
-    // MARK: - Genre chips (plan §3.2)
-
-    private func chipsRow(_ catalog: TVBCatalog) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 14) {
-                chip(id: "genre:all", title: "Tất cả",
-                     selected: selectedGenre == nil) {
-                    selectedGenre = nil
-                }
-                ForEach(Self.genreOrder, id: \.self) { name in
-                    if catalog.shelves[name] != nil {
-                        chip(id: "genre:" + name, title: name,
-                             selected: selectedGenre == name) {
-                            selectedGenre = name
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 6)
-        }
-        .focusSection()
-    }
-
-    private func chip(id: String, title: String, selected: Bool,
-                      action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            JoeChipLabel(title: title, selected: selected)
-        }
-        .joeCardButton()
-        .focused($chipFocus, equals: id)
-    }
-
     // MARK: - Rails home (plan §3 + §3.3)
 
     /// One entry of the actor rail (Idea 1): the actor's
@@ -1687,41 +1647,6 @@ struct JoeTVBView: View {
         }
         .joeCardButton()
         .focused($cardFocus, equals: focusID)
-    }
-
-    // MARK: - Genre shelf grid (chip selected)
-
-    private var gridColumns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: theme.railGap), count: 6)
-    }
-
-    @ViewBuilder
-    private func genreSection(_ genre: String, ids: [Int]) -> some View {
-        let movies = titles(for: ids)
-        Text(genre)
-            .font(.system(size: theme.id == .posterWall ? 40 : 34,
-                          weight: theme.id == .posterWall ? .heavy : .bold))
-            .foregroundStyle(theme.text)
-        if movies.isEmpty {
-            Text("Chưa có phim trong mục này.")
-                .font(.system(size: 29))
-                .foregroundStyle(theme.meta)
-        } else {
-            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 40) {
-                ForEach(movies) { title in
-                    card(title, focusID: "genre|" + "\(title.tmdbId)",
-                         form: .wall)
-                }
-            }
-            .padding(.vertical, 8)
-            // Design D's wall ring is an OUTSET band around the
-            // art (6 pt): the grid's edge clearance grows past
-            // it under D so the outer columns' rings are never
-            // clipped by the scroll frame (the JoeBrowseView
-            // construction).
-            .padding(.horizontal, theme.id == .posterWall ? 8 : 4)
-            .focusSection()
-        }
     }
 
     // MARK: - Cards + detail routing

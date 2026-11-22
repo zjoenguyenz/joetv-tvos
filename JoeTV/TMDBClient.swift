@@ -19,7 +19,41 @@ struct TMDBCreditTitle: Identifiable, Sendable {
     var year: String
     var posterURL: String   // w500 URL or ""
     var character: String   // "" for collection parts
+    /// v2.1.2 (filmography spec §5/§7/§8): the credit's own
+    /// backdrop (w1280 URL or "") — the card's cover-crop
+    /// fallback when the credit carries no poster (A7) and
+    /// the trailer frame's static leg behind the trailer.
+    var backdropURL: String = ""
+    /// v2.1.2 (filmography spec §7/§8): the title's real
+    /// TMDB vote average (0 = none on record — the info
+    /// block then omits the ★ segment, never invents one).
+    var voteAverage: Double = 0
+    /// v2.1.2 (filmography spec §7/§8): the title's TMDB
+    /// overview; the info block shows its first sentence.
+    var overview: String = ""
+    /// v2.1.2 (filmography spec §5): the raw release /
+    /// first-air date string the year was cut from — the
+    /// grid's newest-first sort key (the year alone cannot
+    /// order titles inside one year).
+    var date: String = ""
+    /// v2.1.2 (filmography spec §5): TMDB popularity —
+    /// the newest-first sort's tie-break, and the
+    /// "Được biết đến qua" ordering source.
+    var popularity: Double = 0
     var id: String { type + "|" + tmdbId }
+}
+
+/// v2.1.2 (filmography spec §4/§8): the TMDB person
+/// record behind the actor page's cinema header — the
+/// name as TMDB spells it, the profile at h632 (the
+/// spec's portrait size), and the biography whose FIRST
+/// SENTENCE fills the tagline slot (A3: TMDB has no
+/// tagline field; an empty biography leaves the slot
+/// empty — editorial copy is never written).
+struct TMDBPerson: Sendable {
+    var name: String = ""
+    var profileURL: String = ""   // h632 URL or ""
+    var biography: String = ""
 }
 
 /// The TMDB enrichment for one title: a wide backdrop, a
@@ -133,6 +167,7 @@ enum TMDBClient {
     private nonisolated(unsafe) static var logoCache: [String: String] = [:]
     private nonisolated(unsafe) static var ratingCache: [String: Double] = [:]
     private nonisolated(unsafe) static var personCreditsCache: [Int: [TMDBCreditTitle]] = [:]
+    private nonisolated(unsafe) static var personCache: [Int: TMDBPerson] = [:]
     private nonisolated(unsafe) static var collectionCache: [Int: [TMDBCreditTitle]] = [:]
     /// v2.0.49: searchPoster outcomes, keyed by normalised
     /// title + year ("" value = a cached negative), so TVB
@@ -567,6 +602,7 @@ enum TMDBClient {
             ? JSON.str(item, "first_air_date")
             : JSON.str(item, "release_date")
         let posterPath = JSON.str(item, "poster_path")
+        let backdropPath = JSON.str(item, "backdrop_path")
         return TMDBCreditTitle(
             tmdbId: String(JSON.int(item, "id")),
             type: type,
@@ -574,18 +610,78 @@ enum TMDBClient {
             year: String(dateStr.prefix(4)),
             posterURL: posterPath.isEmpty
                 ? "" : "https://image.tmdb.org/t/p/w500" + posterPath,
-            character: character)
+            character: character,
+            backdropURL: backdropPath.isEmpty
+                ? "" : "https://image.tmdb.org/t/p/w1280" + backdropPath,
+            voteAverage: JSON.double(item, "vote_average"),
+            overview: JSON.str(item, "overview"),
+            date: dateStr,
+            popularity: JSON.double(item, "popularity"))
+    }
+
+    /// v2.1.2 (filmography spec §4/§8): the person record
+    /// itself — /person/{id}, the profile at h632 and the
+    /// biography. The app's language pin (vi-VN) rides the
+    /// first call; a Vietnamese biography is usually empty
+    /// on TMDB, so an empty biography triggers ONE unpinned
+    /// call whose biography (the API's default language) is
+    /// used instead — the spec's rule is "the biography in
+    /// the language the API returns", never a written one.
+    /// Name/profile come from whichever call carries them.
+    /// Fail-soft: nil on no key, a bad id, or both calls
+    /// failing; cached per personId.
+    static func fetchPerson(personId: Int) async -> TMDBPerson? {
+        let key = apiKey
+        guard !key.isEmpty, personId > 0 else { return nil }
+        if let hit = cacheLock.withLock({ personCache[personId] }) {
+            return hit
+        }
+        func person(from root: [String: Any]) -> TMDBPerson {
+            let profilePath = JSON.str(root, "profile_path")
+            return TMDBPerson(
+                name: JSON.str(root, "name"),
+                profileURL: profilePath.isEmpty
+                    ? "" : "https://image.tmdb.org/t/p/h632" + profilePath,
+                biography: JSON.str(root, "biography"))
+        }
+        guard let root = try? await JoeHTTP.getJSON(
+            "https://api.themoviedb.org/3/person/\(personId)?api_key=\(key)&language=vi-VN",
+            timeout: callTimeout)
+        else { return nil }
+        var result = person(from: root)
+        if result.biography.isEmpty,
+           let fallback = try? await JoeHTTP.getJSON(
+               "https://api.themoviedb.org/3/person/\(personId)?api_key=\(key)",
+               timeout: callTimeout) {
+            let unpinned = person(from: fallback)
+            result.biography = unpinned.biography
+            if result.name.isEmpty { result.name = unpinned.name }
+            if result.profileURL.isEmpty {
+                result.profileURL = unpinned.profileURL
+            }
+        }
+        cacheLock.withLock { personCache[personId] = result }
+        return result
     }
 
     /// Idea 20 (actor page): a person's combined filmography —
     /// the "cast" side of /person/{id}/combined_credits,
     /// movies and TV only, deduped by (type, tmdbId) keeping
-    /// the first occurrence, sorted by popularity descending.
-    /// Fail-soft: [] on no key, a bad id, or a failed call;
+    /// the first occurrence, sorted by popularity descending;
     /// cached per personId.
-    static func fetchPersonCredits(personId: Int) async -> [TMDBCreditTitle] {
+    /// v2.1.2 (filmography spec §11): the result is now
+    /// Optional — nil means the load FAILED (no key, a
+    /// bad id, or the call itself failed), while a
+    /// non-nil empty array means the person genuinely
+    /// has no credits on record. The two states render
+    /// differently on the actor page ("Không tải được
+    /// danh sách phim" vs "Chưa có dữ liệu phim"), so
+    /// they must not share one value. The page is the
+    /// only caller. Failures are never cached (as
+    /// before — the cache write sits past the fetch).
+    static func fetchPersonCredits(personId: Int) async -> [TMDBCreditTitle]? {
         let key = apiKey
-        guard !key.isEmpty, personId > 0 else { return [] }
+        guard !key.isEmpty, personId > 0 else { return nil }
         if let hit = cacheLock.withLock({ personCreditsCache[personId] }) {
             return hit
         }
@@ -593,7 +689,7 @@ enum TMDBClient {
         guard let root = try? await JoeHTTP.getJSON(
             "https://api.themoviedb.org/3/person/\(personId)/combined_credits?api_key=\(key)&language=vi-VN",
             timeout: callTimeout)
-        else { return [] }
+        else { return nil }
 
         var seen = Set<String>()
         var scored: [(title: TMDBCreditTitle, popularity: Double)] = []
