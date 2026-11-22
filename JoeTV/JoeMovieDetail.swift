@@ -244,7 +244,21 @@ struct JoeMovieDetail: View {
                              : "Kiểm tra mạng rồi thử lại.")
                             .font(.system(size: 25))
                             .foregroundStyle(theme.meta)
-                        Button { Task { await retryLoad() } } label: {
+                        Button {
+                            // D1 (review round 2, defect 2):
+                            // a Select press is owner input
+                            // even on this surface — a
+                            // successful retry re-keys the
+                            // preview task when the detail
+                            // lands, and without this kill a
+                            // preview could auto-play inside
+                            // a visit the owner already
+                            // interacted with (the provider
+                            // switch carries the equivalent
+                            // explicit kill via its hook).
+                            preview.kill(reason: "input")
+                            Task { await retryLoad() }
+                        } label: {
                             JoePrimaryLabel(title: "Thử lại")
                         }
                         .joeCardButton()
@@ -695,14 +709,18 @@ struct JoeMovieDetail: View {
             // element; nothing else in this stack moves).
             // Present only while a preview player exists;
             // opacity carries the 0.8 s crossfade IN at
-            // first frame (a kill cuts instantly — the
-            // teardown removes the player in the same
-            // update, per rule D1).
+            // first frame and the 0.8 s crossfade back
+            // OUT at the segment's natural end (the
+            // controller's fadingOut, 17:49 ruling). A
+            // kill cuts instantly — the teardown removes
+            // the player in the same update, per rule D1.
             if preview.player != nil {
                 JoePreviewLayerView(controller: preview)
-                    .opacity(preview.visible ? 1 : 0)
+                    .opacity(preview.visible && !preview.fadingOut ? 1 : 0)
                     .animation(.easeInOut(duration: preview.visible ? 0.8 : 0.15),
                                value: preview.visible)
+                    .animation(.easeInOut(duration: 0.8),
+                               value: preview.fadingOut)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
@@ -1939,14 +1957,18 @@ private struct JoeActorNameLabel: View {
                 // (above the TMDB slice, below the fade) —
                 // the band's clip shape and stroke overlay
                 // apply to it exactly as to the images.
-                // Crossfade in 0.8 s; a kill cuts instantly
-                // (same rule as the Ultra layer).
+                // Crossfade in 0.8 s, crossfade back out
+                // at the natural end (fadingOut); a kill
+                // cuts instantly (same rule as the Ultra
+                // layer).
                 if preview.player != nil {
                     JoePreviewLayerView(controller: preview)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .opacity(preview.visible ? 1 : 0)
+                        .opacity(preview.visible && !preview.fadingOut ? 1 : 0)
                         .animation(.easeInOut(duration: preview.visible ? 0.8 : 0.15),
                                    value: preview.visible)
+                        .animation(.easeInOut(duration: 0.8),
+                                   value: preview.fadingOut)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                 }
@@ -3473,6 +3495,21 @@ private struct JoeCastCellLabel: View {
             index = i
         }
         guard index < yt.eps.count else { return false }
+        // QUALITY GATE (owner ruling 2026-11-21 17:50):
+        // a series whose MEASURED ceiling (Leg 4's map)
+        // is below 720p never starts a YouTube preview
+        // at all — skipped here, BEFORE beginAttempt and
+        // the resolve, so no work is spent on a preview
+        // that could only be suppressed. Returning false
+        // lets Auto fall through to the chain leg, whose
+        // own encode is gated on its own measured height
+        // inside the preview player; a pinned YouTube
+        // mode simply keeps the static backdrop.
+        if let ceiling = JoeYtQualityMap.ceiling(pid: yt.pid),
+           ceiling < 720 {
+            DiagLog.write("PREVIEW", "preview skipped rule=measured-ceiling-\(ceiling)p pid=\(yt.pid)")
+            return false
+        }
         guard preview.beginAttempt(kind: "youtube") else { return false }
         let result = await JoeYtResolver.shared.resolve(
             videoId: yt.eps[index])
@@ -3494,6 +3531,18 @@ private struct JoeCastCellLabel: View {
             // ever played.
             switch playable.kind {
             case .assembly:
+                // QUALITY GATE (17:50 ruling; review
+                // round 3, defect 2): the resolver already
+                // KNOWS this variant's height — a known
+                // sub-720 height suppresses HERE, before
+                // any hand-over, instead of delegating the
+                // decision to the item's presentationSize
+                // timing. An unknown height (0) proceeds;
+                // the item-level gates still apply.
+                if playable.height > 0, playable.height < 720 {
+                    preview.abortAttempt(reason: "youtube-low-quality-\(playable.height)p")
+                    return false
+                }
                 if let session = await JoeYtHlsServer.shared.makeSession(
                     playable: playable,
                     userAgent: JoeYtClientSpec.tvSamsung.userAgent) {
@@ -3505,6 +3554,12 @@ private struct JoeCastCellLabel: View {
                     return true
                 }
                 if let direct = playable.fallbackDirectURL {
+                    // The muxed fallback's OWN known height
+                    // gates it the same way (defect 2).
+                    if playable.fallbackHeight > 0, playable.fallbackHeight < 720 {
+                        preview.abortAttempt(reason: "youtube-low-quality-muxed-\(playable.fallbackHeight)p")
+                        return false
+                    }
                     DiagLog.write("PREVIEW", "preview resolve kind=youtube-muxed-fallback pid=\(yt.pid)")
                     if preview.play(url: direct, headers: [:]) {
                         JoeYtQualityMap.record(pid: yt.pid,
@@ -3515,6 +3570,12 @@ private struct JoeCastCellLabel: View {
                 preview.abortAttempt(reason: "youtube-assembly-failed")
                 return false
             case .muxed, .hlsManifest:
+                // Known-height gate, same as the assembly
+                // branch (defect 2).
+                if playable.height > 0, playable.height < 720 {
+                    preview.abortAttempt(reason: "youtube-low-quality-\(playable.height)p")
+                    return false
+                }
                 if let direct = playable.directURL {
                     DiagLog.write("PREVIEW", "preview resolve kind=youtube-direct pid=\(yt.pid)")
                     if preview.play(url: direct, headers: [:]) {

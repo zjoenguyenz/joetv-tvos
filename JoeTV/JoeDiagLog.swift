@@ -486,24 +486,37 @@ final class DiagLogServer {
             return
         }
         guard listener == nil else {
-            if let servingURL {
-                emit(.serving(url: servingURL))
-            } else if let listener, listener.state == .ready {
-                // The listener IS bound and accepting, but
-                // its .ready callback found no LAN address
-                // (the network was not up yet at launch),
-                // so no serving URL was ever built. Never
-                // wedge on .starting for the app's lifetime:
-                // recompute the address here — a screen
-                // opening onto the server exercises exactly
-                // this path — and report the honest state.
-                if let ip = Self.lanIPAddress(), let port = listener.port {
+            if let listener, listener.state == .ready,
+               let port = listener.port {
+                // Recompute the address on EVERY re-report
+                // while the listener is live. The cached
+                // URL was built from the LAN address at
+                // listener-ready time, and the address can
+                // drift under a live listener — DHCP
+                // reassignment, an Ethernet/Wi-Fi switch —
+                // while the wildcard-bound server stays
+                // reachable at the NEW address; advertising
+                // the cached one would strand the export
+                // screen and its QR on a dead address for
+                // the app's whole lifetime (review round 2,
+                // defect 1). The PIN never changes here;
+                // only the host part can move. The same
+                // recompute covers the ready-but-no-address
+                // launch case (network not up yet when the
+                // listener reported ready): no URL was ever
+                // built then, and this path builds it now
+                // instead of wedging on .starting.
+                if let ip = Self.lanIPAddress() {
                     let url = "http://\(ip):\(port.rawValue)/log?pin=\(pin)"
                     servingURL = url
                     emit(.serving(url: url))
+                } else if let servingURL {
+                    emit(.serving(url: servingURL))
                 } else {
                     emit(.failed("Không tìm thấy địa chỉ mạng nội bộ"))
                 }
+            } else if let servingURL {
+                emit(.serving(url: servingURL))
             } else {
                 emit(.starting)
             }

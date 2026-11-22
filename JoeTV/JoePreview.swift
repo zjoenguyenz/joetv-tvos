@@ -27,6 +27,42 @@ import UIKit
 // - Start position: 20–25% into the item Play would
 //   play (the resume episode for a series, else the
 //   first playable); the segment is capped at 120 s.
+// - QUALITY GATE (owner ruling 2026-11-21 17:50): a
+//   preview segment whose resolved quality is LOW is
+//   not shown at all — the static backdrop stays; only
+//   a good-quality preview may pass. Concrete rule:
+//   a resolved format height below 720p suppresses
+//   the preview entirely. The gate is enforced at
+//   three points: a series whose MEASURED ceiling
+//   (the Approach C map) is below 720p never starts
+//   a YouTube preview at all (the detail skips before
+//   the resolve); the built item's presentation
+//   height is checked when it becomes ready, and
+//   again at the last moment before the first frame
+//   can appear (a late-settling size below 720p
+//   still suppresses); and CONTINUOUSLY while the
+//   preview is on screen — an HLS size that settles
+//   below 720p after the first frame, or an ABR step
+//   down to one, cuts the preview the moment the low
+//   reading has held for ~1 s (settled low quality,
+//   not a ramp-up transient). An UNKNOWN height (0)
+//   cannot convict and passes — HLS sizes can settle
+//   late.
+// - END CROSSFADE (owner ruling 2026-11-21 17:49):
+//   when the segment ENDS, the layer crossfades
+//   back to the static backdrop over 0.8 s — the
+//   clip is never left frozen on its final frame.
+//   "Ends" is detected three ways, so no stream
+//   class escapes it: the media-time cap (120 s
+//   from the start point, numeric durations), the
+//   shown-time cap (120 s visible, the backstop
+//   when the duration never becomes numeric), and
+//   the item's own end via an
+//   AVPlayerItemDidPlayToEndTime observer (which
+//   also covers streams ending before their
+//   metadata duration). The fade is for the
+//   natural end only: a kill still cuts instantly
+//   (D1).
 // - D3: skipped entirely when Reduce Motion is on.
 // - D4: Settings toggle "Xem trước video trên ảnh nền",
 //   default ON (JoePreviewSettings).
@@ -82,6 +118,13 @@ final class JoePreviewController: ObservableObject {
     /// True only while video frames are on screen —
     /// the backdrop layer's opacity binds to it.
     @Published private(set) var visible = false
+    /// True during the natural-end crossfade back to
+    /// the static backdrop (the 17:49 ruling): the
+    /// layer's opacity animates to 0 over 0.8 s while
+    /// `visible` stays true, then teardown removes the
+    /// player. Never set by kill()/stop() — those cut
+    /// instantly.
+    @Published private(set) var fadingOut = false
     /// The preview player (nil outside an attempt's
     /// play phase). Published so the layer view attaches
     /// it the moment it exists — before the first frame,
@@ -107,6 +150,14 @@ final class JoePreviewController: ObservableObject {
     private var attemptStartedAt: Date?
     private var generation = 0
     private var workTask: Task<Void, Never>?
+    private var deadlineTask: Task<Void, Never>?
+    /// AVPlayerItemDidPlayToEndTime state for the
+    /// current item: the natural-end signal that does
+    /// not depend on the item's duration ever becoming
+    /// numeric (review round 3, defect 3). The observer
+    /// token is removed in teardown().
+    private var itemEnded = false
+    private var endObserver: NSObjectProtocol?
 
     private func log(_ message: String) {
         DiagLog.write("PREVIEW", message)
@@ -167,7 +218,7 @@ final class JoePreviewController: ObservableObject {
             url: url,
             options: headers.isEmpty
                 ? nil
-                : [AVURLAssetHTTPHeaderFieldsKey: headers])
+                : ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 10
         item.preferredPeakBitRate = 4_000_000
@@ -179,10 +230,50 @@ final class JoePreviewController: ObservableObject {
         p.preventsDisplaySleepDuringVideoPlayback = false
         player = p
         log("preview resolve kind=\(kind) — player built")
+        // Natural-end detection that does not depend on
+        // the duration ever becoming numeric: the item
+        // posts DidPlayToEndTime when it plays to its
+        // end, whatever its metadata claims (review
+        // round 3, defect 3).
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        itemEnded = false
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item, queue: nil) { [weak self] _ in
+            Task { @MainActor in self?.itemEnded = true }
+        }
         workTask = Task { [weak self] in
             await self?.runPlayback(item: item, player: p,
                                     generation: gen,
                                     startedAt: startedAt)
+        }
+        // First-frame deadline watchdog (review round
+        // 1/3, defect): the pre-play phase contains
+        // awaits no in-loop deadline can interrupt —
+        // the asset's duration load and the seek can
+        // each suspend indefinitely on a stalled
+        // stream, and every deadline check sits
+        // downstream of them. This task owns the 12 s
+        // first-frame bound from OUTSIDE that chain:
+        // at the deadline it tears the attempt down
+        // itself (which also cancels the parked
+        // workTask). Once a first frame has shown, the
+        // playback loop's own bounds own the run and
+        // the watchdog stands down.
+        deadlineTask?.cancel()
+        deadlineTask = Task { [weak self] in
+            let remaining = 12 - Date().timeIntervalSince(startedAt)
+            if remaining > 0 {
+                try? await Task.sleep(
+                    nanoseconds: UInt64(remaining * 1_000_000_000))
+            }
+            guard !Task.isCancelled, let self,
+                  self.generation == gen, self.player === p,
+                  !self.visible else { return }
+            self.log("preview fallback reason=deadline-watchdog — no first frame in 12s")
+            self.teardown()
         }
         return true
     }
@@ -211,9 +302,10 @@ final class JoePreviewController: ObservableObject {
     /// D1: any input kills the preview for this visit.
     /// The cut is instant: teardown removes the player
     /// in the same update that drops `visible`, so the
-    /// layer leaves with the input — there is no
-    /// fade-out (the 0.8 s crossfade exists only on the
-    /// way IN, at first frame).
+    /// layer leaves with the input — a kill has NO
+    /// fade-out (the 0.8 s crossfades belong to the
+    /// first frame on the way IN and to the natural
+    /// END on the way out, never to a kill).
     ///
     /// The latch is unconditional: it engages from the
     /// moment the detail appears — during the dwell,
@@ -253,7 +345,15 @@ final class JoePreviewController: ObservableObject {
         generation += 1
         workTask?.cancel()
         workTask = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
+        itemEnded = false
         visible = false
+        fadingOut = false
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -269,7 +369,11 @@ final class JoePreviewController: ObservableObject {
     /// really flow, and finish at the 120 s cap. Every
     /// exit is either a logged finish or a logged
     /// fallback — never a hang: a 12 s first-frame
-    /// deadline and a 150 s hard stop bound the run.
+    /// deadline and a 150 s hard stop bound the run,
+    /// and the deadline watchdog armed in play()
+    /// enforces the first-frame bound even while one
+    /// of this run's own pre-play awaits (duration
+    /// load, seek) is suspended past it.
     private func runPlayback(item: AVPlayerItem, player p: AVPlayer,
                              generation gen: Int,
                              startedAt: Date) async {
@@ -306,6 +410,19 @@ final class JoePreviewController: ObservableObject {
             teardown()
             return
         }
+        // QUALITY GATE (17:50 ruling): a segment whose
+        // resolved height is KNOWN to be below 720p is
+        // never shown — teardown here, before play(),
+        // so not one frame of it reaches the layer. An
+        // unknown height (0) cannot convict and passes;
+        // the check repeats at first frame below for a
+        // size that settles late.
+        if item.presentationSize.height > 0,
+           item.presentationSize.height < 720 {
+            log("preview suppressed reason=low-quality height=\(Int(item.presentationSize.height)) — static backdrop stays")
+            teardown()
+            return
+        }
         if startSeconds > 0 {
             _ = await p.seek(to: CMTime(seconds: startSeconds,
                                         preferredTimescale: 600),
@@ -319,6 +436,10 @@ final class JoePreviewController: ObservableObject {
         // First frame = the player is actually playing
         // and its clock has moved past the start point.
         var shownAt: Date?
+        // Consecutive on-screen polls whose presented
+        // height is known to be below 720p (the
+        // continuous quality gate below).
+        var lowPolls = 0
         while true {
             if Date().timeIntervalSince(startedAt) > 150 {
                 log("preview end reason=hard-stop shown=\(shownAt != nil)")
@@ -337,6 +458,17 @@ final class JoePreviewController: ObservableObject {
             if shownAt == nil {
                 if p.timeControlStatus == .playing,
                    now.isFinite, now > startSeconds + 0.05 {
+                    // The quality gate once more, at the
+                    // last moment before the layer can
+                    // appear: a presentation size that
+                    // settled late below 720p suppresses
+                    // here, before a single frame shows.
+                    if item.presentationSize.height > 0,
+                       item.presentationSize.height < 720 {
+                        log("preview suppressed reason=low-quality-late height=\(Int(item.presentationSize.height)) — static backdrop stays")
+                        teardown()
+                        return
+                    }
                     shownAt = Date()
                     visible = true
                     let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
@@ -344,10 +476,71 @@ final class JoePreviewController: ObservableObject {
                 }
                 continue
             }
+            // QUALITY GATE, continuous (17:50 ruling;
+            // review round 2, defect 1): the presented
+            // height is re-read on every pass while the
+            // preview is on screen. An HLS size routinely
+            // settles only AFTER the first frame, and ABR
+            // can step down mid-segment — neither is
+            // visible to the two pre-show checks. A
+            // height that stays below 720p for five
+            // consecutive polls (~1 s) is SETTLED low
+            // quality, not a ramp-up transient (a stream
+            // still climbing to its real variant recovers
+            // inside the window and resets the counter),
+            // and it cuts the preview instantly — it
+            // should never have shown, so there is no
+            // fade — back to the static backdrop.
+            // The counter resets ONLY on a poll whose
+            // height is KNOWN to be at least 720p —
+            // positive evidence of recovery. An unknown
+            // poll (height 0) HOLDS the counter: after
+            // the first frame, a size flickering to 0
+            // during a variant switch or rebuffer is
+            // not evidence the quality recovered, and
+            // resetting on it would let a settled-low
+            // stream whose size flickers evade the
+            // gate forever (review round 1, defect 1).
+            if shownAt != nil {
+                if item.presentationSize.height > 0,
+                   item.presentationSize.height < 720 {
+                    lowPolls += 1
+                    if lowPolls >= 5 {
+                        log("preview suppressed reason=low-quality-drop height=\(Int(item.presentationSize.height)) — static backdrop stays")
+                        teardown()
+                        return
+                    }
+                } else if item.presentationSize.height >= 720 {
+                    lowPolls = 0
+                }
+            }
+            // The item played to its end (the
+            // DidPlayToEndTime observer): the natural
+            // end for items whose duration never became
+            // numeric, and for streams that end before
+            // their metadata duration — crossfade out;
+            // the layer must never sit frozen on the
+            // final frame until the hard stop (17:49
+            // ruling; review round 3, defect 3).
+            if itemEnded {
+                let shown = Int(Date().timeIntervalSince(shownAt ?? Date()))
+                log("preview end reason=item-ended shown=\(shown)s — crossfade to static")
+                await fadeOutToStatic(generation: gen, player: p)
+                return
+            }
+            // Shown-time cap: 120 s of VISIBLE preview —
+            // the backstop bound for indefinite-duration
+            // items, whose media-time cap can never fire.
+            if let shownAt,
+               Date().timeIntervalSince(shownAt) >= 120 {
+                log("preview end reason=cap-time shown=120s — crossfade to static")
+                await fadeOutToStatic(generation: gen, player: p)
+                return
+            }
             if now.isFinite, now >= endSeconds - 0.5 {
                 let shown = Int(Date().timeIntervalSince(shownAt ?? Date()))
-                log("preview end reason=cap shown=\(shown)s")
-                teardown()
+                log("preview end reason=cap shown=\(shown)s — crossfade to static")
+                await fadeOutToStatic(generation: gen, player: p)
                 return
             }
             if item.status == .failed {
@@ -356,6 +549,25 @@ final class JoePreviewController: ObservableObject {
                 return
             }
         }
+    }
+
+    /// The natural end of the segment (owner ruling
+    /// 2026-11-21 17:49): crossfade back to the static
+    /// backdrop — `fadingOut` flips and the view
+    /// animates the layer's opacity to 0 over 0.8 s
+    /// (the player sits paused at its end point while
+    /// the static image re-emerges beneath it); only
+    /// then is the player torn down. The clip is never
+    /// LEFT frozen on its final frame. This path is
+    /// only for the natural end: a kill or stop during
+    /// the fade cancels the sleep via teardown's
+    /// generation bump and cuts at once, as D1 rules.
+    private func fadeOutToStatic(generation gen: Int,
+                                 player p: AVPlayer) async {
+        fadingOut = true
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        guard gen == generation, player === p else { return }
+        teardown()
     }
 }
 
