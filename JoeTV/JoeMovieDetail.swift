@@ -186,7 +186,7 @@ struct JoeMovieDetail: View {
         }
     }
 
-    private var detailScroll: some View {
+    private var detailScrollContent: some View {
         ScrollView(.vertical, showsIndicators: false) {
             // v2.0.8 (Phase 7): lazy root — server groups and
             // their episode chips build as they scroll into
@@ -282,127 +282,23 @@ struct JoeMovieDetail: View {
             // No manual padding: the layer sits inside the root
             // safe area, which IS the §4 inset (80/60).
         }
+    }
+
+    /// 2.0.48 structural fix (CI runs #30/#31): the
+    /// detail scroll's modifier chain used to be ONE
+    /// expression tree — ScrollView + six tasks + two
+    /// covers + some twenty hooks — and the type-checker
+    /// timed out inside it, the reported line migrating
+    /// between runs. The chain is now staged through
+    /// opaque computed properties (this one carries the
+    /// six .task modifiers, their bodies slimmed to calls
+    /// into named async methods below), so no single
+    /// expression is heavy. Modifier ORDER is unchanged.
+    private var detailScrollTasks: some View {
+        detailScrollContent
         .task(id: slug + "|" + provider) { await load() }
-        .task(id: detail?.movie.id ?? "") {
-            // TMDB enrichment (v1.6), fail-soft: runs when a
-            // TMDB API key is available — the bundled key
-            // injected at build time, or one the owner saved in
-            // Settings (the saved key wins). Any failure leaves
-            // tmdb nil and the screen is the provider-only one.
-            //
-            // v2.0.1 (Android FIX2 parity): the task stays
-            // decoupled from the detail fetch (it always was —
-            // a separate task) and publishes in stages, so the
-            // band never waits behind the credits call. A film
-            // whose payload carries no TMDB id — or a record
-            // with no backdrop — is hunted by the name + year
-            // title search for a backdrop, exactly like the
-            // Android pipeline.
-            //
-            // v2.0.8 (Phase 2): the staging is now literal —
-            // fetchInfo's result publishes the MOMENT it lands
-            // (before the backdrop hunt starts), then the
-            // backdrop hunt (only when still needed) and the
-            // cast fetch run as concurrent async lets, each
-            // merging into tmdb when it lands: the hunt fills
-            // backdropURL, the credits fill cast. Fail-soft
-            // everywhere, exactly as before: no info and no
-            // hunted backdrop leaves tmdb nil, and cast only
-            // ever merges onto a published info.
-            guard let detail, !TMDBClient.apiKey.isEmpty else {
-                tmdb = nil
-                return
-            }
-            let movie = detail.movie
-            var info: TMDBInfo?
-            if let tvbCtx = route.tvb {
-                // Swift 6 round (fault c, owner device test
-                // of 2.0.31): a TVB session's enrichment is
-                // pinned to the SNAPSHOT identity — its TMDB
-                // id, as "tv" — never to the provider
-                // payload's own tmdbId/tmdbType stamps. The
-                // pre-fix task trusted those stamps: a
-                // payload whose tmdbType was "" or "movie"
-                // made TMDBClient resolve the id in the
-                // MOVIE namespace (its kind rule maps every
-                // non-"tv" type to "movie"), and TMDB's
-                // numeric ids are per-type namespaces, so a
-                // same-numbered film's overview / backdrop /
-                // cast / rating painted over the correct
-                // TVB detail — the wrong-film INFO the owner
-                // still saw after the L7 draw gate, which
-                // only ever verified the provider payload,
-                // never this layer. tvbPinnedIdentity has
-                // always pinned the identity ladder this
-                // way; the enrichment now takes the same pin.
-                info = await TMDBClient.fetchInfo(
-                    tmdbId: "\(tvbCtx.tmdbId)", type: "tv")
-            } else if !movie.tmdbId.isEmpty {
-                info = await TMDBClient.fetchInfo(
-                    tmdbId: movie.tmdbId, type: movie.tmdbType)
-            }
-            if let info {
-                tmdb = info
-            }
-            let needsBackdrop = info?.backdropURL.isEmpty ?? true
-            async let backdropFetch = backdropHunt(
-                needed: needsBackdrop, movie: movie)
-            async let castFetch = castIfAvailable(movie: movie)
-            let backdropURL = await backdropFetch
-            if let backdropURL {
-                if var current = tmdb {
-                    if current.backdropURL.isEmpty {
-                        current.backdropURL = backdropURL
-                        tmdb = current
-                    }
-                } else {
-                    var created = TMDBInfo()
-                    created.backdropURL = backdropURL
-                    tmdb = created
-                }
-            }
-            let cast = await castFetch
-            if !cast.isEmpty, var current = tmdb {
-                current.cast = cast
-                tmdb = current
-            }
-            if info == nil, backdropURL == nil {
-                tmdb = nil
-            }
-        }
-        .task(id: detail?.movie.id ?? "") {
-            // Idea 3(c) (checkpoint 2.0.25): the title logo is
-            // fetched in PARALLEL with the enrichment task
-            // above — its own .task, keyed on the same detail
-            // identity, so it starts when the detail loads its
-            // TMDB info, is cancelled/restarted with it, and
-            // publishes into tmdbLogoURL the moment it lands.
-            // fetchInfo's backdrop/overview never wait for it.
-            // Fail-soft exactly like the rest of the TMDB
-            // chain: no key / no TMDB id / a failed call
-            // leaves the logo empty and the text title stands.
-            tmdbLogoURL = ""
-            guard let detail, !TMDBClient.apiKey.isEmpty else { return }
-            // Swift 6 round (fault c): the logo takes the
-            // same snapshot pin as the enrichment task above
-            // — a TVB session resolves its logo by the
-            // snapshot's TMDB id as "tv", never by the
-            // provider payload's stamps (see there).
-            let logoId: String
-            let logoType: String
-            if let tvbCtx = route.tvb {
-                logoId = "\(tvbCtx.tmdbId)"
-                logoType = "tv"
-            } else {
-                guard !detail.movie.tmdbId.isEmpty else { return }
-                logoId = detail.movie.tmdbId
-                logoType = detail.movie.tmdbType
-            }
-            let logo = await TMDBClient.fetchLogo(
-                tmdbId: logoId, type: logoType)
-            guard !Task.isCancelled else { return }
-            tmdbLogoURL = logo
-        }
+        .task(id: detail?.movie.id ?? "") { await runTMDBEnrichment() }
+        .task(id: detail?.movie.id ?? "") { await runTMDBLogoFetch() }
         .task(id: provider + "|" + slug + "|" + (focusedEp ?? "")
               + "|" + (detail == nil ? "0" : "1")) {
             // v2.0.8 (Phase 2/3): dwell pre-resolve — see
@@ -434,6 +330,12 @@ struct JoeMovieDetail: View {
             // strip absent and the detail exactly as it was.
             await loadFranchise()
         }
+    }
+
+    /// Structural fix, stage 3: the two full-screen
+    /// covers, the declared Play focus and the exit hook.
+    private var detailScrollCovers: some View {
+        detailScrollTasks
         .fullScreenCover(item: $actorRoute) { route in
             JoeActorPage(route: route)
         }
@@ -459,6 +361,13 @@ struct JoeMovieDetail: View {
             preview.kill(reason: "menu")
             nav.movie = nil
         }
+    }
+
+    /// Structural fix, final stage: the preview/input
+    /// hooks, the scene-phase hook, the YouTube session
+    /// task and the chain hand-back hook.
+    private var detailScroll: some View {
+        detailScrollCovers
         // 2.0.48 (Leg 3, rule D1): ANY input kills the
         // backdrop preview for this visit. Every focus
         // binding on this screen reports here — a swipe
@@ -518,15 +427,152 @@ struct JoeMovieDetail: View {
         // hand-back — when the YouTube player (launched from
         // this detail in Auto) gives an episode back, this
         // detail plays it via the chain itself.
-        .task {
-            ytStore.ensureLoaded()
-            await ytSession.refresh()
-        }
+        .task { await loadYtSession() }
         .onChange(of: nav.ytChainPlay) { _, token in
             guard let token, token.route == route else { return }
             nav.ytChainPlay = nil
             if let d = detail { play(d, epName: token.epName) }
         }
+    }
+
+    /// The YouTube catalogue/session warm-up that used
+    /// to sit inline in a .task closure at the end of
+    /// the detail scroll's chain (CI run #31 timed out
+    /// type-checking exactly there). Same two calls,
+    /// same order.
+    private func loadYtSession() async {
+        ytStore.ensureLoaded()
+        await ytSession.refresh()
+    }
+
+    /// The TMDB enrichment task's body, moved out of
+    /// its .task closure (structural fix above). The
+    /// closure now only calls this; every statement,
+    /// guard and merge below is the original body,
+    /// verbatim.
+    private func runTMDBEnrichment() async {
+        // TMDB enrichment (v1.6), fail-soft: runs when a
+        // TMDB API key is available — the bundled key
+        // injected at build time, or one the owner saved in
+        // Settings (the saved key wins). Any failure leaves
+        // tmdb nil and the screen is the provider-only one.
+        //
+        // v2.0.1 (Android FIX2 parity): the task stays
+        // decoupled from the detail fetch (it always was —
+        // a separate task) and publishes in stages, so the
+        // band never waits behind the credits call. A film
+        // whose payload carries no TMDB id — or a record
+        // with no backdrop — is hunted by the name + year
+        // title search for a backdrop, exactly like the
+        // Android pipeline.
+        //
+        // v2.0.8 (Phase 2): the staging is now literal —
+        // fetchInfo's result publishes the MOMENT it lands
+        // (before the backdrop hunt starts), then the
+        // backdrop hunt (only when still needed) and the
+        // cast fetch run as concurrent async lets, each
+        // merging into tmdb when it lands: the hunt fills
+        // backdropURL, the credits fill cast. Fail-soft
+        // everywhere, exactly as before: no info and no
+        // hunted backdrop leaves tmdb nil, and cast only
+        // ever merges onto a published info.
+        guard let detail, !TMDBClient.apiKey.isEmpty else {
+            tmdb = nil
+            return
+        }
+        let movie = detail.movie
+        var info: TMDBInfo?
+        if let tvbCtx = route.tvb {
+            // Swift 6 round (fault c, owner device test
+            // of 2.0.31): a TVB session's enrichment is
+            // pinned to the SNAPSHOT identity — its TMDB
+            // id, as "tv" — never to the provider
+            // payload's own tmdbId/tmdbType stamps. The
+            // pre-fix task trusted those stamps: a
+            // payload whose tmdbType was "" or "movie"
+            // made TMDBClient resolve the id in the
+            // MOVIE namespace (its kind rule maps every
+            // non-"tv" type to "movie"), and TMDB's
+            // numeric ids are per-type namespaces, so a
+            // same-numbered film's overview / backdrop /
+            // cast / rating painted over the correct
+            // TVB detail — the wrong-film INFO the owner
+            // still saw after the L7 draw gate, which
+            // only ever verified the provider payload,
+            // never this layer. tvbPinnedIdentity has
+            // always pinned the identity ladder this
+            // way; the enrichment now takes the same pin.
+            info = await TMDBClient.fetchInfo(
+                tmdbId: "\(tvbCtx.tmdbId)", type: "tv")
+        } else if !movie.tmdbId.isEmpty {
+            info = await TMDBClient.fetchInfo(
+                tmdbId: movie.tmdbId, type: movie.tmdbType)
+        }
+        if let info {
+            tmdb = info
+        }
+        let needsBackdrop = info?.backdropURL.isEmpty ?? true
+        async let backdropFetch = backdropHunt(
+            needed: needsBackdrop, movie: movie)
+        async let castFetch = castIfAvailable(movie: movie)
+        let backdropURL = await backdropFetch
+        if let backdropURL {
+            if var current = tmdb {
+                if current.backdropURL.isEmpty {
+                    current.backdropURL = backdropURL
+                    tmdb = current
+                }
+            } else {
+                var created = TMDBInfo()
+                created.backdropURL = backdropURL
+                tmdb = created
+            }
+        }
+        let cast = await castFetch
+        if !cast.isEmpty, var current = tmdb {
+            current.cast = cast
+            tmdb = current
+        }
+        if info == nil, backdropURL == nil {
+            tmdb = nil
+        }
+    }
+
+    /// The title-logo task's body, moved out of its
+    /// .task closure the same way — original body,
+    /// verbatim.
+    private func runTMDBLogoFetch() async {
+        // Idea 3(c) (checkpoint 2.0.25): the title logo is
+        // fetched in PARALLEL with the enrichment task
+        // above — its own .task, keyed on the same detail
+        // identity, so it starts when the detail loads its
+        // TMDB info, is cancelled/restarted with it, and
+        // publishes into tmdbLogoURL the moment it lands.
+        // fetchInfo's backdrop/overview never wait for it.
+        // Fail-soft exactly like the rest of the TMDB
+        // chain: no key / no TMDB id / a failed call
+        // leaves the logo empty and the text title stands.
+        tmdbLogoURL = ""
+        guard let detail, !TMDBClient.apiKey.isEmpty else { return }
+        // Swift 6 round (fault c): the logo takes the
+        // same snapshot pin as the enrichment task above
+        // — a TVB session resolves its logo by the
+        // snapshot's TMDB id as "tv", never by the
+        // provider payload's stamps (see there).
+        let logoId: String
+        let logoType: String
+        if let tvbCtx = route.tvb {
+            logoId = "\(tvbCtx.tmdbId)"
+            logoType = "tv"
+        } else {
+            guard !detail.movie.tmdbId.isEmpty else { return }
+            logoId = detail.movie.tmdbId
+            logoType = detail.movie.tmdbType
+        }
+        let logo = await TMDBClient.fetchLogo(
+            tmdbId: logoId, type: logoType)
+        guard !Task.isCancelled else { return }
+        tmdbLogoURL = logo
     }
 
     /// Instant header built from the tapped card's own data,
