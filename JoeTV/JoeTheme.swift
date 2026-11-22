@@ -22,6 +22,11 @@ enum JoeThemeID: String, CaseIterable {
     /// system, gold meta, full-bleed backdrops, 4-badge
     /// posters, frosted server panel.
     case ultra
+    /// v2.1.0 (Private Cinema): appended LAST — the case
+    /// order is load-bearing for Settings (the picker walks
+    /// allCases in order and the .billboard first-chip
+    /// assumption must stay undisturbed).
+    case privateCinema
 
     var pickerLabel: String {
         switch self {
@@ -29,6 +34,7 @@ enum JoeThemeID: String, CaseIterable {
         case .posterWall: return "Tường Poster"
         case .sourceBoard: return "Bảng Nguồn"
         case .ultra: return "Ultra"
+        case .privateCinema: return "Private Cinema"
         }
     }
 }
@@ -193,12 +199,38 @@ struct ThemeTokens {
         ringWidth: 4, cardTitleSize: 25, cardMetaSize: 23,
         scrimFloor: 0.55)
 
+    /// Private Cinema (v2.1.0 (Private Cinema)) — deep pine
+    /// background #0C1215, pale sage-cream accents, ivory text
+    /// and focus, bare posters (inset 0) at radius 12.
+    static let privateCinema = ThemeTokens(
+        id: .privateCinema,
+        bg: Color(red: 0.047, green: 0.070, blue: 0.082),                  // #0C1215
+        surfaceTop: Color(red: 0.094, green: 0.145, blue: 0.137),
+        surfaceBottom: Color(red: 0.063, green: 0.102, blue: 0.094),
+        surface2: Color(red: 0.110, green: 0.165, blue: 0.157),
+        stroke: Color.white.opacity(0.16),
+        fieldBar: Color(red: 0.133, green: 0.192, blue: 0.180),
+        accent: Color(red: 0.788, green: 0.867, blue: 0.698),
+        accent2: Color(red: 0.847, green: 0.902, blue: 0.733),
+        onAccent: Color(red: 0.075, green: 0.106, blue: 0.090),
+        focus: Color(red: 0.957, green: 0.945, blue: 0.894),
+        focusTitle: Color(red: 0.957, green: 0.945, blue: 0.894),
+        text: Color(red: 0.949, green: 0.937, blue: 0.902),
+        meta: Color(red: 0.608, green: 0.655, blue: 0.612),
+        heroMeta: Color(red: 0.847, green: 0.902, blue: 0.733),
+        badgeBg: Color.black.opacity(0.70),
+        badgeText: Color(red: 0.949, green: 0.937, blue: 0.902),
+        rCard: 12, rField: 12, artInset: 0, cardArtW: 240, railGap: 26,
+        ringWidth: 4, cardTitleSize: 24, cardMetaSize: 22,
+        scrimFloor: 0.55)
+
     static func tokens(for id: JoeThemeID) -> ThemeTokens {
         switch id {
         case .billboard: return .billboard
         case .posterWall: return .posterWall
         case .sourceBoard: return .sourceBoard
         case .ultra: return .ultra
+        case .privateCinema: return .privateCinema
         }
     }
 }
@@ -768,6 +800,9 @@ struct PosterCard: View {
             }
         } else if theme.id == .ultra {
             ultraBody
+        } else if theme.id == .privateCinema {
+            // v2.1.0 (Private Cinema)
+            cinemaBody
         } else {
             faceBody
         }
@@ -941,6 +976,44 @@ struct PosterCard: View {
                 .overlay(RoundedRectangle(cornerRadius: artRadius)
                     .strokeBorder(isFocused ? theme.focus : .clear,
                                   lineWidth: isFocused ? 6 : 0))
+            Text(title)
+                .font(.system(size: theme.cardTitleSize, weight: .semibold))
+                .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+                .lineLimit(1)
+                .padding(.top, 12)
+            if !meta.isEmpty {
+                Text(meta)
+                    .font(.system(size: theme.cardMetaSize))
+                    .foregroundStyle(theme.meta)
+                    .lineLimit(1)
+                    .padding(.top, 5)
+            }
+            if let subline {
+                Text(subline)
+                    .font(.system(size: 21))
+                    .foregroundStyle(JoeTheme.accentRed)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+            }
+        }
+        .frame(width: theme.cardWidth, alignment: .leading)
+    }
+
+    /// Private Cinema's card (v2.1.0 (Private Cinema)): the
+    /// bare art with title and meta below on the page
+    /// background — no painted face — mirroring ultraBody's
+    /// shape, but with NO Ultra badge logic (the shared `art`
+    /// block already handles badges for non-ultra themes).
+    /// The focus ring rides the art alone: an inset band in
+    /// theme.focus at theme.ringWidth when focused, and NO
+    /// resting stroke (colour/width are values in the
+    /// always-installed overlay — value-only focus).
+    private var cinemaBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            art
+                .overlay(RoundedRectangle(cornerRadius: artRadius)
+                    .strokeBorder(isFocused ? theme.focus : .clear,
+                                  lineWidth: isFocused ? theme.ringWidth : 0))
             Text(title)
                 .font(.system(size: theme.cardTitleSize, weight: .semibold))
                 .foregroundStyle(isFocused ? theme.focusTitle : theme.text)

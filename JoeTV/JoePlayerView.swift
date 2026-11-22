@@ -2276,7 +2276,7 @@ private struct JoePlayerSessionView: View {
             }
             .frame(maxWidth: 1150)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        case .billboard, .ultra:
+        case .billboard, .ultra, .privateCinema: // v2.1.0 (Private Cinema): leading slate, same as Billboard/Ultra
             VStack(alignment: .leading, spacing: 18) {
                 slateTexts(centred: false)
                 // Design-A player slate: button row gap 18,

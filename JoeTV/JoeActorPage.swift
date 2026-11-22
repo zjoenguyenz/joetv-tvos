@@ -63,6 +63,14 @@ struct JoeActorPage: View {
     @State private var pendingRoute: MovieRoute?
     @FocusState private var cardFocus: String?
     @FocusState private var backFocused: Bool
+    // v2.1.0 (Private Cinema): the PC filmography's own
+    // preview controller + dwell task + the focused
+    // item's info/backdrop record. Idle under every
+    // other theme (the controller builds no player
+    // until a PC trailer attempt runs).
+    @StateObject private var cinemaPreview = JoePreviewController()
+    @State private var cinemaFocusTask: Task<Void, Never>?
+    @State private var cinemaFocusedItem: CinemaItem?
 
     private struct MovieMatch: Identifiable {
         let credit: TMDBCreditTitle
@@ -76,7 +84,60 @@ struct JoeActorPage: View {
         var id: Int { title.tmdbId }
     }
 
+    /// v2.1.0 (Private Cinema): the focused playable
+    /// item's info-block + backdrop record for the PC
+    /// filmography, built ONLY from fields the record
+    /// itself carries — a PhimStore Movie carries no
+    /// rating and no synopsis on this page, a TVBTitle
+    /// carries a vote average but no overview; absent
+    /// fields stay absent (rating 0 / empty synopsis
+    /// render nothing), never invented. Index/total are
+    /// stamped at resolve time so the counter is a plain
+    /// read in body — nothing is recomputed on the
+    /// focus path.
+    private struct CinemaItem {
+        let title: String
+        let year: String
+        let rating: Double
+        let synopsis: String
+        let backdropURL: URL?
+        let posterURL: URL?
+        let index: Int
+        let total: Int
+    }
+
     var body: some View {
+        Group {
+            // v2.1.0 (Private Cinema): under PC the page
+            // renders the cinema filmography; every other
+            // theme keeps the standard page byte-for-byte.
+            // The root modifiers below apply ONCE on the
+            // Group, so both compositions share the exit,
+            // disappear and load behaviour exactly.
+            if theme.id == .privateCinema {
+                cinemaBody
+            } else {
+                standardBody
+            }
+        }
+        // Menu closes THIS page (the detail's own-root
+        // handler placement): one press, one layer.
+        .onExitCommand { dismiss() }
+        // v2.0.31 (L8): a film tap's route swap runs HERE,
+        // once the cover is gone (see open()).
+        // v2.1.0 (Private Cinema): the PC preview dies
+        // with the page (stop() on an idle controller is
+        // a no-op teardown, so the standard themes are
+        // unaffected).
+        .onDisappear {
+            performPendingOpen()
+            cinemaFocusTask?.cancel()
+            cinemaPreview.stop()
+        }
+        .task { await load() }
+    }
+
+    private var standardBody: some View {
         ZStack {
             theme.bg.ignoresSafeArea()
             ScrollView(.vertical, showsIndicators: false) {
@@ -86,13 +147,6 @@ struct JoeActorPage: View {
                 }
             }
         }
-        // Menu closes THIS page (the detail's own-root
-        // handler placement): one press, one layer.
-        .onExitCommand { dismiss() }
-        // v2.0.31 (L8): a film tap's route swap runs HERE,
-        // once the cover is gone (see open()).
-        .onDisappear { performPendingOpen() }
-        .task { await load() }
     }
 
     // MARK: - Header (the detail-header visual language)
@@ -115,7 +169,9 @@ struct JoeActorPage: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text(route.name)
-                    .font(.system(size: 44, weight: .heavy))
+                    .font(theme.id == .privateCinema
+                          ? .system(size: 44, weight: .semibold, design: .serif)
+                          : .system(size: 44, weight: .heavy))
                     .foregroundStyle(theme.text)
                     .lineLimit(2)
                 Text(subtitle)
@@ -467,6 +523,351 @@ struct JoeActorPage: View {
             nav.movie = movieRoute
             nav.tor = nil
         }
+    }
+
+    // MARK: - Private Cinema filmography (v2.1.0 (Private Cinema))
+
+    /// The PC composition: the focused film's backdrop
+    /// (plus its trailer preview when one runs) fills
+    /// the screen; the actor header, counter and a
+    /// 2-column poster grid ride a ~720 pt left column;
+    /// the focused film's info block sits bottom-right.
+    /// The cards are the SAME builders the standard page
+    /// uses (movieCard/tvbCard/unmatchedRow), bound to
+    /// the SAME cardFocus — a tap still opens through
+    /// the untouched open()/performPendingOpen() path.
+    private var cinemaBody: some View {
+        ZStack {
+            cinemaBackdropLayer
+            HStack(alignment: .top, spacing: 48) {
+                cinemaLeftColumn
+                Spacer()
+            }
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    cinemaInfoBlock
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .onChange(of: cardFocus) { _, newValue in
+            cinemaFocusChanged(newValue)
+        }
+    }
+
+    /// The backdrop stack, in the detail's order: the
+    /// focused film's OWN art (a Movie's landscape thumb,
+    /// else its poster; a TVBTitle's TMDB backdrop path,
+    /// else its poster) sliced full-bleed, the preview
+    /// layer over it when a trailer is live, then the
+    /// theme.bg scrims (left + bottom). Nothing focused
+    /// yet: the actor's own photo rides as a dim backdrop
+    /// (the .tmdb route carries one; the .tvb route has
+    /// none and simply shows theme.bg).
+    private var cinemaBackdropLayer: some View {
+        let previewOpacity: Double =
+            cinemaPreview.visible && !cinemaPreview.fadingOut ? 1 : 0
+        let previewFadeDuration: Double =
+            cinemaPreview.visible ? 0.8 : 0.15
+        return ZStack {
+            theme.bg
+            if let item = cinemaFocusedItem {
+                if let url = item.backdropURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.16, portraitMode: .slice)
+                } else if let url = item.posterURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.16, portraitMode: .blurField)
+                }
+            } else if !route.photoURL.isEmpty,
+                      let url = URL(string: route.photoURL) {
+                JoeBandImage(url: url, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .blurField)
+                    .opacity(0.5)
+            }
+            if cinemaPreview.player != nil {
+                JoePreviewLayerView(controller: cinemaPreview)
+                    .opacity(previewOpacity)
+                    .animation(.easeInOut(duration: previewFadeDuration),
+                               value: cinemaPreview.visible)
+                    .animation(.easeInOut(duration: 0.8),
+                               value: cinemaPreview.fadingOut)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            LinearGradient(stops: [
+                .init(color: theme.bg.opacity(0.85), location: 0),
+                .init(color: theme.bg.opacity(0.40), location: 0.5),
+                .init(color: theme.bg.opacity(0.05), location: 1)
+            ], startPoint: .leading, endPoint: .trailing)
+            LinearGradient(stops: [
+                .init(color: theme.bg.opacity(0.30), location: 0),
+                .init(color: .clear, location: 0.35),
+                .init(color: theme.bg.opacity(0.88), location: 0.85),
+                .init(color: theme.bg, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
+    }
+
+    private var cinemaLeftColumn: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            header
+            if let item = cinemaFocusedItem {
+                Text(String(format: "%02d / %02d",
+                            item.index + 1, item.total))
+                    .font(.system(size: 25))
+                    .foregroundStyle(theme.meta)
+            }
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 30) {
+                    if !loaded {
+                        ProgressView("Đang tải…")
+                            .font(.system(size: 29))
+                            .foregroundStyle(theme.text)
+                            .tint(theme.text)
+                            .padding(.top, 30)
+                    } else {
+                        cinemaGridContent
+                        if case .tmdb = route, !unmatched.isEmpty {
+                            VStack(alignment: .leading, spacing: 18) {
+                                sectionTitle("Chưa có nguồn phát")
+                                LazyVStack(alignment: .leading,
+                                           spacing: 16) {
+                                    ForEach(
+                                        Array(unmatched.enumerated()),
+                                        id: \.offset
+                                    ) { _, credit in
+                                        unmatchedRow(credit)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 720, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var cinemaGridContent: some View {
+        switch route {
+        case .tvb:
+            if tvbTitles.isEmpty {
+                Text("Chưa có phim nào của diễn viên này trong danh sách TVB.")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.meta)
+            } else {
+                cinemaCardGrid {
+                    ForEach(tvbTitles) { title in
+                        tvbCard(title)
+                    }
+                }
+            }
+        case .tmdb:
+            if credits.isEmpty {
+                Text("Chưa tải được danh sách phim của diễn viên này.")
+                    .font(.system(size: 29))
+                    .foregroundStyle(theme.meta)
+            } else if !matchedMovies.isEmpty || !matchedTVB.isEmpty {
+                cinemaCardGrid {
+                    ForEach(matchedMovies) { match in
+                        movieCard(match.movie)
+                    }
+                    ForEach(matchedTVB) { match in
+                        tvbCard(match.title)
+                    }
+                }
+            }
+        }
+    }
+
+    private var cinemaGridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: theme.railGap),
+              count: 2)
+    }
+
+    private func cinemaCardGrid<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        LazyVGrid(columns: cinemaGridColumns, alignment: .leading,
+                  spacing: 40) {
+            content()
+        }
+        .padding(.vertical, 8)
+        .focusSection()
+    }
+
+    /// The bottom-right info block: the focused film's
+    /// title in the PC serif, its year · ★rating line
+    /// (rating only when the record carries one) and
+    /// its synopsis (only when the record carries one,
+    /// ≤3 lines). Absent fields are omitted, never
+    /// invented.
+    @ViewBuilder
+    private var cinemaInfoBlock: some View {
+        if let item = cinemaFocusedItem {
+            VStack(alignment: .trailing, spacing: 10) {
+                Text(item.title)
+                    .font(.system(size: 40, design: .serif))
+                    .foregroundStyle(theme.text)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(2)
+                let metaLine = [
+                    item.year,
+                    item.rating > 0
+                        ? "★" + String(format: "%.1f", item.rating)
+                        : ""
+                ].filter { !$0.isEmpty }.joined(separator: " · ")
+                if !metaLine.isEmpty {
+                    Text(metaLine)
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.meta)
+                }
+                if !item.synopsis.isEmpty {
+                    Text(item.synopsis)
+                        .font(.system(size: 25))
+                        .foregroundStyle(theme.text)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(3)
+                        .frame(maxWidth: 640, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    // MARK: Cinema focus → trailer
+
+    /// One cardFocus change under PC (v2.1.0 (Private
+    /// Cinema)): the previous focus's dwell task is
+    /// cancelled and any in-flight attempt is torn
+    /// down with stop() — per-focus D1 discipline
+    /// WITHOUT the detail's per-visit kill latch (see
+    /// the note inside); the newly
+    /// focused item is recorded for the backdrop + info
+    /// block; then, when the preview rules allow, a
+    /// 1.2 s dwell runs the IDENTICAL trailer chain the
+    /// detail runs (JoeCinemaTrailer) for that item.
+    /// Non-card focus (the header's Quay lại, an
+    /// unmatched row) clears the info record and starts
+    /// no attempt.
+    private func cinemaFocusChanged(_ focus: String?) {
+        cinemaFocusTask?.cancel()
+        cinemaFocusTask = nil
+        // v2.1.0 (Private Cinema) — leader correction:
+        // a focus move ends the CURRENT film's attempt
+        // with stop() (full teardown, NO latch), never
+        // killIfAttempting: the kill latch is per-VISIT
+        // semantics from the detail (one title per
+        // visit), while this page's whole design is
+        // per-FOCUS trailers — latching would silence
+        // every later film's trailer for the rest of
+        // the page visit. stop() clears player +
+        // attemptKind, so the next film's dwell can
+        // begin its own attempt cleanly.
+        cinemaPreview.stop()
+        guard let focus,
+              let resolved = resolveCinemaFocus(focus) else {
+            cinemaFocusedItem = nil
+            return
+        }
+        cinemaFocusedItem = resolved.item
+        guard JoeCinemaTrailer.allowedByRules() else { return }
+        let tmdbId = resolved.tmdbId
+        let tmdbType = resolved.tmdbType
+        let trailerUrl = resolved.trailerUrl
+        cinemaFocusTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
+            await JoeCinemaTrailer.run(
+                tmdbId: tmdbId, tmdbType: tmdbType,
+                sourceTrailerUrl: trailerUrl,
+                into: cinemaPreview)
+        }
+    }
+
+    /// Map a cardFocus value back to its playable item
+    /// (the cards bind cardFocus to "movie|" + movie.id
+    /// and "tvb|" + tmdbId). Returns the info record
+    /// plus the trailer identity: a Movie's own TMDB
+    /// id/type and its source trailer URL; a TVBTitle's
+    /// snapshot TMDB id as "tv" with no source trailer
+    /// (the snapshot carries no trailer field, so its
+    /// chain is TMDB-only, exactly as the task spec
+    /// states).
+    private func resolveCinemaFocus(
+        _ focus: String
+    ) -> (item: CinemaItem, tmdbId: String, tmdbType: String,
+          trailerUrl: String)? {
+        if focus.hasPrefix("movie|") {
+            let movieId = String(focus.dropFirst("movie|".count))
+            guard let index = matchedMovies.firstIndex(
+                where: { $0.movie.id == movieId }) else { return nil }
+            let movie = matchedMovies[index].movie
+            let item = CinemaItem(
+                title: movie.name,
+                year: Providers.yearOf(movie.year),
+                rating: 0,
+                synopsis: "",
+                backdropURL: movie.thumbURL ?? movie.posterURL,
+                posterURL: movie.posterURL,
+                index: index,
+                total: matchedMovies.count + matchedTVB.count)
+            return (item, movie.tmdbId, movie.tmdbType,
+                    movie.trailerUrl)
+        }
+        if focus.hasPrefix("tvb|") {
+            let idText = String(focus.dropFirst("tvb|".count))
+            guard let tmdbId = Int(idText) else { return nil }
+            switch route {
+            case .tvb:
+                guard let index = tvbTitles.firstIndex(
+                    where: { $0.tmdbId == tmdbId }) else { return nil }
+                let title = tvbTitles[index]
+                return (cinemaItem(for: title, index: index,
+                                   total: tvbTitles.count),
+                        "\(title.tmdbId)", "tv", "")
+            case .tmdb:
+                guard let index = matchedTVB.firstIndex(
+                    where: { $0.title.tmdbId == tmdbId })
+                else { return nil }
+                let title = matchedTVB[index].title
+                return (cinemaItem(
+                            for: title,
+                            index: matchedMovies.count + index,
+                            total: matchedMovies.count
+                                + matchedTVB.count),
+                        "\(title.tmdbId)", "tv", "")
+            }
+        }
+        return nil
+    }
+
+    /// A TVBTitle's info record: its TMDB backdrop path
+    /// (the w1280 convention TMDBClient uses) over its
+    /// own poster; its vote average rides as the rating
+    /// (0 renders nothing); the snapshot carries no
+    /// overview, so the synopsis stays empty.
+    private func cinemaItem(for title: TVBTitle, index: Int,
+                            total: Int) -> CinemaItem {
+        var backdropURL: URL?
+        if let path = title.backdropPath, !path.isEmpty {
+            backdropURL = URL(string: "https://image.tmdb.org/t/p/w1280"
+                + (path.hasPrefix("/") ? path : "/" + path))
+        }
+        return CinemaItem(
+            title: title.titleVi,
+            year: title.yearString,
+            rating: title.voteAverage,
+            synopsis: "",
+            backdropURL: backdropURL ?? title.posterURL,
+            posterURL: title.posterURL,
+            index: index,
+            total: total)
     }
 
     // MARK: - Load + matching

@@ -81,6 +81,7 @@ targets:
       - JoeTV/JoeStreamWarmer.swift
       - JoeTV/JoeKSPlayerView.swift
       - JoeTV/JoeTheme.swift
+      - JoeTV/JoePrivateCinema.swift
       - JoeTV/JoeImagePipeline.swift
       - JoeTV/JoeTVApp.swift
       - JoeTV/JoeTopShelfWriter.swift
@@ -148,15 +149,15 @@ targets:
         INFOPLIST_FILE: InfoJoeTV.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: JoeTV/JoeTV-Bridging-Header.h
-        MARKETING_VERSION: "2.0.49"
-        CURRENT_PROJECT_VERSION: "62"
+        MARKETING_VERSION: "2.1.0"
+        CURRENT_PROJECT_VERSION: "63"
     info:
       path: InfoJoeTV.plist
       properties:
         CFBundleDisplayName: "Joe TV"
         CFBundleName: "Joe TV"
-        CFBundleShortVersionString: "2.0.49"
-        CFBundleVersion: "62"
+        CFBundleShortVersionString: "2.1.0"
+        CFBundleVersion: "63"
         CFBundleIconName: "AppIcon"
         CFBundleIcons:
           CFBundlePrimaryIcon:

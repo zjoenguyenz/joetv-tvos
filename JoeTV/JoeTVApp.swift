@@ -619,6 +619,34 @@ struct JoeRootView: View {
             // An entry policy only: it steers no directional
             // movement (the sections do that).
             .defaultFocus($pillFocus, lastFocusedPill ?? nav.section.rawValue)
+        } else if theme.id == .privateCinema {
+            // v2.1.0 (Private Cinema): wordmark left, clock alone
+            // on the right, and the centred pill group — the five
+            // section pills plus "Tìm phim" (Home / Movies /
+            // Series / TVB / Search) — centred. Same invariants
+            // as the other arms: height 76, .focusSection(), and
+            // the same .defaultFocus entry landing.
+            ZStack {
+                HStack(alignment: .center, spacing: 20) {
+                    wordmark
+                    Spacer()
+                    PCClockLabel()
+                }
+                HStack(spacing: 20) {
+                    ForEach(JoeNavigator.Section.allCases, id: \.self) { s in
+                        sectionPill(s)
+                    }
+                    Button { openSearch() } label: {
+                        PillLabel(title: "Tìm phim", icon: "magnifyingglass", selected: false)
+                    }
+                    .joeCardButton()
+                    .focused($pillFocus, equals: "search")
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .frame(height: 76)
+            .focusSection()
+            .defaultFocus($pillFocus, lastFocusedPill ?? nav.section.rawValue)
         } else {
             HStack(alignment: .center, spacing: 20) {
                 wordmark

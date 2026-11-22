@@ -255,6 +255,12 @@ struct JoePhimHome: View {
                 JoeBrowseView()
             } else if theme.id == .ultra {
                 ultraHome
+            } else if theme.id == .privateCinema {
+                // v2.1.0 (Private Cinema): the cinema home —
+                // after the ultra arm, before the railHome
+                // fallback; the posterWall-first and browse
+                // arms above are unchanged.
+                cinemaHome
             } else {
                 railHome
             }
@@ -567,6 +573,311 @@ struct JoePhimHome: View {
         .onChange(of: topScrollSignal) { _, _ in
             proxy.scrollTo("joePhimHomeTop", anchor: .top)
         }
+        }
+    }
+
+    // MARK: - Private Cinema home (v2.1.0)
+
+    /// Private Cinema's home (v2.1.0): ultraHome's composition
+    /// mirrored exactly — a bare vertical ScrollView inside a
+    /// ScrollViewReader (the same Menu-to-top participation as
+    /// ultraHome: the root .onExitCommand bumps topScrollSignal
+    /// and this reader's hook below scrolls to the page top;
+    /// focus lands on the hero's Play button via heroPlayFocused,
+    /// or the slim header's button via headerFocused, exactly as
+    /// on the other homes) — opening with the cinema hero block
+    /// (or slimHeader when there is no featured film), then the
+    /// shared owner rails in ultraHome's order, then the
+    /// catalogue rails. The one composition difference: the
+    /// rail whose scope is "trending" renders through
+    /// cinemaTrendingRail (numbered items) instead of movieRail.
+    /// Loading / error / empty tails are ultraHome's, verbatim.
+    private var cinemaHome: some View {
+        ScrollViewReader { proxy in
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 40) {
+                if heroMovie != nil {
+                    cinemaHeroBlock
+                } else {
+                    slimHeader
+                }
+                cwRail
+                tvbCwRail
+                favRail
+                followRail
+                addonSection
+                ForEach(railSpecs) { spec in
+                    if !spec.movies.isEmpty {
+                        if let band = spec.bandName {
+                            bandHeader(name: band, note: spec.bandNote ?? "", scope: spec.scope)
+                        }
+                        if spec.scope == "trending" {
+                            cinemaTrendingRail(spec)
+                        } else {
+                            movieRail(spec.title, spec.movies, badges: spec.badges, scope: spec.scope)
+                        }
+                    }
+                }
+                if catalogueEmpty && phim.loading && !phim.loadTimedOut {
+                    ProgressView("Đang tải thư viện phim…")
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.text)
+                        .tint(theme.text)
+                        .padding(.top, 30)
+                }
+                if showPhimError {
+                    errorSurface
+                }
+                if showPhimEmpty {
+                    Text("Thư viện chưa có dữ liệu.")
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.meta)
+                        .padding(.top, 30)
+                }
+                if phim.hasData && !failedProviders.isEmpty {
+                    Text("Chưa tải được: " + failedProviders.joined(separator: ", "))
+                        .font(.system(size: 25))
+                        .foregroundStyle(.orange)
+                }
+            }
+            .id("joePhimHomeTop")
+        }
+        // v2.1.0 (Private Cinema): the Menu-to-top jump's
+        // scroll hook, inside the reader — ultraHome's hook,
+        // unchanged.
+        .onChange(of: topScrollSignal) { _, _ in
+            proxy.scrollTo("joePhimHomeTop", anchor: .top)
+        }
+        }
+    }
+
+    /// The Private Cinema hero block (v2.1.0): the Billboard
+    /// hero's three-stage backdrop stack (poster blurred field,
+    /// provider thumb, TMDB backdrop slice) at the hero's 668
+    /// height with its scrims, then the cinema text block at
+    /// the bottom left — genre eyebrow, serif typeset title
+    /// (the design typesets the title; no logo art here),
+    /// meta row, synopsis, and the SAME action buttons
+    /// ultraHeroBlock renders (the identical nav.movie
+    /// detail-open call, the identical favourite toggle and
+    /// browse entry; the shared labels pick up the Private
+    /// Cinema tokens automatically). Its resolve task is
+    /// ultraHeroBlock's task verbatim, so heroDetail /
+    /// heroBackdropURL / heroRating publish identically.
+    @ViewBuilder
+    private var cinemaHeroBlock: some View {
+        if let featured = heroMovie {
+            ZStack(alignment: .bottomLeading) {
+                if let url = featured.posterURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.20, portraitMode: .blurField)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 668)
+                    .clipped()
+                }
+                if let url = featured.thumbURL, url != featured.posterURL {
+                    JoeBandImage(url: url, targetPixels: 1920,
+                                 anchor: 0.20, portraitMode: .blurField)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 668)
+                    .clipped()
+                }
+                if let heroBackdropURL {
+                    JoeBandImage(url: heroBackdropURL, targetPixels: 1920,
+                                 anchor: 0.20, portraitMode: .slice)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 668)
+                    .clipped()
+                }
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.92), location: 0),
+                    .init(color: .black.opacity(0.80), location: 0.45),
+                    .init(color: .black.opacity(theme.scrimFloor), location: 0.65),
+                    .init(color: .black.opacity(0.15), location: 0.82),
+                    .init(color: .black.opacity(0.05), location: 1)
+                ], startPoint: .leading, endPoint: .trailing)
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0.55),
+                    .init(color: theme.bg, location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 0) {
+                    if !heroGenres.isEmpty {
+                        Text(heroGenres.joined(separator: " · ").uppercased())
+                            .font(.system(size: 22, weight: .bold))
+                            .tracking(4)
+                            .foregroundStyle(theme.heroMeta)
+                            .lineLimit(1)
+                    }
+                    Text(featured.name)
+                        .font(.system(size: 84, weight: .semibold, design: .serif))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(2)
+                        .padding(.top, 10)
+                    if !cinemaHeroMetaLine(featured).isEmpty {
+                        Text(cinemaHeroMetaLine(featured))
+                            .font(.system(size: 27, weight: .medium))
+                            .foregroundStyle(theme.heroMeta)
+                            .lineLimit(1)
+                            .padding(.top, 12)
+                    }
+                    if let synopsis = heroDetail?.content, !synopsis.isEmpty {
+                        Text(synopsis)
+                            .font(.system(size: 26))
+                            .foregroundStyle(theme.text.opacity(0.92))
+                            .lineSpacing(6)
+                            .lineLimit(3)
+                            .frame(maxWidth: 1150, alignment: .leading)
+                            .padding(.top, 16)
+                    }
+                    HStack(spacing: 18) {
+                        Button {
+                            nav.movie = MovieRoute(provider: featured.provider,
+                                                   slug: featured.slug,
+                                                   name: featured.name,
+                                                   poster: featured.poster,
+                                                   year: featured.year)
+                        } label: {
+                            JoePrimaryLabel(title: "Xem ngay", systemImage: "play.fill")
+                        }
+                        .joeCardButton()
+                        .focused($heroPlayFocused)
+                        Button {
+                            toggleHeroFavorite(featured)
+                        } label: {
+                            JoeSecondaryLabel(title: isHeroFavorite(featured)
+                                              ? "♥ Đã thích" : "♡ Yêu thích")
+                        }
+                        .joeCardButton()
+                        Button {
+                            browseReturnTarget = .heroBrowse
+                            nav.browseOpen = true
+                        } label: {
+                            JoeSecondaryLabel(title: "Tất cả phim",
+                                              systemImage: "square.grid.2x2")
+                        }
+                        .joeCardButton()
+                        .focused($heroBrowseFocused)
+                    }
+                    .padding(.top, 26)
+                }
+                .padding(.vertical, 40)
+                .frame(maxWidth: 1150, alignment: .leading)
+            }
+            .frame(height: 668)
+            .defaultFocus($heroPlayFocused, true)
+            .task(id: featured.id) {
+                heroDetail = nil
+                heroBackdropURL = nil
+                heroLogoURL = nil
+                heroRating = 0
+                async let detailFetch = Providers.detail(
+                    featured.provider, slug: featured.slug)
+                async let earlyInfo = TMDBClient.fetchInfo(
+                    tmdbId: featured.tmdbId, type: featured.tmdbType)
+                async let earlyLogo = TMDBClient.fetchLogo(
+                    tmdbId: featured.tmdbId, type: featured.tmdbType)
+                heroDetail = try? await detailFetch
+                guard !TMDBClient.apiKey.isEmpty else { return }
+                let m = heroDetail?.movie ?? featured
+                var backdrop = ""
+                var heroInfo: TMDBInfo?
+                if !m.tmdbId.isEmpty {
+                    if m.tmdbId == featured.tmdbId,
+                       m.tmdbType == featured.tmdbType {
+                        heroInfo = await earlyInfo
+                        if let info = heroInfo {
+                            backdrop = info.backdropURL
+                        }
+                    } else {
+                        heroInfo = await TMDBClient.fetchInfo(
+                            tmdbId: m.tmdbId, type: m.tmdbType)
+                        backdrop = heroInfo?.backdropURL ?? ""
+                    }
+                }
+                if backdrop.isEmpty {
+                    backdrop = await TMDBClient.searchBackdrop(
+                        name: m.name, origin: m.originName,
+                        year: Providers.yearOf(m)) ?? ""
+                }
+                if !backdrop.isEmpty {
+                    heroBackdropURL = URL(string: backdrop)
+                }
+                if let info = heroInfo, info.voteAverage > 0 {
+                    heroRating = info.voteAverage
+                }
+                if !m.tmdbId.isEmpty {
+                    let logo: String
+                    if m.tmdbId == featured.tmdbId,
+                       m.tmdbType == featured.tmdbType {
+                        logo = await earlyLogo
+                    } else {
+                        logo = await TMDBClient.fetchLogo(
+                            tmdbId: m.tmdbId, type: m.tmdbType)
+                    }
+                    if !logo.isEmpty {
+                        heroLogoURL = URL(string: logo)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Private Cinema hero meta line (v2.1.0): year ·
+    /// ★ rating · runtime (the list item's runtime, the
+    /// hero detail's behind it) — only the fields the
+    /// record actually carries.
+    private func cinemaHeroMetaLine(_ featured: Movie) -> String {
+        var parts: [String] = []
+        if !featured.year.isEmpty {
+            parts.append(featured.year)
+        }
+        if heroRating > 0 {
+            parts.append("★ " + String(format: "%.1f", heroRating))
+        }
+        let time = !featured.time.isEmpty
+            ? featured.time : (heroDetail?.movie.time ?? "")
+        if !time.isEmpty {
+            parts.append(time)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The Private Cinema trending rail (v2.1.0): the shared
+    /// Rail headed by the spec's own title, its items numbered
+    /// (01, 02, … in a big serif numeral beside the card, in
+    /// theme.meta). The card itself is movieRail's own
+    /// PosterCard construction verbatim (same arguments and
+    /// badge behaviour), the tap is movieRail's own action,
+    /// and the focus binding copies movieRail's
+    /// .focused($focusedMovie, equals:) pattern, so focus
+    /// memory works identically.
+    private func cinemaTrendingRail(_ spec: JoeRailSpec) -> some View {
+        Rail(title: spec.title) {
+            ForEach(Array(spec.movies.enumerated()), id: \.offset) { pair in
+                Button {
+                    nav.movie = MovieRoute(
+                    provider: pair.element.provider, slug: pair.element.slug,
+                    name: pair.element.name, poster: pair.element.poster, year: pair.element.year) } label: {
+                    HStack(spacing: 14) {
+                        Text(String(format: "%02d", pair.offset + 1))
+                            .font(.system(size: 44, weight: .semibold, design: .serif))
+                            .foregroundStyle(theme.meta)
+                        PosterCard(
+                            title: pair.element.name,
+                            posterURL: pair.element.posterURL,
+                            tmdbId: pair.element.tmdbId,
+                            tmdbType: pair.element.tmdbType,
+                            meta: pair.element.cardMeta,
+                            badge: spec.badges ? Providers.badge(pair.element.provider) : nil,
+                            quality: pair.element.quality,
+                            timeBadge: pair.element.time,
+                            yearBadge: pair.element.year,
+                            form: .rail)
+                    }
+                }
+                .joeCardButton()
+                .focused($focusedMovie, equals: spec.scope + "|" + pair.element.id)
+            }
         }
     }
 

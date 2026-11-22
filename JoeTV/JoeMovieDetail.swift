@@ -185,6 +185,11 @@ struct JoeMovieDetail: View {
         ZStack(alignment: .topLeading) {
             if theme.id == .ultra {
                 ultraBackdrop
+            } else if theme.id == .privateCinema {
+                // v2.1.0 (Private Cinema): the PC detail
+                // rides its own fixed full-screen backdrop,
+                // modelled on Ultra's (see cinemaBackdrop).
+                cinemaBackdrop
             }
             detailScroll
         }
@@ -240,6 +245,8 @@ struct JoeMovieDetail: View {
                         boardDetail(detail)
                     case .ultra:
                         ultraDetail(detail)
+                    case .privateCinema:
+                        privateCinemaDetail(detail)
                     }
                     // Idea 21: the franchise strip sits at the
                     // END of the detail, below every theme's
@@ -828,6 +835,31 @@ struct JoeMovieDetail: View {
                 providerChip
                     .padding(.top, 14)
             }
+        case .privateCinema:
+            // v2.1.0 (Private Cinema): the placeholder rides
+            // the full-screen cinemaBackdrop layer in body
+            // (painted from the launch payload): a skeleton
+            // mirroring privateCinemaDetail's header — no
+            // poster in the header (the PC composition paints
+            // no poster there; it rides cinemaBackdrop), so
+            // the page keeps its shape when the detail lands.
+            VStack(alignment: .leading, spacing: 0) {
+                Text(route.name)
+                    .font(.system(size: 92, weight: .semibold,
+                                  design: .serif))
+                    .tracking(6)
+                    .foregroundStyle(theme.text)
+                    .lineLimit(2)
+                    .padding(.top, 30)
+                if !route.year.isEmpty {
+                    Text(route.year)
+                        .font(.system(size: 29))
+                        .foregroundStyle(theme.heroMeta)
+                        .padding(.top, 12)
+                }
+                providerChip
+                    .padding(.top, 14)
+            }
         case .billboard:
             // v2.0.1: the placeholder carries the SAME band +
             // overlap composition as the loaded detail (the
@@ -1011,6 +1043,67 @@ struct JoeMovieDetail: View {
         // detailScroll beside it keeps the HIG inset exactly
         // as before, so no text moves. Ultra-only — this
         // layer exists for no other theme.
+        .ignoresSafeArea())
+    }
+
+    /// Private Cinema's fixed full-screen backdrop
+    /// (v2.1.0): modelled on ultraBackdrop — the same staged
+    /// stack (poster slice, provider thumb, TMDB backdrop
+    /// slice), the preview layer in the SAME placement
+    /// (above the images, below both scrims), and left +
+    /// vertical scrims whose stops read theme.bg, so the
+    /// melt lands on this theme's own background. The layer
+    /// bleeds edge-to-edge exactly as Ultra's does; the
+    /// detailScroll beside it keeps the HIG inset.
+    private var cinemaBackdrop: AnyView {
+        let m = detail?.movie ?? placeholderMovie()
+        let previewOpacity: Double = preview.visible && !preview.fadingOut
+            ? 1 : 0
+        let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
+        return AnyView(ZStack {
+            if let url = m.posterURL {
+                JoeBandImage(url: url, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .blurField)
+            }
+            if let url = m.thumbURL, url != m.posterURL {
+                JoeBandImage(url: url, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .blurField)
+            }
+            if let u = tmdbBackdropURL {
+                JoeBandImage(url: u, targetPixels: 1920,
+                             anchor: 0.16, portraitMode: .slice)
+            }
+            // The backdrop preview's video layer — above
+            // the backdrop images, below BOTH scrims, in
+            // the same placement ultraBackdrop uses.
+            // Present only while a preview player exists;
+            // opacity carries the 0.8 s crossfade IN at
+            // first frame and the 0.8 s crossfade back OUT
+            // at the segment's natural end. A kill cuts
+            // instantly, per rule D1.
+            if preview.player != nil {
+                JoePreviewLayerView(controller: preview)
+                    .opacity(previewOpacity)
+                    .animation(.easeInOut(duration: previewFadeDuration),
+                               value: preview.visible)
+                    .animation(.easeInOut(duration: 0.8),
+                               value: preview.fadingOut)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            LinearGradient(stops: [
+                .init(color: theme.bg.opacity(0.85), location: 0),
+                .init(color: theme.bg.opacity(0.40), location: 0.5),
+                .init(color: theme.bg.opacity(0.05), location: 1)
+            ], startPoint: .leading, endPoint: .trailing)
+            LinearGradient(stops: [
+                .init(color: theme.bg.opacity(0.30), location: 0),
+                .init(color: .clear, location: 0.35),
+                .init(color: theme.bg.opacity(0.88), location: 0.85),
+                .init(color: theme.bg, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea())
     }
 
@@ -1387,6 +1480,139 @@ struct JoeMovieDetail: View {
                     .frame(maxWidth: 1500, alignment: .leading)
                     .padding(.top, 16)
             }
+        })
+    }
+
+    /// Private Cinema — the cinema detail composition
+    /// (v2.1.0): one left column over the full-screen
+    /// cinemaBackdrop — NO panel or card is painted behind
+    /// the header, so the backdrop (and the trailer
+    /// preview over it) stays uncovered. Eyebrow = the
+    /// genres joined " / " uppercased + the type word;
+    /// a letterspaced serif title; the origin-name line;
+    /// the meta row; the synopsis; the SHARED action row;
+    /// then a text-only credits block — the first three
+    /// cast names as tappable buttons (the actorNameAction
+    /// pattern, JoeCinemaNameLabel dress), with NO photo
+    /// cast row under this theme. There is NO "ĐẠO DIỄN"
+    /// column: neither Detail, Movie nor TMDBInfo carries
+    /// a director field, so the column is omitted rather
+    /// than invented. Below the header: a Divider + the
+    /// "Chọn nguồn phát" heading over the shared
+    /// sourceChips and servers blocks, reused verbatim.
+    /// The genreChips row is NOT used here — the eyebrow
+    /// carries the genres in this design.
+    private func privateCinemaDetail(_ d: Detail) -> AnyView {
+        let genres: [String] = d.categories
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let typeWord: String = isSeries(d) ? "PHIM BỘ" : "PHIM ĐIỆN ẢNH"
+        let eyebrow: String = (genres.map { $0.uppercased() }
+                               + [typeWord])
+            .joined(separator: " / ")
+        let hasSynopsis: Bool = !(tmdb?.overview.isEmpty ?? true)
+            || !d.content.isEmpty
+        let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
+            ? d.content : (tmdb?.overview ?? "")
+        var metaParts: [String] = []
+        if !d.movie.year.isEmpty { metaParts.append(d.movie.year) }
+        if let r = tmdb?.voteAverage, r > 0 {
+            metaParts.append("★ " + String(format: "%.1f", r))
+        }
+        if !d.movie.time.isEmpty { metaParts.append(d.movie.time) }
+        let metaText: String = metaParts.joined(separator: " · ")
+        return AnyView(VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(eyebrow)
+                    .font(.system(size: 23, weight: .semibold))
+                    .tracking(3)
+                    .foregroundStyle(theme.heroMeta)
+                    .lineLimit(1)
+                    .padding(.top, 30)
+                Text(d.movie.name)
+                    .font(.system(size: 92, weight: .semibold,
+                                  design: .serif))
+                    .tracking(6)
+                    .foregroundStyle(theme.text)
+                    .lineLimit(2)
+                    .padding(.top, 16)
+                if !d.movie.originName.isEmpty,
+                   d.movie.originName != d.movie.name {
+                    Text(d.movie.originName)
+                        .font(.system(size: 27))
+                        .tracking(3)
+                        .foregroundStyle(theme.meta)
+                        .lineLimit(1)
+                        .padding(.top, 10)
+                }
+                if !metaText.isEmpty || !d.movie.quality.isEmpty {
+                    HStack(spacing: 16) {
+                        if !metaText.isEmpty {
+                            Text(metaText)
+                                .font(.system(size: 27, weight: .medium))
+                                .foregroundStyle(theme.heroMeta)
+                                .lineLimit(1)
+                        }
+                        if !d.movie.quality.isEmpty {
+                            Text(d.movie.quality)
+                                .font(.system(size: 21, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .overlay(RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(theme.stroke, lineWidth: 1.5))
+                        }
+                    }
+                    .padding(.top, 12)
+                }
+                if hasSynopsis {
+                    Text(synopsisText)
+                        .font(.system(size: 27))
+                        .foregroundStyle(theme.text.opacity(0.92))
+                        .lineSpacing(8)
+                        .lineLimit(4)
+                        .frame(maxWidth: 1150, alignment: .leading)
+                        .padding(.top, 20)
+                }
+                HStack(spacing: 18) {
+                    playButton(d)
+                    favButton(d)
+                    followButton(d)
+                }
+                .padding(.top, 22)
+                if let tmdb, !tmdb.cast.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("DIỄN VIÊN")
+                            .font(.system(size: 23, weight: .semibold))
+                            .tracking(3)
+                            .foregroundStyle(theme.heroMeta)
+                        HStack(spacing: 18) {
+                            ForEach(Array(tmdb.cast.prefix(3))) { member in
+                                Button {
+                                    actorNameAction(member)
+                                } label: {
+                                    JoeCinemaNameLabel(name: member.name)
+                                }
+                                .joeCardButton()
+                                .focused($focusedCast, equals: member.id)
+                            }
+                        }
+                    }
+                    .padding(.top, 28)
+                }
+            }
+            .focusSection()
+            Divider()
+                .padding(.top, 38)
+            Text("Chọn nguồn phát")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+                .padding(.top, 20)
+            sourceChips
+                .padding(.top, 18)
+            servers(d, heading: "Chọn tập", headingSize: 30)
+                .padding(.top, 36)
         })
     }
 
@@ -1849,6 +2075,30 @@ private struct JoeActorNameLabel: View {
     }
 }
 
+/// One cast name in the Private Cinema detail credits
+/// (privateCinemaDetail) — a plain text name, identical
+/// in dress to JoeTorNameLabel (JoeTorrent.swift) so the
+/// chain and torrent PC credits render as the same
+/// element (the deviation table's "same text-line
+/// credits"): 25 pt, theme.text at rest, and focus is
+/// value-only — the name alone takes theme.focusTitle;
+/// no plate, fill, weight change or scale, and the
+/// line's geometry never changes. (The shared
+/// JoeActorNameLabel above keeps its own dress for the
+/// themes that already use it.)
+private struct JoeCinemaNameLabel: View {
+    let name: String
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 25))
+            .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+            .lineLimit(1)
+    }
+}
+
     // MARK: - Nguồn phát membership (ONE shared model, v2.0.5)
 
     /// ONE membership model for the Nguồn phát block
@@ -2172,13 +2422,14 @@ private struct JoeActorNameLabel: View {
     }
 
     /// Poster size per design (A frame 288×432, D 300×450,
-    /// F compact 160×240).
+    /// F compact 160×240, Private Cinema 288×432 v2.1.0).
     private var posterSize: CGSize {
         switch theme.id {
         case .billboard: return CGSize(width: 288, height: 432)
         case .posterWall: return CGSize(width: 300, height: 450)
         case .sourceBoard: return CGSize(width: 160, height: 240)
         case .ultra: return CGSize(width: 288, height: 432)
+        case .privateCinema: return CGSize(width: 288, height: 432)
         }
     }
 
@@ -3865,7 +4116,10 @@ private struct JoeCastCellLabel: View {
         // Ultra (full-screen) and Billboard (the band).
         // Poster Wall / Source Board details have none —
         // adding one would break the design freeze.
-        guard theme.id == .ultra || theme.id == .billboard else {
+        // v2.1.0 (Private Cinema): PC joins the gate — its
+        // detail carries the full-screen cinemaBackdrop.
+        guard theme.id == .ultra || theme.id == .billboard
+            || theme.id == .privateCinema else {
             DiagLog.write("PREVIEW", "preview skipped rule=no-backdrop-surface")
             return
         }

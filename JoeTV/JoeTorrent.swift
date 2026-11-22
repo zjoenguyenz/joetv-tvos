@@ -729,8 +729,22 @@ struct JoeTorrentDetail: View {
             LazyVStack(alignment: .leading, spacing: 32) {
                 hero
                 if !cast.isEmpty {
-                    torCastRow
-                        .focusSection()
+                    // v2.1.0 (Private Cinema): the cast slot is
+                    // the ONLY branch — under Private Cinema the
+                    // photo cast row is replaced by the text-line
+                    // credits (cinemaTorCredits); every other
+                    // theme keeps torCastRow, and the rest of
+                    // standardBody (hero, episodes, streams, the
+                    // focus sections, the Menu-to-top hook) is
+                    // shared unchanged, so no separate
+                    // cinemaTorBody duplicates this body.
+                    if theme.id == .privateCinema {
+                        cinemaTorCredits
+                            .focusSection()
+                    } else {
+                        torCastRow
+                            .focusSection()
+                    }
                 }
                 if meta.type == "series" {
                     // v2.0.5 (N1, pair i): the episode block
@@ -1327,6 +1341,38 @@ struct JoeTorrentDetail: View {
         if !members.isEmpty { cast = members }
     }
 
+    /// v2.1.0 (Private Cinema): the torrent detail's text-line
+    /// credits — the photo cast row's replacement under this
+    /// theme only. A "DIỄN VIÊN" label over a row of buttons
+    /// for the FIRST 3 cast names in billing order; each
+    /// button's action is torCastRow's cell action verbatim
+    /// (the same actorRoute .tmdb(...) assignment), and the
+    /// name is a plain TEXT line (JoeTorNameLabel, the
+    /// JoeActorNameLabel discipline) — no capsule pill:
+    /// focus changes only the name's colour value, with no
+    /// plate, fill or scale (no second focus layer).
+    private var cinemaTorCredits: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("DIỄN VIÊN")
+                .font(.system(size: 24, weight: .bold))
+                .tracking(3)
+                .foregroundStyle(theme.meta)
+            HStack(spacing: 16) {
+                ForEach(Array(cast.prefix(3))) { member in
+                    Button {
+                        actorRoute = .tmdb(
+                            personId: member.id,
+                            name: member.name,
+                            photoURL: member.photoURL)
+                    } label: {
+                        JoeTorNameLabel(name: member.name)
+                    }
+                    .joeCardButton()
+                }
+            }
+        }
+    }
+
     /// The cast row for the torrent detail — the Phim
     /// detail's castRow construction mirrored (circular
     /// photo, name, character, the house card button), each
@@ -1419,6 +1465,27 @@ private struct JoeTorCastCellLabel: View {
         Text(String(member.name.prefix(1)))
             .font(.system(size: 38, weight: .bold))
             .foregroundStyle(.white.opacity(0.8))
+    }
+}
+
+/// One cast name in the Private Cinema credits line
+/// (cinemaTorCredits) — the JoeActorNameLabel discipline
+/// (JoeMovieDetail.swift, private to that file) mirrored
+/// for this file: a plain text name at 25 pt to match the
+/// Private Cinema credits line, with NO capsule, plate,
+/// fill or scale. Focus is value-only: the name alone
+/// takes theme.focusTitle; its resting colour and the
+/// line's geometry never change.
+private struct JoeTorNameLabel: View {
+    let name: String
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.joeTheme) private var theme
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 25))
+            .foregroundStyle(isFocused ? theme.focusTitle : theme.text)
+            .lineLimit(1)
     }
 }
 
