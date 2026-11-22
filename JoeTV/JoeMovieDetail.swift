@@ -186,8 +186,24 @@ struct JoeMovieDetail: View {
         }
     }
 
-    private var detailScrollContent: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+    /// 2.0.48 type-erasure fix (CI run #33): with every
+    /// leaf of the chain extracted, the timeout migrated
+    /// to the chain's ROOT — the checker resolving the
+    /// four layers' nested opaque types where they
+    /// compose (the detailScroll body, :350). The layers
+    /// now erase to AnyView at every boundary: each
+    /// layer's body is checked against a concrete AnyView
+    /// base, and no parent ever resolves another layer's
+    /// underlying type. The same erasure caps the file's
+    /// other multi-layer composition points — the four
+    /// themed detail compositions where the content
+    /// switch composes them, the placeholder header's
+    /// theme switch, the franchise strip, and the Ultra
+    /// backdrop stack where body composes it. Modifier
+    /// order, views and conditions are unchanged
+    /// everywhere.
+    private var detailScrollContent: AnyView {
+        AnyView(ScrollView(.vertical, showsIndicators: false) {
             // v2.0.8 (Phase 7): lazy root — server groups and
             // their episode chips build as they scroll into
             // view instead of all up front. Children, order
@@ -222,7 +238,7 @@ struct JoeMovieDetail: View {
                     // so no theme composition moves. It renders
                     // only when a collection part matched a
                     // playable title (see loadFranchise).
-                    franchiseStrip
+                    AnyView(franchiseStrip)
                 } else if loadFailed {
                     // §8: the G3 error shape + Retry.
                     // v2.0.31 (L7): a TVB page that exhausted
@@ -269,7 +285,7 @@ struct JoeMovieDetail: View {
             }
             // No manual padding: the layer sits inside the root
             // safe area, which IS the §4 inset (80/60).
-        }
+        })
     }
 
     /// 2.0.48 structural fix (CI runs #30/#31): the
@@ -278,12 +294,13 @@ struct JoeMovieDetail: View {
     /// covers + some twenty hooks — and the type-checker
     /// timed out inside it, the reported line migrating
     /// between runs. The chain is now staged through
-    /// opaque computed properties (this one carries the
+    /// computed properties, type-erased to AnyView at
+    /// every boundary since run #33 (this one carries the
     /// six .task modifiers, their bodies slimmed to calls
     /// into named async methods below), so no single
     /// expression is heavy. Modifier ORDER is unchanged.
-    private var detailScrollTasks: some View {
-        detailScrollContent
+    private var detailScrollTasks: AnyView {
+        AnyView(detailScrollContent
         .task(id: loadTaskID) { await load() }
         .task(id: detail?.movie.id ?? "") { await runTMDBEnrichment() }
         .task(id: detail?.movie.id ?? "") { await runTMDBLogoFetch() }
@@ -315,13 +332,13 @@ struct JoeMovieDetail: View {
             // no collection / no matched part leaves the
             // strip absent and the detail exactly as it was.
             await loadFranchise()
-        }
+        })
     }
 
     /// Structural fix, stage 3: the two full-screen
     /// covers, the declared Play focus and the exit hook.
-    private var detailScrollCovers: some View {
-        detailScrollTasks
+    private var detailScrollCovers: AnyView {
+        AnyView(detailScrollTasks
         .fullScreenCover(item: $actorRoute) { route in
             JoeActorPage(route: route)
         }
@@ -340,14 +357,14 @@ struct JoeMovieDetail: View {
         // layer, outside this view, and Menu exited the app
         // from here on device. Unconditional: it exists exactly
         // while the detail does.
-        .onExitCommand { handleExitCommand() }
+        .onExitCommand { handleExitCommand() })
     }
 
     /// Structural fix, final stage: the preview/input
     /// hooks, the scene-phase hook, the YouTube session
     /// task and the chain hand-back hook.
-    private var detailScroll: some View {
-        detailScrollCovers
+    private var detailScroll: AnyView {
+        AnyView(detailScrollCovers
         // 2.0.48 (Leg 3, rule D1): ANY input kills the
         // backdrop preview for this visit. Every focus
         // binding on this screen reports here — a swipe
@@ -401,7 +418,7 @@ struct JoeMovieDetail: View {
         .task { await loadYtSession() }
         .onChange(of: nav.ytChainPlay) { _, token in
             handleYtChainPlay(token)
-        }
+        })
     }
 
     // MARK: - 2.0.48 sweep: hook handlers + hoisted keys
@@ -679,7 +696,7 @@ struct JoeMovieDetail: View {
     /// (in v1.1 a detail could spin for 15–20 s). v2.0.0: the
     /// placeholder follows the active design's head anatomy.
     @ViewBuilder
-    private var placeholderHeader: some View {
+    private var placeholderHeaderContent: some View {
         let m = placeholderMovie()
         switch theme.id {
         case .posterWall:
@@ -768,6 +785,16 @@ struct JoeMovieDetail: View {
         }
     }
 
+    /// Type-erased face of the placeholder header
+    /// (run #33 fix): the builder above switches over
+    /// the four themes, composing four different
+    /// opaque branch types; only this erased property
+    /// is referenced from the scroll content, so the
+    /// switch's type never propagates into it.
+    private var placeholderHeader: AnyView {
+        AnyView(placeholderHeaderContent)
+    }
+
     /// The scenePhase preview-kill, extracted from the body
     /// chain: inline, its closure pushed the (very large)
     /// detail body past the type-checker's reasonable-time
@@ -812,7 +839,7 @@ struct JoeMovieDetail: View {
     /// meta line, genre chips, synopsis, actors line, then
     /// Xem ngay / Yêu thích; below the header block: Nguồn phát
     /// chips, then Chọn tập chips. No re-layout.
-    private func billboardDetail(_ d: Detail) -> some View {
+    private func billboardDetail(_ d: Detail) -> AnyView {
         // Design-A detail margins (design-A/detail.html): the
         // "Nguồn phát" block sits margin-top 38 below the header
         // block; the "Chọn tập" block is a rail-title block
@@ -820,7 +847,7 @@ struct JoeMovieDetail: View {
         // uniform 32 gap matched neither drawing value.
         let headerTopPadding: CGFloat = bandVisible(
             movie: d.movie, tmdbURL: tmdbBackdropURL) ? -168 : 0
-        return VStack(alignment: .leading, spacing: 0) {
+        return AnyView(VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 backdropBand(movie: d.movie, tmdbURL: tmdbBackdropURL)
                 header(d)
@@ -834,7 +861,7 @@ struct JoeMovieDetail: View {
                 .padding(.top, 38)
             servers(d, heading: "Chọn tập", headingSize: 30)
                 .padding(.top, 36)
-        }
+        })
     }
 
     /// Ultra's fixed full-screen backdrop (v2.0.19): the same
@@ -842,12 +869,12 @@ struct JoeMovieDetail: View {
     /// provider thumb, TMDB backdrop — behind the whole
     /// detail page, with the Sony scrims (left + a gentle
     /// vertical melt to the page background at the bottom).
-    private var ultraBackdrop: some View {
+    private var ultraBackdrop: AnyView {
         let m = detail?.movie ?? placeholderMovie()
         let previewOpacity: Double = preview.visible && !preview.fadingOut
             ? 1 : 0
         let previewFadeDuration: Double = preview.visible ? 0.8 : 0.15
-        return ZStack {
+        return AnyView(ZStack {
             if let url = m.posterURL {
                 JoeBandImage(url: url, targetPixels: 1920,
                              anchor: 0.16, portraitMode: .blurField)
@@ -908,7 +935,7 @@ struct JoeMovieDetail: View {
         // detailScroll beside it keeps the HIG inset exactly
         // as before, so no text moves. Ultra-only — this
         // layer exists for no other theme.
-        .ignoresSafeArea()
+        .ignoresSafeArea())
     }
 
     /// Ultra — the Sony detail composition (v2.0.19): no
@@ -917,7 +944,7 @@ struct JoeMovieDetail: View {
     /// gold meta with the IMDb pill, genre chips, the action
     /// row (play + favourite CIRCLE), synopsis, cast circles —
     /// then the shared source chips and episode servers.
-    private func ultraDetail(_ d: Detail) -> some View {
+    private func ultraDetail(_ d: Detail) -> AnyView {
         let hasGenres: Bool = !d.categories
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -927,7 +954,7 @@ struct JoeMovieDetail: View {
             || !d.content.isEmpty
         let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
             ? d.content : (tmdb?.overview ?? "")
-        return VStack(alignment: .leading, spacing: 0) {
+        return AnyView(VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 if !tmdbLogoURL.isEmpty,
                    let u = URL(string: tmdbLogoURL) {
@@ -998,7 +1025,7 @@ struct JoeMovieDetail: View {
                 .padding(.top, 38)
             servers(d, heading: "Chọn tập", headingSize: 30)
                 .padding(.top, 36)
-        }
+        })
     }
 
     /// Ultra's favourite: the reference's round heart button
@@ -1080,7 +1107,7 @@ struct JoeMovieDetail: View {
     /// action row (the current source's name, the same status
     /// the other themes' Nguồn phát blocks show). Declared,
     /// not silent.
-    private func wallDetail(_ d: Detail) -> some View {
+    private func wallDetail(_ d: Detail) -> AnyView {
         // Design-D detail (design-D/detail.html): a CENTRED
         // column whose elements carry the drawing's own
         // margins — title 24 below the poster, meta 10, genre
@@ -1099,7 +1126,7 @@ struct JoeMovieDetail: View {
             || !d.content.isEmpty
         let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
             ? d.content : (tmdb?.overview ?? "")
-        return VStack(alignment: .center, spacing: 0) {
+        return AnyView(VStack(alignment: .center, spacing: 0) {
             // v2.0.8 (Phase 1): the header region (poster
             // through the Play/Favourite row) is its own
             // focus section. The Group is layout-transparent,
@@ -1180,7 +1207,7 @@ struct JoeMovieDetail: View {
             servers(d, centered: true)
                 .padding(.top, 16)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity))
     }
 
     /// F — Source Board: compact meta head, then the Nguồn phát
@@ -1188,7 +1215,7 @@ struct JoeMovieDetail: View {
     /// the alternatives as switch actions, the torrent rung's
     /// state), episode chips under them, cast, and the synopsis
     /// demoted to a small 2-line tail.
-    private func boardDetail(_ d: Detail) -> some View {
+    private func boardDetail(_ d: Detail) -> AnyView {
         // Design-F detail (design-F/detail.html): the column
         // carries the drawing's own margins — content row gap
         // 36; title → meta 10, meta → genre chips 16, chips →
@@ -1205,7 +1232,7 @@ struct JoeMovieDetail: View {
             || !d.content.isEmpty
         let synopsisText: String = (tmdb?.overview.isEmpty ?? true)
             ? d.content : (tmdb?.overview ?? "")
-        return VStack(alignment: .leading, spacing: 0) {
+        return AnyView(VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 36) {
                 posterArt(d.movie)
                 VStack(alignment: .leading, spacing: 0) {
@@ -1284,7 +1311,7 @@ struct JoeMovieDetail: View {
                     .frame(maxWidth: 1500, alignment: .leading)
                     .padding(.top, 16)
             }
-        }
+        })
     }
 
     /// F's source rows: one row per source family, over the
