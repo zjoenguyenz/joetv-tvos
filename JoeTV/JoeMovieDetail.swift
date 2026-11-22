@@ -511,9 +511,7 @@ struct JoeMovieDetail: View {
             if nav.ytPlayer != nil { preview.kill(reason: "play") }
         }
         .onChange(of: provider) { preview.kill(reason: "input") }
-        .onChange(of: scenePhase) {
-            if scenePhase != .active { preview.kill(reason: "inactive") }
-        }
+        .onChange(of: scenePhase) { handleScenePhaseChange() }
         .onDisappear { preview.stop() }
         // TVB YouTube feature: the catalogue + session state
         // the source-row integration reads, and the chain
@@ -622,6 +620,16 @@ struct JoeMovieDetail: View {
                 .padding(.top, bandVisible(movie: m, tmdbURL: nil) ? -168 : 0)
             }
         }
+    }
+
+    /// The scenePhase preview-kill, extracted from the body
+    /// chain: inline, its closure pushed the (very large)
+    /// detail body past the type-checker's reasonable-time
+    /// limit (CI run #30, JoeMovieDetail.swift:515). Behaviour
+    /// is unchanged — same condition, same kill call, same
+    /// reason string.
+    private func handleScenePhaseChange() {
+        if scenePhase != .active { preview.kill(reason: "inactive") }
     }
 
     /// The placeholder header's movie, assembled OUTSIDE the
