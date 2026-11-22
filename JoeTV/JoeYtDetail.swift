@@ -144,8 +144,13 @@ struct JoeYtDetail: View {
         return n >= 1 ? n - 1 : nil
     }
 
-    var body: some View {
-        Group {
+    /// FL-390 cure (CI run #36): the content expression,
+    /// erased to AnyView so the root hook chain below
+    /// composes against a concrete base — the first half
+    /// of the construction that cured JoeMovieDetail's
+    /// migrating timeouts in 2.0.48 (runs #30–#35).
+    private var rootContent: AnyView {
+        AnyView(Group {
             if let series {
                 content(series)
             } else {
@@ -154,11 +159,23 @@ struct JoeYtDetail: View {
                     .foregroundStyle(theme.text)
                     .tint(theme.text)
             }
-        }
+        })
+    }
+
+    var body: some View {
+        // FL-390 cure (CI run #36): the seven root hooks
+        // are composed STEPWISE — one modifier per let
+        // binding, each statement priced on its own —
+        // instead of one chain on the Group, whose single
+        // expression timed the type-checker out at the
+        // closing .task (run #36, JoeYtDetail.swift:180).
+        // Modifier order, closures and conditions are
+        // identical to the chained form this replaces.
         // Own-root Menu handler (the 1.9.2 construction),
         // extended v2.0.49 by the owner's Back-to-top
         // order — see handleExitCommand.
-        .onExitCommand { handleExitCommand() }
+        let exitStage = rootContent
+            .onExitCommand { handleExitCommand() }
         // v2.0.49: the preview kill hooks, wired exactly
         // as JoeMovieDetail wires them — every focus
         // binding reports through focusInput (the value
@@ -166,19 +183,26 @@ struct JoeYtDetail: View {
         // unset → set), the player presentation and the
         // scene phase kill explicitly, and disappearing
         // stops the preview outright.
-        .onChange(of: epFocus) { old, new in
-            preview.focusInput(landingShaped: old == nil && new != nil)
-        }
-        .onChange(of: chipFocus) { old, new in
-            preview.focusInput(landingShaped: old == nil && new != nil)
-        }
-        .onChange(of: nav.ytPlayer?.id) { handleYtPlayerPresentation() }
-        .onChange(of: scenePhase) { handleScenePhaseChange() }
-        .onDisappear { preview.stop() }
-        .task {
-            ytStore.ensureLoaded()
-            await session.refresh()
-        }
+        let epFocusStage = exitStage
+            .onChange(of: epFocus) { old, new in
+                preview.focusInput(landingShaped: old == nil && new != nil)
+            }
+        let chipFocusStage = epFocusStage
+            .onChange(of: chipFocus) { old, new in
+                preview.focusInput(landingShaped: old == nil && new != nil)
+            }
+        let playerStage = chipFocusStage
+            .onChange(of: nav.ytPlayer?.id) { handleYtPlayerPresentation() }
+        let sceneStage = playerStage
+            .onChange(of: scenePhase) { handleScenePhaseChange() }
+        let disappearStage = sceneStage
+            .onDisappear { preview.stop() }
+        let taskStage = disappearStage
+            .task {
+                ytStore.ensureLoaded()
+                await session.refresh()
+            }
+        return AnyView(taskStage)
     }
 
     /// The YouTube player's presentation kills the
