@@ -1302,11 +1302,12 @@ struct JoePhimHomeCore: View {
                     }
                 }
             }
+            .shadow(color: .black.opacity(0.35), radius: 5, x: 0, y: 2)
             .background(alignment: .leading) {
                 JoeCinemaStreak()
-                    .padding(.vertical, -14)
-                    .padding(.leading, -100)
-                    .padding(.trailing, -460)
+                    .padding(.vertical, -36)
+                    .padding(.leading, -130)
+                    .padding(.trailing, -400)
             }
             .background {
                 GeometryReader { g in
