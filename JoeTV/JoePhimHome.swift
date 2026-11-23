@@ -1312,7 +1312,7 @@ struct JoePhimHomeCore: View {
         .padding(.leading, 14)
         .padding(.trailing, 14)
         .frame(height: 88)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)  // Cach C fix: strip content hugs the left edge (Spacer removed with the right block)
         // claude/opt-2 (owner: glass bar, not a black bar over
         // the full-screen backdrop): JoeCinemaGlass, drawn edge
         // to edge (background only, -80 over the safe-area inset;
