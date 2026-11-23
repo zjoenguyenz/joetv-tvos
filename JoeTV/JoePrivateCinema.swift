@@ -150,20 +150,26 @@ extension View {
 /// never masked — only the veil fades.
 struct JoeCinemaStreak: View {
     @Environment(\.joeTheme) private var theme
-    var tail: CGFloat = 560
+    var tail: CGFloat = 460
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let solid = w > tail ? (w - tail) / w : 0
+            let tailFrac = w > tail ? tail / w : 1
             ZStack {
                 theme.bg.opacity(0.30)
                 LinearGradient(colors: [Color.white.opacity(0.09), Color.white.opacity(0)],
                                startPoint: .top, endPoint: .bottom)
             }
             .mask {
+                // Cách C3 (owner polish): eased multi-stop fade — solid to
+                // the end of the text, then 55% / 22% / gone, so the tail
+                // dissolves softly instead of one straight ramp.
                 LinearGradient(stops: [
                     Gradient.Stop(color: .black, location: 0),
                     Gradient.Stop(color: .black, location: solid),
+                    Gradient.Stop(color: .black.opacity(0.55), location: solid + 0.45 * tailFrac),
+                    Gradient.Stop(color: .black.opacity(0.22), location: solid + 0.78 * tailFrac),
                     Gradient.Stop(color: .clear, location: 1),
                 ], startPoint: .leading, endPoint: .trailing)
             }
@@ -249,8 +255,9 @@ private struct JoePCPinnedBandCover: ViewModifier {
                     // textW), then the fade tail; fixed 1560/0.60 only as
                     // the pre-measure fallback.
                     let textEnd = frame.minX + 14 + textW
-                    let streakW = textW > 0 ? min(1920, textEnd + 480) : 1560
+                    let streakW = textW > 0 ? min(1920, textEnd + 340) : 1560
                     let solidAt = textW > 0 ? min(0.85, textEnd / streakW) : 0.60
+                    let fadeSpan = 1 - solidAt
                     JoeCinemaGlass(frosted: true)
                         .overlay(alignment: .bottom) {
                             theme.bg.opacity(pinned ? 0.5 : 0)
@@ -259,16 +266,22 @@ private struct JoePCPinnedBandCover: ViewModifier {
                         .frame(width: streakW,
                                height: pinned ? above + frame.height : 0)
                         .mask {
+                            // Cách C3: same eased profile as the at-rest streak.
                             LinearGradient(stops: [
                                 Gradient.Stop(color: .black, location: 0),
                                 Gradient.Stop(color: .black, location: solidAt),
+                                Gradient.Stop(color: .black.opacity(0.55), location: solidAt + 0.45 * fadeSpan),
+                                Gradient.Stop(color: .black.opacity(0.22), location: solidAt + 0.78 * fadeSpan),
                                 Gradient.Stop(color: .clear, location: 1),
                             ], startPoint: .leading, endPoint: .trailing)
                         }
                         .mask {
+                            // Cách C3: bottom edge dissolves over the last
+                            // 22% (was 10%) — no visible cut line over the
+                            // posters below the pinned strip.
                             LinearGradient(stops: [
                                 Gradient.Stop(color: .black, location: 0),
-                                Gradient.Stop(color: .black, location: 0.90),
+                                Gradient.Stop(color: .black, location: 0.78),
                                 Gradient.Stop(color: .clear, location: 1),
                             ], startPoint: .top, endPoint: .bottom)
                         }

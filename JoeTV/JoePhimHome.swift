@@ -1306,7 +1306,7 @@ struct JoePhimHomeCore: View {
                 JoeCinemaStreak()
                     .padding(.vertical, -14)
                     .padding(.leading, -100)
-                    .padding(.trailing, -560)
+                    .padding(.trailing, -460)
             }
             .background {
                 GeometryReader { g in
