@@ -221,7 +221,7 @@ let joePCPinnedStripThreshold: CGFloat = 330
 /// tail) instead of a fixed length — short title, short streak; long title,
 /// long streak. ("làm nó dạng fade theo độ dài của chữ title")
 struct JoePCStripTextWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
