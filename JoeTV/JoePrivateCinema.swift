@@ -168,8 +168,10 @@ struct JoeCinemaStreak: View {
                 LinearGradient(stops: [
                     Gradient.Stop(color: .black, location: 0),
                     Gradient.Stop(color: .black, location: solid),
-                    Gradient.Stop(color: .black.opacity(0.55), location: solid + 0.45 * tailFrac),
+                    Gradient.Stop(color: .black.opacity(0.72), location: solid + 0.30 * tailFrac),
+                    Gradient.Stop(color: .black.opacity(0.45), location: solid + 0.55 * tailFrac),
                     Gradient.Stop(color: .black.opacity(0.22), location: solid + 0.78 * tailFrac),
+                    Gradient.Stop(color: .black.opacity(0.08), location: solid + 0.92 * tailFrac),
                     Gradient.Stop(color: .clear, location: 1),
                 ], startPoint: .leading, endPoint: .trailing)
             }
@@ -270,8 +272,10 @@ private struct JoePCPinnedBandCover: ViewModifier {
                             LinearGradient(stops: [
                                 Gradient.Stop(color: .black, location: 0),
                                 Gradient.Stop(color: .black, location: solidAt),
-                                Gradient.Stop(color: .black.opacity(0.55), location: solidAt + 0.45 * fadeSpan),
+                                Gradient.Stop(color: .black.opacity(0.72), location: solidAt + 0.30 * fadeSpan),
+                                Gradient.Stop(color: .black.opacity(0.45), location: solidAt + 0.55 * fadeSpan),
                                 Gradient.Stop(color: .black.opacity(0.22), location: solidAt + 0.78 * fadeSpan),
+                                Gradient.Stop(color: .black.opacity(0.08), location: solidAt + 0.92 * fadeSpan),
                                 Gradient.Stop(color: .clear, location: 1),
                             ], startPoint: .leading, endPoint: .trailing)
                         }
@@ -281,7 +285,8 @@ private struct JoePCPinnedBandCover: ViewModifier {
                             // posters below the pinned strip.
                             LinearGradient(stops: [
                                 Gradient.Stop(color: .black, location: 0),
-                                Gradient.Stop(color: .black, location: 0.78),
+                                Gradient.Stop(color: .black, location: 0.70),
+                                Gradient.Stop(color: .black.opacity(0.5), location: 0.88),
                                 Gradient.Stop(color: .clear, location: 1),
                             ], startPoint: .top, endPoint: .bottom)
                         }
