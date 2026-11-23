@@ -1336,6 +1336,12 @@ struct JoeTorrentHome: View {
                     .padding(.leading, -100)
                     .padding(.trailing, -560)
             }
+            .background {
+                GeometryReader { g in
+                    Color.clear
+                        .preference(key: JoePCStripTextWidthKey.self, value: g.size.width)
+                }
+            }
         }
         .padding(.leading, 14)
         .padding(.trailing, 14)

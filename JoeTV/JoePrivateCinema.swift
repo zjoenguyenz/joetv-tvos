@@ -216,13 +216,24 @@ struct JoeCinemaGlass: View {
 
 let joePCPinnedStripThreshold: CGFloat = 330
 
+/// Cách C2 (owner, 2026-11-23): the strip publishes the measured width of its
+/// text block; the pinned cover sizes its streak from that number (+ a fade
+/// tail) instead of a fixed length — short title, short streak; long title,
+/// long streak. ("làm nó dạng fade theo độ dài của chữ title")
+struct JoePCStripTextWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct JoePCPinnedBandCover: ViewModifier {
     @Environment(\.joeTheme) private var theme
 
     @ViewBuilder
     func body(content: Content) -> some View {
         if theme.id == .privateCinema {
-            content.background(alignment: .topLeading) {
+            content.backgroundPreferenceValue(JoePCStripTextWidthKey.self) { textW in
                 GeometryReader { geo in
                     let frame = geo.frame(in: .global)
                     let pinned = frame.minY <= joePCPinnedStripThreshold
@@ -232,17 +243,25 @@ private struct JoePCPinnedBandCover: ViewModifier {
                     // streak — frosted glass from the left edge, solid
                     // across the longest-title zone, then a long soft fade
                     // to nothing. No right patch, no full-width slab.
+                    // Cách C2: streak length follows the measured title —
+                    // solid from the screen edge to the end of the text
+                    // block (frame.minX + the strip's 14pt leading pad +
+                    // textW), then the fade tail; fixed 1560/0.60 only as
+                    // the pre-measure fallback.
+                    let textEnd = frame.minX + 14 + textW
+                    let streakW = textW > 0 ? min(1920, textEnd + 480) : 1560
+                    let solidAt = textW > 0 ? min(0.85, textEnd / streakW) : 0.60
                     JoeCinemaGlass(frosted: true)
                         .overlay(alignment: .bottom) {
                             theme.bg.opacity(pinned ? 0.5 : 0)
                                 .frame(height: frame.height)
                         }
-                        .frame(width: 1560,
+                        .frame(width: streakW,
                                height: pinned ? above + frame.height : 0)
                         .mask {
                             LinearGradient(stops: [
                                 Gradient.Stop(color: .black, location: 0),
-                                Gradient.Stop(color: .black, location: 0.60),
+                                Gradient.Stop(color: .black, location: solidAt),
                                 Gradient.Stop(color: .clear, location: 1),
                             ], startPoint: .leading, endPoint: .trailing)
                         }
