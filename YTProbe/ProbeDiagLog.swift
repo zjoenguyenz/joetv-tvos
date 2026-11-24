@@ -233,10 +233,17 @@ enum DiagLog {
 
 // MARK: - LAN export server
 //
-// JoeTV's DiagLogServer, carried over with only names
-// and the download filename changed: ONE app-lifetime
-// instance on port 18080, a one-time 4-digit PIN minted
-// per listener, 3 wrong PINs stop it for 60 seconds.
+// JoeTV's DiagLogServer, carried over with names and
+// the download filename changed, plus ONE deliberate
+// deviation: JoeTV binds fixed port 18080, this probe
+// binds port 0 (the OS assigns a free port) so the two
+// apps can never collide on 18080 — device-proven
+// 2026-11-24: with JoeTV's server still holding 18080,
+// the probe's bind died with NWError 48 (Address
+// already in use) and the log could not be exported.
+// The serving URL is built from listener.port, so it
+// carries the assigned port. A one-time 4-digit PIN is
+// minted per listener, 3 wrong PINs stop it for 60s.
 // The class is @MainActor; Network.framework handlers
 // are @Sendable closures that hop straight back to the
 // main actor before touching state (see JoeTV's file
@@ -291,7 +298,7 @@ final class DiagLogServer {
         pin = String(format: "%04d", Int.random(in: 0...9999))
         failedAttempts = 0
         emit(.starting)
-        guard let port = NWEndpoint.Port(rawValue: 18080) else {
+        guard let port = NWEndpoint.Port(rawValue: 0) else {
             emit(.failed("Không mở được kênh gửi log (cổng không hợp lệ)."))
             return
         }
