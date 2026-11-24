@@ -363,7 +363,9 @@ struct JoeRootView: View {
     /// the whole v2.0.1 round, so the owner's defect photos
     /// could not establish which build his TV was running.
     static var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
     }
 
     /// S1.1 (freeze audit, 2026-11-15): search lives INSIDE the
