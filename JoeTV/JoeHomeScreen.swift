@@ -1144,9 +1144,9 @@ struct JoeHomeScreen: View {
             .shadow(color: .black.opacity(0.35), radius: 5, x: 0, y: 2)
             .background(alignment: .leading) {
                 JoeCinemaStreak()
-                    .padding(.vertical, -36)
-                    .padding(.leading, -130)
-                    .padding(.trailing, -400)
+                    .padding(.vertical, -70)
+                    .padding(.leading, -170)
+                    .padding(.trailing, -440)
             }
             .background {
                 GeometryReader { g in

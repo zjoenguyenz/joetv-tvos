@@ -158,8 +158,8 @@ struct JoeCinemaStreak: View {
         // (the residual 7% in the owner's photo: text washed out where
         // it crossed bright poster art).
         Ellipse()
-            .fill(theme.bg.opacity(0.55))
-            .blur(radius: 55)
+            .fill(Color.black.opacity(0.82))
+            .blur(radius: 28)
             .allowsHitTesting(false)
     }
 }
@@ -233,7 +233,7 @@ private struct JoePCPinnedBandCover: ViewModifier {
                     // textW), then the fade tail; fixed 1560/0.60 only as
                     // the pre-measure fallback.
                     let textEnd = frame.minX + 14 + textW
-                    let ellipseW = textW > 0 ? textEnd + 340 : 1900
+                    let ellipseW = textW > 0 ? textEnd + 420 : 1980
                     // Cách D: the pinned state is the same ellipse idea,
                     // stronger — a blurred dark halo centred on the strip
                     // text zone, sized from the measured title (Cách C2's
@@ -244,10 +244,10 @@ private struct JoePCPinnedBandCover: ViewModifier {
                         Color.clear
                         if pinned {
                             Ellipse()
-                                .fill(theme.bg.opacity(0.62))
-                                .blur(radius: 60)
-                                .frame(width: ellipseW, height: frame.height + 200)
-                                .offset(x: -150, y: 70)
+                                .fill(Color.black.opacity(0.85))
+                                .blur(radius: 30)
+                                .frame(width: ellipseW, height: frame.height + 280)
+                                .offset(x: -170, y: 80)
                         }
                     }
                     .frame(width: 1920,
