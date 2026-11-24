@@ -85,6 +85,29 @@ struct JoeYtClientSpec: Sendable {
         deviceModel: "iPhone16,2",
         osName: "iPhone",
         osVersion: "18.3.2.22D82")
+
+    /// YT-403 fix, round 2 (2026-11-23): the visionOS
+    /// client (yt-dlp master, INNERTUBE_CLIENTS
+    /// ['visionos']). On device the IOS client + the
+    /// owner's bearer token is refused at /player with
+    /// HTTP 400 (DiagLog 22:41 — every iOS call), while
+    /// the same token serves TVHTML5 fine; the bench
+    /// (docs/yt403, anonymous, public video) measured
+    /// this client's segments at 206 on every range
+    /// with no PO token. It carries no muxed itag 18 —
+    /// the assembly pair is its only construction.
+    /// Its API key is YouTube's PUBLIC web key (the
+    /// fallback key for clients without their own).
+    static let visionos = JoeYtClientSpec(
+        clientName: "VISIONOS",
+        clientVersion: "1.02",
+        clientNumber: "101",
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+        apiKey: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+        deviceMake: "Apple",
+        deviceModel: "RealityDevice17,1",
+        osName: "visionOS",
+        osVersion: "26.5.23O471")
 }
 
 // MARK: Format model (Sendable by construction)
@@ -243,15 +266,23 @@ actor JoeYtResolver {
     // MARK: Entry point
 
     func resolve(videoId: String) async -> JoeYtResolveResult {
-        // YT-403 (2026-11-23): try the iOS client first —
-        // its segment URLs still fetch; the TV client's
-        // are refused wholesale by googlevideo. Any
-        // non-playable outcome retries ONCE as tvSamsung
-        // (the pre-fix behaviour, unchanged below).
-        let first = await resolveAttempt(videoId: videoId, spec: .ios)
-        if case .playable = first { return first }
-        log("resolve vid=\(videoId): client IOS không cho playable — thử lại client TVHTML5")
-        return await resolveAttempt(videoId: videoId, spec: .tvSamsung)
+        // YT-403 (2026-11-23): walk a client chain —
+        // visionOS first (segments measured clean in
+        // the bench), then iOS, then the original
+        // TVHTML5 (whose resolve still works but whose
+        // segments googlevideo refuses wholesale). The
+        // first playable wins; its UA rides the
+        // playable into the relay.
+        let chain: [JoeYtClientSpec] = [.visionos, .ios, .tvSamsung]
+        var last: JoeYtResolveResult = .needsIdentity
+        for (index, spec) in chain.enumerated() {
+            last = await resolveAttempt(videoId: videoId, spec: spec)
+            if case .playable = last { return last }
+            if index < chain.count - 1 {
+                log("resolve vid=\(videoId): client \(spec.clientName) không cho playable — thử client \(chain[index + 1].clientName)")
+            }
+        }
+        return last
     }
 
     private func resolveAttempt(videoId: String,
@@ -293,7 +324,8 @@ actor JoeYtResolver {
                 log("resolve vid=\(videoId): /player lỗi mạng (không có HTTP response)")
                 return .transportFailure(message: "Không gọi được YouTube (mạng).")
             }
-            log("resolve vid=\(videoId): /player HTTP \(call.http)")
+            let apiError = (call.json?["error"] as? [String: Any])?["message"] as? String ?? ""
+            log("resolve vid=\(videoId): /player HTTP \(call.http) client=\(spec.clientName)\(apiError.isEmpty ? "" : " — \(apiError)")")
             return .httpFailure(status: call.http)
         }
 
