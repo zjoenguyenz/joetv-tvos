@@ -80,7 +80,7 @@ struct JoeYtClientSpec: Sendable {
         clientVersion: "21.26.4",
         clientNumber: "5",
         userAgent: "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
-        apiKey: <redacted>
+        apiKey: "AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc",
         deviceMake: "Apple",
         deviceModel: "iPhone16,2",
         osName: "iPhone",
