@@ -62,6 +62,29 @@ struct JoeYtClientSpec: Sendable {
         deviceModel: "UKS9800",
         osName: "Tizen",
         osVersion: "2.4.0")
+
+    /// YT-403 fix (2026-11-23): the iOS app client
+    /// (yt-dlp master, INNERTUBE_CLIENTS['ios'] — the
+    /// spec leader-verified live: /player OK + formats
+    /// returned). googlevideo began refusing EVERY
+    /// segment the tv_samsung client produces (403 on
+    /// adaptive and muxed alike, DiagLog 2026-11-23
+    /// 21:41) while the iOS client's media still
+    /// fetches — so resolve tries this client FIRST
+    /// and keeps tvSamsung as the fallback. Its API
+    /// key is the iOS client's PUBLIC InnerTube key,
+    /// shipped in every YouTube iOS app; not an
+    /// account credential.
+    static let ios = JoeYtClientSpec(
+        clientName: "IOS",
+        clientVersion: "21.26.4",
+        clientNumber: "5",
+        userAgent: "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+        apiKey: <redacted>
+        deviceMake: "Apple",
+        deviceModel: "iPhone16,2",
+        osName: "iPhone",
+        osVersion: "18.3.2.22D82")
 }
 
 // MARK: Format model (Sendable by construction)
@@ -106,6 +129,13 @@ struct JoeYtPlayable: Sendable {
         case hlsManifest
     }
     var kind: Kind
+    /// The User-Agent of the client whose /player call
+    /// produced these URLs. The HLS relay must fetch
+    /// segments AS THAT CLIENT (googlevideo binds the
+    /// URLs to it); stamped by the resolver on every
+    /// playable it returns. Defaults to the TV client
+    /// for any playable built outside the resolver.
+    var clientUserAgent: String = JoeYtClientSpec.tvSamsung.userAgent
     /// Assembly inputs (kind == .assembly).
     var videoURL: URL?
     var audioURL: URL?
@@ -192,8 +222,6 @@ enum JoeYtResolveResult: Sendable {
 actor JoeYtResolver {
     static let shared = JoeYtResolver()
 
-    private let spec = JoeYtClientSpec.tvSamsung
-
     /// Session cache of the fetched player JS (the file
     /// is ~2.5 MB and its hash rotates rarely; the FETCH
     /// is cached, the solve still runs per resolve —
@@ -215,19 +243,32 @@ actor JoeYtResolver {
     // MARK: Entry point
 
     func resolve(videoId: String) async -> JoeYtResolveResult {
+        // YT-403 (2026-11-23): try the iOS client first —
+        // its segment URLs still fetch; the TV client's
+        // are refused wholesale by googlevideo. Any
+        // non-playable outcome retries ONCE as tvSamsung
+        // (the pre-fix behaviour, unchanged below).
+        let first = await resolveAttempt(videoId: videoId, spec: .ios)
+        if case .playable = first { return first }
+        log("resolve vid=\(videoId): client IOS không cho playable — thử lại client TVHTML5")
+        return await resolveAttempt(videoId: videoId, spec: .tvSamsung)
+    }
+
+    private func resolveAttempt(videoId: String,
+                                spec: JoeYtClientSpec) async -> JoeYtResolveResult {
         let identity = await JoeYtIdentity.shared
         guard let initial = await identity.validAccessToken() else {
             log("resolve vid=\(videoId): không có access token dùng được → needsIdentity")
             return .needsIdentity
         }
         var token = initial
-        var call = await callPlayer(token: token, videoId: videoId)
+        var call = await callPlayer(token: token, videoId: videoId, spec: spec)
         if call.http == 401 {
             log("resolve vid=\(videoId): /player HTTP 401 — thử refresh 1 lần")
             var retried = false
             if let refreshed = await identity.refreshAccessToken() {
                 token = refreshed
-                call = await callPlayer(token: token, videoId: videoId)
+                call = await callPlayer(token: token, videoId: videoId, spec: spec)
                 retried = true
             }
             if retried, call.http == 401 {
@@ -290,7 +331,7 @@ actor JoeYtResolver {
         // 135+140 with no way to tell which.
         let censusList = all.map { $0.itag }.sorted()
             .map { String($0) }.joined(separator: ",")
-        log("resolve vid=\(videoId): /player \(call.ms)ms playability=OK formats=\(all.count) ciphered=\(cipheredCount)")
+        log("resolve vid=\(videoId): /player \(call.ms)ms client=\(spec.clientName) playability=OK formats=\(all.count) ciphered=\(cipheredCount)")
 
         // FL-350 (2.0.45, leg 2): the caption inventory —
         // parsed HERE, at the same parse point, and
@@ -309,6 +350,7 @@ actor JoeYtResolver {
             // fired — it is per-resolve evidence.
             log("resolve vid=\(videoId): response có HLS manifest — dùng thẳng, census=[\(censusList)]")
             var playable = JoeYtPlayable(kind: .hlsManifest)
+            playable.clientUserAgent = spec.userAgent
             playable.directURL = hlsURL
             return .playable(playable, metrics)
         }
@@ -473,6 +515,7 @@ actor JoeYtResolver {
            let videoURL = solvedURLs[video.itag],
            let audioURL = solvedURLs[audio.itag] {
             var playable = JoeYtPlayable(kind: .assembly)
+            playable.clientUserAgent = spec.userAgent
             playable.videoURL = videoURL
             playable.audioURL = audioURL
             playable.videoInitRange = videoInit
@@ -500,6 +543,7 @@ actor JoeYtResolver {
         }
         if let muxedFallback, let url = solvedURLs[muxedFallback.itag] {
             var playable = JoeYtPlayable(kind: .muxed)
+            playable.clientUserAgent = spec.userAgent
             playable.directURL = url
             playable.videoItag = muxedFallback.itag
             playable.width = muxedFallback.width
@@ -606,7 +650,8 @@ actor JoeYtResolver {
     // MARK: /player call (Probe 16's shape, verbatim)
 
     private func callPlayer(token: String,
-                            videoId: String) async -> (http: Int, json: [String: Any]?, ms: Int) {
+                            videoId: String,
+                            spec: JoeYtClientSpec) async -> (http: Int, json: [String: Any]?, ms: Int) {
         guard let url = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=\(spec.apiKey)") else {
             return (0, nil, 0)
         }

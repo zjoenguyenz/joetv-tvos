@@ -434,7 +434,7 @@ final class JoeYtNativePlayerModel: ObservableObject {
             return (AVPlayerItem(url: url), nil, playable.height)
         case .assembly:
             if let session = await JoeYtHlsServer.shared.makeSession(
-                playable: playable, userAgent: JoeYtClientSpec.tvSamsung.userAgent) {
+                playable: playable, userAgent: playable.clientUserAgent) {
                 return (AVPlayerItem(url: session.url), session.sessionID,
                         playable.height)
             }
@@ -1725,12 +1725,29 @@ private struct JoeYtPlayerControllerView: UIViewControllerRepresentable {
     /// overlay is drawn.
     let hasNextEpisode: Bool
     let onNextEpisode: () -> Void
+    /// leader (owner 2026-11-23: Back "lúc được lúc không …
+    /// giành giựt nhau"): the transport bar's visibility,
+    /// reported up so the SwiftUI exit command can apply
+    /// the single-owner rule (see onExitCommand in
+    /// JoeYtNativePlayerView).
+    var onBarVisibility: ((Bool) -> Void)? = nil
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.showsPlaybackControls = true
-        applyMenuItems(to: controller)
+        // opt-2 (Back fix): delegate only to LOG the
+        // transport bar's announced visibility, so the next
+        // owner log shows whether a Menu press was spent by
+        // AVKit hiding its own bar. The delegate answers
+        // nothing else (no other delegate method is
+        // implemented), so AVKit's behaviour is unchanged.
+        controller.delegate = context.coordinator
+        context.coordinator.onNextEpisode = onNextEpisode
+        context.coordinator.onBarVisibility = onBarVisibility
+        applyMenuItems(to: controller, coordinator: context.coordinator)
         return controller
     }
 
@@ -1739,19 +1756,69 @@ private struct JoeYtPlayerControllerView: UIViewControllerRepresentable {
         if controller.player !== player {
             controller.player = player
         }
-        applyMenuItems(to: controller)
+        context.coordinator.onNextEpisode = onNextEpisode
+        context.coordinator.onBarVisibility = onBarVisibility
+        applyMenuItems(to: controller, coordinator: context.coordinator)
     }
 
-    private func applyMenuItems(to controller: AVPlayerViewController) {
+    /// opt-2 (Back fix, owner 2026-11-22: "mở tvb phim
+    /// chạy thì sẽ không bấm được nút back, bấm 3-4 lần nó
+    /// mới work"): pre-fix this re-ASSIGNED a brand-new
+    /// `[UIAction]` to transportBarCustomMenuItems on EVERY
+    /// SwiftUI update of the player view — each phase flip,
+    /// each status-pill flash/clear, each WatchStore
+    /// progress publish (the view observes WatchStore) —
+    /// i.e. several AVKit transport-bar rebuilds in the
+    /// first seconds of every episode, exactly the window
+    /// in which the owner's Menu presses went unanswered.
+    /// The normal-film AVPlayerViewController host (whose
+    /// update is empty) never does this, and its Back is
+    /// device-proven. Now the items are assigned only when
+    /// the item's PRESENCE changes; the action calls
+    /// through the coordinator, so it always runs the
+    /// latest closure. Same bar, same title, same action.
+    private func applyMenuItems(to controller: AVPlayerViewController,
+                                coordinator: Coordinator) {
+        guard coordinator.appliedHasNext != hasNextEpisode else { return }
+        coordinator.appliedHasNext = hasNextEpisode
         if hasNextEpisode {
             controller.transportBarCustomMenuItems = [
-                UIAction(title: "Tập tiếp theo") { _ in onNextEpisode() }
+                UIAction(title: "Tập tiếp theo") { [weak coordinator] _ in
+                    // UIKit runs action handlers on main;
+                    // assumeIsolated states that for the
+                    // @MainActor coordinator under Swift 6.
+                    MainActor.assumeIsolated {
+                        coordinator?.onNextEpisode?()
+                    }
+                }
             ]
         } else if !controller.transportBarCustomMenuItems.isEmpty {
             controller.transportBarCustomMenuItems = []
         }
     }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        /// nil = nothing assigned yet (first apply always runs).
+        var appliedHasNext: Bool?
+        var onNextEpisode: (() -> Void)?
+        var onBarVisibility: ((Bool) -> Void)?
+
+        func playerViewController(
+            _ playerViewController: AVPlayerViewController,
+            willTransitionToVisibilityOfTransportBar visible: Bool,
+            with _: AVPlayerViewControllerAnimationCoordinator
+        ) {
+            DiagLog.write("YT-PLAY", "transport bar \(visible ? "hiện" : "ẩn")")
+            onBarVisibility?(visible)
+        }
+    }
 }
+
+/// Swift 6: the same SE-0470 main-actor isolated
+/// conformance PlayerController.Coordinator uses (see the
+/// note there) — AVKit calls the delegate on main only.
+extension JoeYtPlayerControllerView.Coordinator: @MainActor AVPlayerViewControllerDelegate {}
 
 // MARK: - Player view
 
@@ -1765,6 +1832,10 @@ struct JoeYtNativePlayerView: View {
     @EnvironmentObject private var watch: WatchStore
     @Environment(\.joeTheme) private var theme
     @StateObject private var model: JoeYtNativePlayerModel
+    /// leader: last transport-bar visibility AVKit
+    /// announced (the bar announces "hiện" as the player
+    /// opens, so the initial value is true).
+    @State private var transportBarVisible = true
     @FocusState private var retryFocused: Bool
     /// FL-353 sweep (2.0.45 gate round 5, C5-3): the end
     /// slate's back button focus.
@@ -1792,7 +1863,8 @@ struct JoeYtNativePlayerView: View {
                 JoeYtPlayerControllerView(
                     player: model.player,
                     hasNextEpisode: model.hasNextEpisode,
-                    onNextEpisode: { model.requestAdvance(trigger: "menu") })
+                    onNextEpisode: { model.requestAdvance(trigger: "menu") },
+                    onBarVisibility: { transportBarVisible = $0 })
                     .ignoresSafeArea()
             }
             if model.phase == .starting {
@@ -1815,8 +1887,28 @@ struct JoeYtNativePlayerView: View {
         .onExitCommand {
             if model.phase == .ended {
                 DiagLog.write("YT-PLAY", "slate end — về detail (trigger=menu)")
+                nav.ytPlayer = nil
+            } else if (model.phase == .starting || model.phase == .playing)
+                        && transportBarVisible {
+                // leader (owner 2026-11-23: Back better but
+                // "lúc được lúc không … giành giựt nhau";
+                // run45 log: a press at 23:49:03 closed the
+                // player while the bar was still up, while
+                // the platform rule spends that press on
+                // hiding the bar): SINGLE OWNER — while the
+                // transport bar is up, the Menu press belongs
+                // to the bar (AVKit hides it; the delegate
+                // flips transportBarVisible) and must NOT
+                // also exit. While the bar is down, one press
+                // exits. One press, one deterministic result.
+                DiagLog.write("YT-PLAY", "menu → giữ player (thanh đang hiện — lần bấm này của thanh)")
+            } else {
+                // opt-2: the exit itself was never logged —
+                // the 2026-11-22 owner log could not show
+                // which press finally reached this handler.
+                DiagLog.write("YT-PLAY", "menu → đóng player (trigger=menu)")
+                nav.ytPlayer = nil
             }
-            nav.ytPlayer = nil
         }
         .onAppear {
             model.attachStore(watch)
