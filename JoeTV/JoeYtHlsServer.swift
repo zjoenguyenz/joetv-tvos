@@ -291,16 +291,16 @@ final class JoeYtHlsServer {
                                       port: endpointPort,
                                       using: .tcp)
         let label = String(sessionID.prefix(8))
-        connection.stateUpdateHandler = { [weak self] state in
+        connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                self?.log("loopback self-probe session \(label): OK — 127.0.0.1:\(port) nhận kết nối")
+                DiagLog.write("YT-HLS", "loopback self-probe session \(label): OK — 127.0.0.1:\(port) nhận kết nối")
                 connection.cancel()
             case .waiting(let error):
-                self?.log("loopback self-probe session \(label): WAITING — \(error.localizedDescription)")
+                DiagLog.write("YT-HLS", "loopback self-probe session \(label): WAITING — \(error.localizedDescription)")
                 connection.cancel()
             case .failed(let error):
-                self?.log("loopback self-probe session \(label): FAIL — \(error.localizedDescription)")
+                DiagLog.write("YT-HLS", "loopback self-probe session \(label): FAIL — \(error.localizedDescription)")
                 connection.cancel()
             default:
                 break
