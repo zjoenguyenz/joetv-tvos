@@ -454,12 +454,14 @@ static BOOL (^JoeRemotePressConsumer)(NSInteger pressType) = nil;
 // so the local main document (an HTML string, not a network
 // load) is never at the blocker's mercy; subframe documents
 // are refused by the MinterLockdown navigation policy anyway.
-// Only types that compile on every tvOS WebKit since 11 are
-// listed ("raw" covers XHR/fetch/beacons/websockets there).
+// Only the conservative core types are listed ("raw" covers
+// XHR/fetch/beacons/websockets). 0.2.1: "svg-document" and
+// "popup" dropped — if the rule compiler rejects any single
+// type, the WHOLE list fails to compile.
 static NSString * const JoeMinterBlockAllRules =
     @"[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":"
-     "[\"image\",\"style-sheet\",\"script\",\"font\",\"raw\","
-     "\"svg-document\",\"media\",\"popup\"]},"
+     "[\"image\",\"style-sheet\",\"script\",\"font\",\"media\","
+     "\"raw\"]},"
      "\"action\":{\"type\":\"block\"}}]";
 
 - (void)loadHTMLString:(NSString *)html
@@ -482,15 +484,25 @@ static NSString * const JoeMinterBlockAllRules =
     }
     JoeMsgVoidId(self.webView,
                  NSSelectorFromString(@"setCustomUserAgent:"), userAgent);
+    // Force the WebKit framework load first — the same
+    // dlopen-backed resolution +webKitAvailable performs — so
+    // the WKContentRuleListStore lookup below cannot race an
+    // unloaded framework.
+    (void)[JoeWebBridge webKitAvailable];
     Class storeClass = JoeWKClass(@"WKContentRuleListStore");
     id store = storeClass != Nil
         ? JoeMsgId0(storeClass, NSSelectorFromString(@"defaultStore"))
         : nil;
+    if (store == nil) {
+        [self.delegate joeHost:self
+            didFailLoadWithMessage:@"minter-blocker-store"];
+        return;
+    }
     SEL compileSel = NSSelectorFromString(
         @"compileContentRuleListForIdentifier:encodedContentRuleList:completionHandler:");
-    if (store == nil || ![store respondsToSelector:compileSel]) {
+    if (![store respondsToSelector:compileSel]) {
         [self.delegate joeHost:self
-            didFailLoadWithMessage:@"minter-blocker-unavailable"];
+            didFailLoadWithMessage:@"minter-blocker-selector"];
         return;
     }
     __weak JoeWebHostView *weakSelf = self;
@@ -504,10 +516,23 @@ static NSString * const JoeMinterBlockAllRules =
                 ? JoeMsgId0(config, NSSelectorFromString(@"userContentController"))
                 : nil;
             SEL addSel = NSSelectorFromString(@"addContentRuleList:");
-            if (ruleList == nil || error != nil || ucc == nil
-                || ![ucc respondsToSelector:addSel]) {
+            if (error != nil || ruleList == nil) {
+                // The compile itself failed: surface the real
+                // NSError (domain + code) in the failure code.
+                // 0.2.0 discarded it behind the generic
+                // "minter-blocker-unavailable".
+                NSString *failCode = error != nil
+                    ? [NSString stringWithFormat:
+                          @"minter-blocker-compile:%@:%ld",
+                          error.domain, (long)error.code]
+                    : @"minter-blocker-compile";
                 [strongSelf.delegate joeHost:strongSelf
-                    didFailLoadWithMessage:@"minter-blocker-unavailable"];
+                    didFailLoadWithMessage:failCode];
+                return;
+            }
+            if (ucc == nil || ![ucc respondsToSelector:addSel]) {
+                [strongSelf.delegate joeHost:strongSelf
+                    didFailLoadWithMessage:@"minter-blocker-ucc"];
                 return;
             }
             JoeMsgVoidId(ucc, addSel, ruleList);

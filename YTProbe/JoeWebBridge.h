@@ -94,8 +94,10 @@ typedef NS_ENUM(NSInteger, JoeWebNavigationMode) {
 /// compiles and installs a block-everything content rule
 /// list on this host's web view; if content blocking is
 /// unavailable the load is refused (fail closed) and
-/// -joeHost:didFailLoadWithMessage: reports
-/// "minter-blocker-unavailable". In any other navigation
+/// -joeHost:didFailLoadWithMessage: reports which stage
+/// refused: "minter-blocker-store", "minter-blocker-selector",
+/// "minter-blocker-compile:<domain>:<code>" (the real
+/// NSError) or "minter-blocker-ucc". In any other navigation
 /// mode the call is refused with "minter-mode-required".
 /// Completion arrives through the usual delegate callbacks.
 /// The host may live OFFSCREEN (never added to a window):
