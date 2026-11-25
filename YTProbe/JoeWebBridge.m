@@ -458,11 +458,108 @@ static BOOL (^JoeRemotePressConsumer)(NSInteger pressType) = nil;
 // XHR/fetch/beacons/websockets). 0.2.1: "svg-document" and
 // "popup" dropped — if the rule compiler rejects any single
 // type, the WHOLE list fails to compile.
+// 0.2.2: on device this exact list (the "full" variant below)
+// is REJECTED by tvOS's compiler (WKErrorDomain:6, run-2
+// log). It stays byte-identical as the ladder's top rung;
+// the ladder in -loadHTMLString:… bisects which content the
+// compiler refuses and loads the page with the best variant
+// that compiles.
 static NSString * const JoeMinterBlockAllRules =
     @"[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":"
      "[\"image\",\"style-sheet\",\"script\",\"font\",\"media\","
      "\"raw\"]},"
      "\"action\":{\"type\":\"block\"}}]";
+
+// One ladder variant's rule list: the same JSON shape as
+// JoeMinterBlockAllRules, with only the resource-type array
+// differing.
+static NSString *JoeMinterRulesJSON(NSArray<NSString *> *types) {
+    NSMutableArray<NSString *> *quoted = [NSMutableArray array];
+    for (NSString *type in types) {
+        [quoted addObject:[NSString stringWithFormat:@"\"%@\"", type]];
+    }
+    return [NSString stringWithFormat:
+        @"[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":"
+         "[%@]},\"action\":{\"type\":\"block\"}}]",
+        [quoted componentsJoinedByString:@","]];
+}
+
+static NSString *JoeMinterTryLine(NSString *name, NSError *error,
+                                  BOOL ok) {
+    if (ok) {
+        return [NSString stringWithFormat:@"blocker-try %@: OK", name];
+    }
+    return [NSString stringWithFormat:@"blocker-try %@: FAIL %@:%ld",
+            name,
+            error != nil ? error.domain : @"unknown",
+            error != nil ? (long)error.code : 0L];
+}
+
+// Appends ONE line to the probe's DiagLog file, in DiagLog's
+// own format ("[yyyy-MM-dd HH:mm:ss.SSS] [YT-POT] …"). The
+// bridge has no non-fatal delegate channel into DiagLog —
+// the only delegate route, didFailLoadWithMessage:, marks
+// the load failed the moment it fires, so per-variant ladder
+// results cannot ride it without killing the very load they
+// describe. This helper therefore locates the log file the
+// same way ProbeDiagLog.swift does (Application Support,
+// then Caches, then temporary) and appends directly, in the
+// same open / seek-to-end / write / close discipline DiagLog
+// itself uses. It appends ONLY when the file already exists
+// (DiagLog writes its launch lines at startup, long before
+// any mint): a missing file means the computed directory is
+// not DiagLog's, and the line is dropped rather than stranded
+// in a file nobody exports. Ladder lines carry no secrets —
+// variant names and WebKit error domains/codes only.
+static void JoeMinterDiagLog(NSString *message) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *path = nil;
+    NSArray<NSNumber *> *dirs = @[ @(NSApplicationSupportDirectory),
+                                   @(NSCachesDirectory) ];
+    for (NSNumber *dir in dirs) {
+        NSURL *base = [fm URLForDirectory:dir.unsignedIntegerValue
+                                 inDomain:NSUserDomainMask
+                        appropriateForURL:nil
+                                   create:NO
+                                    error:nil];
+        NSString *candidate = [base.path
+            stringByAppendingPathComponent:@"ytprobe-diag.log"];
+        if (candidate != nil && [fm fileExistsAtPath:candidate]) {
+            path = candidate;
+            break;
+        }
+    }
+    if (path == nil) {
+        NSString *candidate = [NSTemporaryDirectory()
+            stringByAppendingPathComponent:@"ytprobe-diag.log"];
+        if ([fm fileExistsAtPath:candidate]) {
+            path = candidate;
+        }
+    }
+    if (path == nil) { return; }
+    static NSDateFormatter *formatter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [[NSDateFormatter alloc] init];
+        formatter.locale =
+            [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+        formatter.timeZone = [NSTimeZone localTimeZone];
+    });
+    NSString *line = [NSString stringWithFormat:@"[%@] [YT-POT] %@\n",
+                      [formatter stringFromDate:[NSDate date]], message];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (handle == nil) { return; }
+    @try {
+        [handle seekToEndOfFile];
+        [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    } @catch (NSException *exception) {
+        // A failed append loses one diagnostic line, never
+        // the load: the ladder's outcome flows through the
+        // delegate exactly as before.
+    }
+    [handle closeFile];
+}
 
 - (void)loadHTMLString:(NSString *)html
          baseURLString:(NSString *)baseURLString
@@ -505,48 +602,173 @@ static NSString * const JoeMinterBlockAllRules =
             didFailLoadWithMessage:@"minter-blocker-selector"];
         return;
     }
+    // 0.2.2 BISECT LADDER: compile a series of rule-list
+    // variants — each in its own store identifier — logging
+    // EVERY result as a YT-POT DiagLog line ("blocker-try
+    // <name>: OK" / "blocker-try <name>: FAIL
+    // <domain>:<code>"), then load the page with the BEST
+    // variant that compiled, in the preference order
+    // full > noraw > union > img. The union — one list
+    // assembled from the types that compiled singly — is
+    // compiled only when it is actually needed (full and
+    // noraw both refused and at least two single types
+    // compiled). If nothing compiles, S5 fails exactly as
+    // in 0.2.1, with the full variant's real NSError in the
+    // failure code (fail closed; tokenless playback is the
+    // minter's own design from there). Compiles run one at
+    // a time, each completion hopping to the main queue as
+    // the 0.2.1 single compile did, so the log lines land
+    // in ladder order.
+    NSArray<NSString *> *singleTypes =
+        @[@"style-sheet", @"script", @"font", @"media", @"raw"];
+    NSArray<NSString *> *coreTypes =
+        @[@"image", @"style-sheet", @"script", @"font", @"media"];
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *variants =
+        [NSMutableArray array];
+    [variants addObject:@{@"name": @"img",
+                          @"json": JoeMinterRulesJSON(@[@"image"])}];
+    for (NSString *type in singleTypes) {
+        [variants addObject:@{@"name": [@"each-" stringByAppendingString:type],
+                              @"json": JoeMinterRulesJSON(@[type])}];
+    }
+    [variants addObject:@{@"name": @"noraw",
+                          @"json": JoeMinterRulesJSON(coreTypes)}];
+    [variants addObject:@{@"name": @"full",
+                          @"json": JoeMinterBlockAllRules}];
+
     __weak JoeWebHostView *weakSelf = self;
-    void (^compiled)(id, NSError *) = [^(id ruleList, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            JoeWebHostView *strongSelf = weakSelf;
-            if (strongSelf == nil || strongSelf.webView == nil) { return; }
-            id config = JoeMsgId0(strongSelf.webView,
-                                  NSSelectorFromString(@"configuration"));
-            id ucc = config != nil
-                ? JoeMsgId0(config, NSSelectorFromString(@"userContentController"))
-                : nil;
-            SEL addSel = NSSelectorFromString(@"addContentRuleList:");
-            if (error != nil || ruleList == nil) {
-                // The compile itself failed: surface the real
-                // NSError (domain + code) in the failure code.
-                // 0.2.0 discarded it behind the generic
-                // "minter-blocker-unavailable".
-                NSString *failCode = error != nil
-                    ? [NSString stringWithFormat:
-                          @"minter-blocker-compile:%@:%ld",
-                          error.domain, (long)error.code]
-                    : @"minter-blocker-compile";
-                [strongSelf.delegate joeHost:strongSelf
-                    didFailLoadWithMessage:failCode];
-                return;
-            }
-            if (ucc == nil || ![ucc respondsToSelector:addSel]) {
-                [strongSelf.delegate joeHost:strongSelf
-                    didFailLoadWithMessage:@"minter-blocker-ucc"];
-                return;
-            }
-            JoeMsgVoidId(ucc, addSel, ruleList);
-            strongSelf.minterBaseHost = baseURL.host.lowercaseString;
-            strongSelf.minterInitialLoadPending = YES;
-            ((void (*)(id, SEL, id, id))objc_msgSend)(
-                strongSelf.webView,
-                NSSelectorFromString(@"loadHTMLString:baseURL:"),
-                html, baseURL);
-        });
-    } copy];
-    ((void (*)(id, SEL, id, id, id))objc_msgSend)(
-        store, compileSel, @"joetv-minter-block-all",
-        JoeMinterBlockAllRules, compiled);
+    NSMutableDictionary<NSString *, id> *compiledLists =
+        [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSError *> *compileErrors =
+        [NSMutableDictionary dictionary];
+    // Resource types whose single-type variant compiled, in
+    // ladder order (image first, then singleTypes order) —
+    // the union list's ingredients, already canonically
+    // ordered.
+    NSMutableArray<NSString *> *okSingleTypes = [NSMutableArray array];
+
+    // Terminal step (main queue): install the chosen list
+    // and start the load exactly as the 0.2.1 success path
+    // did, or — ruleList nil — log "blocker-use NONE" and
+    // fail with the full variant's compile error.
+    void (^finishWithList)(NSString *, id) =
+            ^(NSString *name, id ruleList) {
+        JoeWebHostView *strongSelf = weakSelf;
+        if (strongSelf == nil || strongSelf.webView == nil) { return; }
+        if (ruleList == nil) {
+            JoeMinterDiagLog(@"blocker-use NONE");
+            NSError *fullError = compileErrors[@"full"];
+            NSString *failCode = fullError != nil
+                ? [NSString stringWithFormat:
+                      @"minter-blocker-compile:%@:%ld",
+                      fullError.domain, (long)fullError.code]
+                : @"minter-blocker-compile";
+            [strongSelf.delegate joeHost:strongSelf
+                didFailLoadWithMessage:failCode];
+            return;
+        }
+        JoeMinterDiagLog([NSString stringWithFormat:
+            @"blocker-use %@", name]);
+        id config = JoeMsgId0(strongSelf.webView,
+                              NSSelectorFromString(@"configuration"));
+        id ucc = config != nil
+            ? JoeMsgId0(config, NSSelectorFromString(@"userContentController"))
+            : nil;
+        SEL addSel = NSSelectorFromString(@"addContentRuleList:");
+        if (ucc == nil || ![ucc respondsToSelector:addSel]) {
+            [strongSelf.delegate joeHost:strongSelf
+                didFailLoadWithMessage:@"minter-blocker-ucc"];
+            return;
+        }
+        JoeMsgVoidId(ucc, addSel, ruleList);
+        strongSelf.minterBaseHost = baseURL.host.lowercaseString;
+        strongSelf.minterInitialLoadPending = YES;
+        ((void (*)(id, SEL, id, id))objc_msgSend)(
+            strongSelf.webView,
+            NSSelectorFromString(@"loadHTMLString:baseURL:"),
+            html, baseURL);
+    };
+
+    // Decision step (main queue): apply the preference
+    // order over the ladder's results.
+    __block void (^decide)(void) = nil;
+    decide = ^{
+        if (compiledLists[@"full"] != nil) {
+            finishWithList(@"full", compiledLists[@"full"]);
+            return;
+        }
+        if (compiledLists[@"noraw"] != nil) {
+            finishWithList(@"noraw", compiledLists[@"noraw"]);
+            return;
+        }
+        if (okSingleTypes.count >= 2) {
+            NSString *json = JoeMinterRulesJSON(okSingleTypes);
+            void (^unionDone)(id, NSError *) =
+                    ^(id ruleList, NSError *error) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    BOOL ok = (error == nil && ruleList != nil);
+                    JoeMinterDiagLog(JoeMinterTryLine(@"union",
+                                                      error, ok));
+                    if (ok) {
+                        finishWithList(@"union", ruleList);
+                    } else {
+                        finishWithList(
+                            compiledLists[@"img"] != nil ? @"img" : nil,
+                            compiledLists[@"img"]);
+                    }
+                });
+            };
+            ((void (*)(id, SEL, id, id, id))objc_msgSend)(
+                store, compileSel, @"joetv-minter-blk-union",
+                json, unionDone);
+            return;
+        }
+        if (okSingleTypes.count == 1) {
+            NSString *type = okSingleTypes.firstObject;
+            NSString *name = [type isEqualToString:@"image"]
+                ? @"img"
+                : [@"each-" stringByAppendingString:type];
+            finishWithList(name, compiledLists[name]);
+            return;
+        }
+        finishWithList(nil, nil);
+    };
+
+    // Ladder runner: one compile at a time, in variant
+    // order; each result is logged and recorded on the main
+    // queue before the next compile starts.
+    __block void (^runVariant)(NSUInteger) = nil;
+    runVariant = ^(NSUInteger idx) {
+        if (idx >= variants.count) {
+            decide();
+            return;
+        }
+        NSDictionary<NSString *, NSString *> *variant = variants[idx];
+        NSString *name = variant[@"name"];
+        NSString *identifier =
+            [@"joetv-minter-blk-" stringByAppendingString:name];
+        void (^done)(id, NSError *) = ^(id ruleList, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                BOOL ok = (error == nil && ruleList != nil);
+                JoeMinterDiagLog(JoeMinterTryLine(name, error, ok));
+                if (ok) {
+                    compiledLists[name] = ruleList;
+                    if ([name isEqualToString:@"img"]) {
+                        [okSingleTypes addObject:@"image"];
+                    } else if ([name hasPrefix:@"each-"]) {
+                        [okSingleTypes addObject:
+                            [name substringFromIndex:5]];
+                    }
+                } else if (error != nil) {
+                    compileErrors[name] = error;
+                }
+                runVariant(idx + 1);
+            });
+        };
+        ((void (*)(id, SEL, id, id, id))objc_msgSend)(
+            store, compileSel, identifier, variant[@"json"], done);
+    };
+    runVariant(0);
 }
 
 - (void)evaluateJavaScript:(NSString *)js
