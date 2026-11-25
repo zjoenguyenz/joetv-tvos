@@ -293,7 +293,7 @@ struct JoeRootView: View {
     @EnvironmentObject private var phim: PhimStore
     /// v2.0.0 (UI-5): the active design, chosen in Settings'
     /// "Giao diện" row. Default = F Bảng Nguồn (the UI-1 system).
-    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.ultra.rawValue
+    @AppStorage("joeThemeID") private var themeIDRaw = JoeThemeID.privateCinema.rawValue
     /// v2.1.1 (owner ruling): the DEFAULT theme — the theme the
     /// app OPENS in, picked in Settings' theme block (which
     /// writes this same key from JoeSettings). Distinct from
@@ -482,7 +482,20 @@ struct JoeRootView: View {
             // process; the function guards itself.
             DiagLog.logLaunchPresence()
             if !ultraMigrated {
-                themeIDRaw = JoeThemeID.ultra.rawValue
+                // v2.1.7: the v2.0.19 Ultra landing above was
+                // written for installs already carrying a
+                // stored picker choice — it applies to those
+                // exactly as before. A FRESH install has no
+                // stored "joeThemeID" at all: it takes the
+                // new no-preference fallback instead
+                // (Private Cinema, the @AppStorage default
+                // above), materialised once here so every
+                // reader of the key agrees.
+                if UserDefaults.standard.object(forKey: "joeThemeID") == nil {
+                    themeIDRaw = JoeThemeID.privateCinema.rawValue
+                } else {
+                    themeIDRaw = JoeThemeID.ultra.rawValue
+                }
                 ultraMigrated = true
             }
             // v2.1.1: the default-theme launch application —
