@@ -57,10 +57,14 @@ NS_ASSUME_NONNULL_BEGIN
 ///   (JoeYtPoMinter). EVERY navigation is cancelled — main
 ///   frame and subframes, any scheme — except the single
 ///   initial load started by -loadHTMLString:baseURLString:
-///   userAgent:, and every subresource load is blocked by a
-///   content rule list installed before that load. The page
-///   therefore performs no network I/O at all; all HTTP is
-///   native. Cancellations are silent (never an exit request).
+///   userAgent:. The page is a bundled local asset whose
+///   scripts make no network calls, so it performs no
+///   network I/O at all; all HTTP is native. (0.2.3: a
+///   WKContentRuleList was meant to block subresources too,
+///   but this tvOS refuses to compile ANY rule list for
+///   this app — WKErrorDomain:6 on every variant, probe
+///   runs 2–3 — so the navigation policy is the lockdown.)
+///   Cancellations are silent (never an exit request).
 typedef NS_ENUM(NSInteger, JoeWebNavigationMode) {
     JoeWebNavigationModePlayerLockdown = 0,
     JoeWebNavigationModeDoorRoam = 1,
@@ -90,15 +94,12 @@ typedef NS_ENUM(NSInteger, JoeWebNavigationMode) {
 - (void)loadURLString:(NSString *)urlString userAgent:(nullable NSString *)userAgent;
 /// MinterLockdown only: loads a LOCAL page (an HTML string,
 /// no network) under `baseURLString` as its origin, with
-/// `userAgent` as navigator.userAgent. Before the load it
-/// compiles and installs a block-everything content rule
-/// list on this host's web view; if content blocking is
-/// unavailable the load is refused (fail closed) and
-/// -joeHost:didFailLoadWithMessage: reports which stage
-/// refused: "minter-blocker-store", "minter-blocker-selector",
-/// "minter-blocker-compile:<domain>:<code>" (the real
-/// NSError) or "minter-blocker-ucc". In any other navigation
-/// mode the call is refused with "minter-mode-required".
+/// `userAgent` as navigator.userAgent. The load proceeds
+/// with NO content rule list (0.2.3 — the rule-list store
+/// refuses every compile on this tvOS; see the enum doc
+/// above) and is receipted in the probe's DiagLog as
+/// "blocker-use NAVPOLICY". In any other navigation mode
+/// the call is refused with "minter-mode-required".
 /// Completion arrives through the usual delegate callbacks.
 /// The host may live OFFSCREEN (never added to a window):
 /// nothing in this path needs a window.

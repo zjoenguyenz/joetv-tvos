@@ -443,13 +443,44 @@ final class DiagLogServer {
 
     private func sendAndClose(_ conn: NWConnection, payload: Data,
                               after: (@MainActor () -> Void)? = nil) {
-        conn.send(content: payload, completion: .contentProcessed {
-            [weak self] _ in
-            conn.cancel()
-            Task { @MainActor in
-                self?.connections.removeValue(
-                    forKey: ObjectIdentifier(conn))
-                after?()
+        // 0.2.3: graceful close. The payload leaves as the
+        // connection's FINAL message (the stack follows the
+        // last byte with FIN), and cancel() waits until the
+        // peer has closed its side. The 0.2.0–0.2.2 code
+        // cancelled inside the .contentProcessed completion:
+        // that callback certifies only that the local stack
+        // ACCEPTED the bytes, and the abortive cancel (RST)
+        // discards whatever a slow reader had received into
+        // its kernel buffer but not yet consumed. On device
+        // that produced exactly the split seen two nights
+        // running — a PC fetch drained the full ~32 KB
+        // instantly while iPhone Safari's download path lost
+        // the tail, its Content-Length was never satisfied,
+        // and the download spun. The response head was never
+        // the problem: Content-Length and Connection: close
+        // were always sent (see respond above).
+        conn.send(content: payload, contentContext: .finalMessage,
+                  isComplete: true, completion: .contentProcessed {
+            [weak self] sendError in
+            let cleanup = {
+                conn.cancel()
+                Task { @MainActor in
+                    self?.connections.removeValue(
+                        forKey: ObjectIdentifier(conn))
+                    after?()
+                }
+            }
+            if sendError != nil {
+                cleanup()
+                return
+            }
+            // A client that has the full body (Content-Length
+            // satisfied, FIN received) closes its side; that
+            // EOF — or any receive error — is the safe moment
+            // to tear the connection down.
+            conn.receive(minimumIncompleteLength: 1,
+                         maximumLength: 1) { _, _, _, _ in
+                cleanup()
             }
         })
     }
