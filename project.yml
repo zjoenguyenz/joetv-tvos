@@ -397,3 +397,58 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.luun.nguyen.joetv
+  # YT PROBE (2026-11-24): the standalone YT-403 research
+  # app — ONLY the YouTube stack (identity, the
+  # parameterized resolver copy, the solver bundle) plus
+  # a minimal shell. It bundles NO production tokens:
+  # its YouTube sign-in is runtime device-code OAuth.
+  # Built by .github/workflows/build-probe.yml, never by
+  # the JoeTV workflow.
+  YTProbe:
+    type: application
+    platform: tvOS
+    sources:
+      - YTProbe/YTProbeApp.swift
+      - YTProbe/ProbeDiagLog.swift
+      - YTProbe/JoeYtIdentity.swift
+      - YTProbe/ProbeResolver.swift
+      - YTProbe/ProbeRunner.swift
+      # PO-token minter (2026-11-25, SPEC §8 probe build):
+      # Claude PR #6's reviewed core, wired by ProbeResolver
+      # variant 6. JoeWebBridge is the whole ObjC bridge
+      # (mechanics only); ProbeWebSlice carries ONLY the
+      # controller + offscreen host extracted from
+      # JoeYtWeb.swift.
+      - YTProbe/JoeYtPoMinter.swift
+      - YTProbe/ProbeWebSlice.swift
+      - YTProbe/JoeWebBridge.h
+      - YTProbe/JoeWebBridge.m
+      - YTProbe/YTProbe-Bridging-Header.h
+      - path: YTProbe/po_token.html
+        buildPhase: resources
+      - path: YTProbe/yt.solver.lib.min.js
+        buildPhase: resources
+      - path: YTProbe/yt.solver.core.min.js
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.luun.nguyen.ytprobe
+        INFOPLIST_FILE: InfoYTProbe.plist
+        SWIFT_OBJC_BRIDGING_HEADER: YTProbe/YTProbe-Bridging-Header.h
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "3"
+    info:
+      path: InfoYTProbe.plist
+      properties:
+        CFBundleDisplayName: "YT Probe"
+        CFBundleName: "YT Probe"
+        CFBundleShortVersionString: "0.2.0"
+        CFBundleVersion: "3"
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # The DiagLog export serves the log file over
+        # the home LAN (tvOS has no share sheet), so the
+        # probe declares its local-network use like
+        # JoeTV does.
+        NSLocalNetworkUsageDescription: "YT Probe mở một kênh trong mạng nhà để anh tải file log chẩn đoán từ Apple TV về iPhone."
