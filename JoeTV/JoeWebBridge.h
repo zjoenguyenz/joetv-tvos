@@ -53,9 +53,22 @@ NS_ASSUME_NONNULL_BEGIN
 /// - DoorRoam: the sign-in door may roam the YouTube/Google
 ///   domains the official sign-in flow needs (design §3.2);
 ///   anything else is cancelled silently.
+/// - MinterLockdown: the PO-token minter's offscreen page
+///   (JoeYtPoMinter). EVERY navigation is cancelled — main
+///   frame and subframes, any scheme — except the single
+///   initial load started by -loadHTMLString:baseURLString:
+///   userAgent:. The page is a bundled local asset whose
+///   scripts make no network calls, so it performs no
+///   network I/O at all; all HTTP is native. (FL-491: a
+///   a content rule list was meant to block subresources too,
+///   but this tvOS refuses to compile ANY rule list for
+///   this app — WKErrorDomain:6 on every variant, probe
+///   runs 2–3 — so the navigation policy is the lockdown.)
+///   Cancellations are silent (never an exit request).
 typedef NS_ENUM(NSInteger, JoeWebNavigationMode) {
     JoeWebNavigationModePlayerLockdown = 0,
     JoeWebNavigationModeDoorRoam = 1,
+    JoeWebNavigationModeMinterLockdown = 2,
 };
 
 /// A UIView hosting one runtime-created WKWebView.
@@ -79,6 +92,20 @@ typedef NS_ENUM(NSInteger, JoeWebNavigationMode) {
 @property (nonatomic) BOOL playbackPressesEnabled;
 
 - (void)loadURLString:(NSString *)urlString userAgent:(nullable NSString *)userAgent;
+/// MinterLockdown only: loads a LOCAL page (an HTML string,
+/// no network) under `baseURLString` as its origin, with
+/// `userAgent` as navigator.userAgent. The load proceeds
+/// with NO content rule list (FL-491 — the rule-list store
+/// refuses every compile on this tvOS; see the enum doc
+/// above) and is receipted in the DiagLog as
+/// "blocker-use NAVPOLICY". In any other navigation mode
+/// the call is refused with "minter-mode-required".
+/// Completion arrives through the usual delegate callbacks.
+/// The host may live OFFSCREEN (never added to a window):
+/// nothing in this path needs a window.
+- (void)loadHTMLString:(NSString *)html
+         baseURLString:(NSString *)baseURLString
+             userAgent:(nullable NSString *)userAgent;
 - (void)evaluateJavaScript:(NSString *)js
                 completion:(nullable void (^)(NSString * _Nullable result))completion;
 /// Starts (or restarts) the poll: every `interval` seconds the

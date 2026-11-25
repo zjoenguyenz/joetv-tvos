@@ -191,6 +191,11 @@ static BOOL (^JoeRemotePressConsumer)(NSInteger pressType) = nil;
 @property (nonatomic, strong) JoeWebNavDelegate *navDelegate;
 @property (nonatomic, strong, nullable) NSTimer *pollTimer;
 @property (nonatomic, copy, nullable) NSString *pollJavaScript;
+/// MinterLockdown: YES between -loadHTMLString:… and the
+/// first main-frame policy decision for its base URL — the
+/// one navigation the mode lets through.
+@property (nonatomic) BOOL minterInitialLoadPending;
+@property (nonatomic, copy, nullable) NSString *minterBaseHost;
 - (BOOL)joe_allowNavigationAction:(id)navigationAction;
 - (void)joe_loadFinished;
 - (void)joe_loadFailedWithError:(NSError *)error;
@@ -444,6 +449,126 @@ static BOOL (^JoeRemotePressConsumer)(NSInteger pressType) = nil;
                  request);
 }
 
+// FL-491: the a content rule list blocker is GONE. On device
+// (tvOS 27.2.1, YT Probe runs 2–3) the rule-list store
+// refused to COMPILE every variant the bisect ladder
+// tried — image-only, each single resource type, no-raw,
+// full — all WKErrorDomain:6. The mechanism itself is
+// unavailable to this app on this tvOS; it was never a
+// matter of rule content. The minter page now loads with
+// NO content rule list. The lockdown is the
+// MinterLockdown navigation policy in
+// -joe_allowNavigationAction: (deny-all, fail-closed)
+// plus the page itself: a bundled local asset whose
+// scripts make no network calls — all HTTP is native,
+// exactly as in SmartTube's design.
+
+// Appends ONE line to the app's DiagLog file, in DiagLog's
+// own format ("[yyyy-MM-dd HH:mm:ss.SSS] [YT-POT] …").
+// The bridge has no non-fatal delegate channel into
+// DiagLog — the only delegate route,
+// didFailLoadWithMessage:, marks the load failed the
+// moment it fires, so a purely informational line cannot
+// ride it without killing the very load it describes.
+// This helper therefore locates the log file the same
+// way JoeDiagLog.swift does (Application Support, then
+// Caches, then temporary — the file is
+// joetv-diag.log) and appends directly, in the same
+// open / seek-to-end / write / close discipline DiagLog
+// itself uses. It appends ONLY when the file already
+// exists (DiagLog writes its launch lines at startup,
+// long before any mint): a missing file means the
+// computed directory is not DiagLog's, and the line is
+// dropped rather than stranded in a file nobody exports.
+// Lines written through it carry no secrets — a fixed
+// mode string only.
+static void JoeMinterDiagLog(NSString *message) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *path = nil;
+    NSArray<NSNumber *> *dirs = @[ @(NSApplicationSupportDirectory),
+                                   @(NSCachesDirectory) ];
+    for (NSNumber *dir in dirs) {
+        NSURL *base = [fm URLForDirectory:dir.unsignedIntegerValue
+                                 inDomain:NSUserDomainMask
+                        appropriateForURL:nil
+                                   create:NO
+                                    error:nil];
+        NSString *candidate = [base.path
+            stringByAppendingPathComponent:@"joetv-diag.log"];
+        if (candidate != nil && [fm fileExistsAtPath:candidate]) {
+            path = candidate;
+            break;
+        }
+    }
+    if (path == nil) {
+        NSString *candidate = [NSTemporaryDirectory()
+            stringByAppendingPathComponent:@"joetv-diag.log"];
+        if ([fm fileExistsAtPath:candidate]) {
+            path = candidate;
+        }
+    }
+    if (path == nil) { return; }
+    static NSDateFormatter *formatter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [[NSDateFormatter alloc] init];
+        formatter.locale =
+            [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+        formatter.timeZone = [NSTimeZone localTimeZone];
+    });
+    NSString *line = [NSString stringWithFormat:@"[%@] [YT-POT] %@\n",
+                      [formatter stringFromDate:[NSDate date]], message];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (handle == nil) { return; }
+    @try {
+        [handle seekToEndOfFile];
+        [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    } @catch (NSException *exception) {
+        // A failed append loses one diagnostic line, never
+        // the load: the load's outcome flows through the
+        // delegate exactly as before.
+    }
+    [handle closeFile];
+}
+
+- (void)loadHTMLString:(NSString *)html
+         baseURLString:(NSString *)baseURLString
+             userAgent:(nullable NSString *)userAgent {
+    if (self.webView == nil) {
+        [self.delegate joeHost:self
+            didFailLoadWithMessage:@"webview-unavailable"];
+        return;
+    }
+    if (self.navigationMode != JoeWebNavigationModeMinterLockdown) {
+        [self.delegate joeHost:self
+            didFailLoadWithMessage:@"minter-mode-required"];
+        return;
+    }
+    NSURL *baseURL = [NSURL URLWithString:baseURLString];
+    if (baseURL == nil || baseURL.host.length == 0) {
+        [self.delegate joeHost:self didFailLoadWithMessage:@"bad-url"];
+        return;
+    }
+    JoeMsgVoidId(self.webView,
+                 NSSelectorFromString(@"setCustomUserAgent:"), userAgent);
+    // No content rule list (see the note above
+    // JoeMinterDiagLog): this tvOS's the rule-list store
+    // refused to compile EVERY list the ladder tried, so
+    // the page loads under the MinterLockdown navigation
+    // policy alone. The NAVPOLICY line is the load's
+    // receipt in the exported log, written through the
+    // direct-append helper because the delegate channel
+    // is fatal-on-use.
+    JoeMinterDiagLog(@"blocker-use NAVPOLICY");
+    self.minterBaseHost = baseURL.host.lowercaseString;
+    self.minterInitialLoadPending = YES;
+    ((void (*)(id, SEL, id, id))objc_msgSend)(
+        self.webView,
+        NSSelectorFromString(@"loadHTMLString:baseURL:"),
+        html, baseURL);
+}
+
 - (void)evaluateJavaScript:(NSString *)js
                 completion:(void (^)(NSString * _Nullable))completion {
     if (self.webView == nil) {
@@ -502,6 +627,23 @@ static BOOL (^JoeRemotePressConsumer)(NSInteger pressType) = nil;
     if (targetFrame != nil) {
         isMainFrame = ((BOOL (*)(id, SEL))objc_msgSend)(
             targetFrame, NSSelectorFromString(@"isMainFrame"));
+    }
+    if (self.navigationMode == JoeWebNavigationModeMinterLockdown) {
+        // Deny-all, silently. The single exception is the
+        // local page load itself (main frame, its base host),
+        // consumed on first sight so nothing can reuse it.
+        id minterRequest = JoeMsgId0(navigationAction,
+                                     NSSelectorFromString(@"request"));
+        NSURL *minterURL = JoeMsgId0(minterRequest,
+                                     NSSelectorFromString(@"URL"));
+        NSString *minterHost = minterURL.host.lowercaseString ?: @"";
+        if (self.minterInitialLoadPending && targetFrame != nil && isMainFrame
+            && self.minterBaseHost != nil
+            && [minterHost isEqualToString:self.minterBaseHost]) {
+            self.minterInitialLoadPending = NO;
+            return YES;
+        }
+        return NO;
     }
     if (!isMainFrame) { return YES; }
     id request = JoeMsgId0(navigationAction,

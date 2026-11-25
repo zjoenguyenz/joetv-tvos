@@ -69,6 +69,13 @@ struct JoeSettingsView: View {
     /// a credential).
     @State private var previewEnabled: Bool = JoePreviewSettings.enabled
     @FocusState private var previewToggleFocused: Bool
+    /// 2.1.6 (test): the PO-token toggle's state + focus
+    /// (poTokenToggleBlock; storage is
+    /// JoeYtPoTokenSettings, written on toggle like the
+    /// preview toggle — a test-wiring preference, not a
+    /// credential).
+    @State private var poTokenEnabled: Bool = JoeYtPoTokenSettings.enabled
+    @FocusState private var poTokenToggleFocused: Bool
     /// v2.0.33: focus for the "Gửi log chẩn đoán" button
     /// (logExportBlock) and the cover it presents.
     @FocusState private var logExportFocused: Bool
@@ -268,6 +275,11 @@ struct JoeSettingsView: View {
                 // TVB Gold session row, between the credential
                 // fields and the history block.
                 tvbGoldBlock
+                    .focusSection()
+
+                // 2.1.6 (test): the PO-token switch, in its
+                // own focus section under the TVB Gold row.
+                poTokenToggleBlock
                     .focusSection()
 
                 historyBlock
@@ -1310,6 +1322,39 @@ struct JoeSettingsView: View {
                 .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
                 .foregroundStyle(theme.meta)
                 .frame(maxWidth: 1200, alignment: .leading)
+        }
+    }
+
+    /// PO Token (test) — 2.1.6 test wiring. The preview
+    /// toggle's exact shape (one Button, one
+    /// JoeSecondaryLabel naming the state; storage written
+    /// on toggle, no save() round-trip). Default ON
+    /// (JoeYtPoTokenSettings): every TVB YouTube resolve
+    /// mints (or reuses) a PO token and attaches it; OFF
+    /// restores byte-for-byte 2.1.5 resolve behaviour.
+    /// The feature is a TEST: it stays labelled as one
+    /// until the owner's verdict promotes it.
+    @ViewBuilder
+    private var poTokenToggleBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("PO Token (test)")
+                .font(theme.id == .privateCinema ? JoePCType.outfit(34, weight: .bold)
+                              : .system(size: 34, weight: .bold))
+                .foregroundStyle(theme.text)
+            Text("Tính năng thử nghiệm của bản 2.1.6: khi phát TVB YouTube, app tự đúc một PO token của YouTube và gắn vào lượt phát — đường dự phòng cho lúc YouTube siết token. Tắt đi thì app resolve đúng như bản 2.1.5.")
+                .font(theme.id == .privateCinema ? JoePCType.outfit(25) : .system(size: 25))
+                .foregroundStyle(theme.meta)
+                .frame(maxWidth: 1200, alignment: .leading)
+            Button {
+                poTokenEnabled.toggle()
+                JoeYtPoTokenSettings.enabled = poTokenEnabled
+            } label: {
+                JoeSecondaryLabel(title: poTokenEnabled
+                                  ? "PO Token (test): đang bật ✓"
+                                  : "PO Token (test): đang tắt")
+            }
+            .joeCardButton()
+            .focused($poTokenToggleFocused)
         }
     }
 

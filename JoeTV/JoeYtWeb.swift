@@ -974,6 +974,65 @@ final class JoeWebController: NSObject, JoeWebHostDelegate {
     }
 }
 
+// MARK: - PO-token minter plumbing (2.1.6 test wiring)
+
+/// The Settings switch for the PO-token test wiring
+/// (JoeSettings' "PO Token (test)" block writes it; the
+/// resolver reads it once per resolve attempt). Default
+/// ON — the owner's 2.1.6 test exercises the token; OFF
+/// restores byte-for-byte 2.1.5 resolve behaviour (SPEC
+/// §0/§8). The JoePreviewSettings storage idiom.
+enum JoeYtPoTokenSettings {
+    private static let key = "joetv.yt.poTokenEnabled"
+
+    static var enabled: Bool {
+        get {
+            UserDefaults.standard.object(forKey: key) as? Bool ?? true
+        }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
+    }
+}
+
+/// The minter's offscreen surface (PO-token SPEC §1):
+/// a JoeWebHostView created OFFSCREEN — never added to a
+/// window or a SwiftUI hierarchy — in the MinterLockdown
+/// navigation mode, kept alive by its owner
+/// (JoeYtPoMinter) for as long as the minter needs the
+/// page. The two existing surfaces (JoeWebView for the
+/// player and the door) are untouched: this type only
+/// reuses JoeWebController's delegate plumbing.
+@MainActor
+final class JoeWebOffscreenHost {
+    let controller = JoeWebController()
+    private(set) var host: JoeWebHostView?
+
+    init() {
+        // A real, non-zero frame: WebKit lays the page out
+        // against it even though no window ever shows it.
+        let host = JoeWebHostView(frame: CGRect(x: 0, y: 0, width: 1280, height: 720))
+        host.navigationMode = .minterLockdown
+        host.playbackPressesEnabled = false
+        host.delegate = controller
+        controller.host = host
+        self.host = host
+    }
+
+    /// Loads a local page (no network) as `baseURL`, with
+    /// `userAgent` as navigator.userAgent. Outcome arrives on
+    /// the controller's onFinishLoad / onFailLoad callbacks.
+    func loadLocalPage(html: String, baseURL: String, userAgent: String) {
+        host?.loadHTMLString(html, baseURLString: baseURL, userAgent: userAgent)
+    }
+
+    /// Drops the web view. Idempotent.
+    func teardown() {
+        host?.stopPolling()
+        host?.delegate = nil
+        controller.host = nil
+        host = nil
+    }
+}
+
 // MARK: - SwiftUI host
 
 struct JoeWebView: UIViewRepresentable {

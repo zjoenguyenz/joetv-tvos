@@ -320,13 +320,31 @@ actor JoeYtResolver {
         // so /player can declare its signatureTimestamp
         // the way yt-dlp does.
         let sts = await currentSignatureTimestamp(videoId: videoId)
-        var call = await callPlayer(token: token, videoId: videoId, spec: spec, sts: sts)
+        // PO token (SPEC §5; 2.1.6 test wiring): with the
+        // Settings switch ON ("PO Token (test)", default
+        // ON), mint or reuse the session token BEFORE the
+        // /player calls and thread it through both of
+        // them (and into applySolved below). Switch OFF —
+        // or a mint that fails at any step — leaves
+        // poToken nil, and every request and URL below is
+        // byte-for-byte 2.1.5 (SPEC §0, the additive
+        // law). Only the token's LENGTH is ever logged.
+        var poToken: JoeYtPoToken? = nil
+        if JoeYtPoTokenSettings.enabled {
+            poToken = await JoeYtPoMinter.shared.sessionToken()
+            if let poToken {
+                log("resolve vid=\(videoId): PO TOKEN MODE ON — token gắn ở mọi điểm SPEC §5 (len \(poToken.token.count), giá trị không ghi)")
+            } else {
+                log("resolve vid=\(videoId): PO TOKEN MODE ON — mint FAILED, resolve tiếp KHÔNG token (hành vi 2.1.5)")
+            }
+        }
+        var call = await callPlayer(token: token, videoId: videoId, spec: spec, sts: sts, poToken: poToken)
         if call.http == 401 {
             log("resolve vid=\(videoId): /player HTTP 401 — thử refresh 1 lần")
             var retried = false
             if let refreshed = await identity.refreshAccessToken() {
                 token = refreshed
-                call = await callPlayer(token: token, videoId: videoId, spec: spec, sts: sts)
+                call = await callPlayer(token: token, videoId: videoId, spec: spec, sts: sts, poToken: poToken)
                 retried = true
             }
             if retried, call.http == 401 {
@@ -506,7 +524,8 @@ actor JoeYtResolver {
         var solvedURLs: [Int: URL] = [:]
         for format in targets {
             let outcome = applySolved(format: format,
-                                      sigResults: sigResults, nResults: nResults)
+                                      sigResults: sigResults, nResults: nResults,
+                                      poToken: poToken?.token)
             switch outcome {
             case .solved(let url):
                 solvedURLs[format.itag] = url
@@ -711,7 +730,8 @@ actor JoeYtResolver {
     private func callPlayer(token: String,
                             videoId: String,
                             spec: JoeYtClientSpec,
-                            sts: Int?) async -> (http: Int, json: [String: Any]?, ms: Int) {
+                            sts: Int?,
+                            poToken: JoeYtPoToken?) async -> (http: Int, json: [String: Any]?, ms: Int) {
         guard let url = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=\(spec.apiKey)") else {
             return (0, nil, 0)
         }
@@ -729,6 +749,14 @@ actor JoeYtResolver {
         if !spec.deviceModel.isEmpty { clientContext["deviceModel"] = spec.deviceModel }
         if !spec.osName.isEmpty { clientContext["osName"] = spec.osName }
         if !spec.osVersion.isEmpty { clientContext["osVersion"] = spec.osVersion }
+        // PO token (SPEC §5.2): the living-room id rides
+        // INSIDE context.client as tvAppInfo (Player
+        // requests only — this function makes only Player
+        // requests). Sent ONLY with a token: the no-token
+        // context is byte-identical to 2.1.5.
+        if let poToken {
+            clientContext["tvAppInfo"] = ["livingRoomPoTokenId": poToken.livingRoomId]
+        }
         // YT-403 round 3: playbackContext, yt-dlp's
         // shape — html5Preference always, and the
         // current player's signatureTimestamp when it
@@ -738,13 +766,23 @@ actor JoeYtResolver {
         // (sts 20774 → 20775).
         var contentPlayback: [String: Any] = ["html5Preference": "HTML5_PREF_WANTS"]
         if let sts { contentPlayback["signatureTimestamp"] = sts }
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "videoId": videoId,
             "context": ["client": clientContext],
             "playbackContext": ["contentPlaybackContext": contentPlayback],
             "contentCheckOk": true,
             "racyCheckOk": true,
         ]
+        // PO token (SPEC §5.1 + §5.3): the token at the
+        // top level as serviceIntegrityDimensions.poToken,
+        // and the SAME /tv fetch's visitorData as a body
+        // field — both sent ONLY in token mode, so the
+        // no-token request shape stays byte-identical to
+        // 2.1.5.
+        if let poToken {
+            body["serviceIntegrityDimensions"] = ["poToken": poToken.token]
+            body["visitorData"] = poToken.visitorData
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
@@ -1113,7 +1151,8 @@ actor JoeYtResolver {
     /// value with the solver's transformed one, in place.
     private func applySolved(format: JoeYtFormat,
                              sigResults: [String: String]?,
-                             nResults: [String: String]?) -> ApplyOutcome {
+                             nResults: [String: String]?,
+                             poToken: String?) -> ApplyOutcome {
         var urlString: String
         if let rawURL = format.directURL {
             urlString = rawURL
@@ -1134,6 +1173,15 @@ actor JoeYtResolver {
             } else if nResults != nil {
                 return .failed(why: "apply: solver không có kết quả n cho itag \(format.itag)")
             }
+        }
+        // PO token (SPEC §5.4): pot= rides EVERY deciphered
+        // media URL — appended after the n replacement,
+        // before URL(string:). The token is URL-safe base64
+        // (padding retained), appended raw exactly as
+        // SmartTube appends it. Nil token = 2.1.5's URL,
+        // byte-for-byte.
+        if let poToken, !poToken.isEmpty {
+            urlString += (urlString.contains("?") ? "&" : "?") + "pot=" + poToken
         }
         guard let url = URL(string: urlString) else {
             return .failed(why: "apply: itag \(format.itag) URL sau giải mã không hợp lệ")
